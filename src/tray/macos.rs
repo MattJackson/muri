@@ -104,7 +104,9 @@ impl MacosAnchor {
     /// Set the status-item button's image from a muri [`Icon`]. PNG icons are
     /// decoded by AppKit; other kinds fall back to a text title.
     fn set_icon(&self, icon: &Icon, tooltip: Option<&str>) {
-        let Some(item) = &self.status_item else { return };
+        let Some(item) = &self.status_item else {
+            return;
+        };
         let Some(button) = item.button(self.mtm) else {
             return;
         };
@@ -307,12 +309,11 @@ impl App {
         let (Some(window), Some(surface)) = (self.window.clone(), self.surface.as_mut()) else {
             return;
         };
-        let theme = self.tray.options.theme.resolve_theme(
-            self.tray
-                .options
-                .theme
-                .wants_dark(system_is_dark),
-        );
+        let theme = self
+            .tray
+            .options
+            .theme
+            .resolve_theme(self.tray.options.theme.wants_dark(system_is_dark));
         let laid = render_menu(
             &mut self.drawer,
             &self.tray.menu,
