@@ -3,11 +3,15 @@
 Thanks for your interest in improving muri! This document explains how to build,
 test, and submit changes.
 
-muri is an early, macOS-first work in progress: the crate currently ships the
-public API surface plus a pure data-model/layout foundation, with the
-rendering and per-OS anchoring backends still `todo!()`. Contributions that
-flesh out those backends, the pure layout/theme logic, tests, and docs are all
-welcome.
+muri is an early, macOS-first work in progress. The **macOS** backend is
+functional today (real `NSStatusItem` tray, custom-drawn popup, flyout submenus,
+dark mode, keyboard navigation, and an AccessKit adapter behind the `a11y`
+feature), on top of a fully pure, unit-tested cross-platform core (menu model,
+layout, flyout placement, key-nav, theme, a11y tree). The **Windows** backend
+installs the tray icon and reports its anchor rect but still needs its popup
+event loop; the **Linux** tray path is a deliberate native-menu fallback.
+Contributions that flesh out the Windows/Linux backends, the pure core, tests,
+and docs are all welcome.
 
 ## Prerequisites
 

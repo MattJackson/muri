@@ -9,8 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt + clippy + build (macOS)
+  # macOS is the implemented backend, so it runs the full gate including tests.
+  macos:
+    name: fmt + clippy + build + test (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +26,36 @@ jobs:
         run: cargo build --all-targets
       - name: build examples
         run: cargo build --examples
+      - name: test
+        run: cargo test --all-features
+
+  # Windows/Linux backends are in progress; scope CI to compile + clippy so the
+  # cross-platform core stays green without depending on a headless popup/font
+  # environment. Promote to build+test as each backend's event loop lands.
+  cross:
+    name: check + clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: check
+        run: cargo check --all-targets --all-features
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Guard the declared MSRV (rust-version in Cargo.toml) on the implemented
+  # backend.
+  msrv:
+    name: MSRV 1.86 build (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - name: build
+        run: cargo build --all-features

@@ -38,13 +38,16 @@
 //! **keyboard navigation** ([`keynav`]) over the same hover-stack the mouse
 //! drives. muri also publishes a parallel **accessibility tree** ([`a11y`]) —
 //! [`Tray::accessibility_tree`] — mapping the menu onto menu/menuitem roles, with
-//! an AccessKit `TreeUpdate` bridge behind the `a11y` feature. The shared scene
-//! drawer, the `Flex`/`Align` flush-right layout, the flyout placement/hover-stack
-//! logic, the keyboard-nav state machine, and the a11y-tree construction are all
-//! pure and unit-tested. `Tray::open`, `ContextMenu::open_at`, the Windows/Linux
-//! backends, and attaching the AccessKit platform adapter to the event loop are
-//! still `todo!()`/follow-up. See the README for the roadmap
-//! (macOS → Windows → Linux).
+//! an AccessKit `TreeUpdate` bridge behind the `a11y` feature — and (also behind
+//! `a11y`) an `accesskit_winit` adapter attached to the popup window, so the tree
+//! is exposed to NSAccessibility / VoiceOver (a live screen-reader pass remains).
+//! The shared scene drawer, the `Flex`/`Align` flush-right layout, the flyout
+//! placement/hover-stack logic, the keyboard-nav state machine, and the a11y-tree
+//! construction are all pure and unit-tested. The **Windows** backend installs the
+//! notification-area icon and reports its anchor rect (compile-verified for
+//! `x86_64-pc-windows-msvc`); its popup event loop, plus `Tray::open` /
+//! `ContextMenu::open_at`, are still `todo!()`/follow-up. See the README for the
+//! roadmap (macOS → Windows → Linux).
 //!
 //! ## Crate layout
 //!
@@ -74,9 +77,9 @@
 //!
 //! | OS      | Tray icon | Styled anchored popup | Screen-reader a11y |
 //! |---------|-----------|-----------------------|--------------------|
-//! | macOS   | yes       | yes (NSStatusItem rect) | NSAccessibility  |
-//! | Windows | yes       | yes (`Shell_NotifyIconGetRect`) | UIA      |
-//! | Linux   | yes       | **no** — see below, native-menu fallback | AT-SPI (fallback) |
+//! | macOS   | yes | yes (`NSStatusItem` rect) | AccessKit adapter wired behind `a11y` |
+//! | Windows | in progress (icon installs) | in progress (`Shell_NotifyIconGetRect` anchor done; popup loop next) | UIA (planned) |
+//! | Linux   | fallback path | **no** — architectural; native-menu fallback | AT-SPI (planned) |
 //!
 //! **Linux caveat:** the SNI / AppIndicator tray *host* owns and draws the icon
 //! in its own process, so the app is never told the icon's on-screen rectangle
@@ -260,10 +263,20 @@ impl Tray {
         {
             crate::tray::macos::run_tray(self)
         }
-        #[cfg(not(target_os = "macos"))]
+        // Linux/Wayland cannot anchor a styled popup to the tray icon (the SNI
+        // host owns the icon and never reports its rect); say so honestly rather
+        // than panic. Callers branch to a native menu or a `ContextMenu`.
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let _ = self;
-            todo!("tray install + event loop — see the muri design doc roadmap")
+            Err(Error::Unsupported(Unsupported::TrayAnchor))
+        }
+        // Windows: the tray icon + anchor rect exist; the popup event loop is the
+        // remaining backend work.
+        #[cfg(target_os = "windows")]
+        {
+            let _ = self;
+            todo!("Windows popup event loop — see the muri design doc roadmap")
         }
     }
 }

@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/MattJackson/muri/actions/workflows/ci.yml/badge.svg)](https://github.com/MattJackson/muri/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/muri.svg)](https://crates.io/crates/muri)
+[![downloads](https://img.shields.io/crates/d/muri.svg)](https://crates.io/crates/muri)
 [![docs.rs](https://img.shields.io/docsrs/muri)](https://docs.rs/muri)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.86-blue.svg)](Cargo.toml)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/MattJackson)
 
 **Menu Utilities for Rust Interfaces** — a cross-platform, fully-styleable
 tray-icon + popup-menu system for Rust. Think "a better `muda` + `tray-icon`":
@@ -18,9 +21,16 @@ menus.
 > type-ahead) over the same hover-stack the mouse drives. muri also publishes a
 > **parallel accessibility tree** (`Tray::accessibility_tree`) that maps the menu
 > onto menu/menuitem roles with name, checked, enabled, submenu-expanded, and
-> set-position, and (behind the `a11y` feature) converts it to an AccessKit
-> `TreeUpdate` for NSAccessibility / UIA. The Windows and Linux backends, and
-> attaching the AccessKit platform adapter to the event loop, are still to come.
+> set-position, and (behind the `a11y` feature) attaches an `accesskit_winit`
+> adapter to the popup window so that tree is exposed to NSAccessibility /
+> VoiceOver (a live screen-reader validation pass is the remaining human hop). The
+> **Windows** backend so far installs the notification-area icon and reports its
+> anchor rectangle (compile-verified for `x86_64-pc-windows-msvc`); its popup
+> event loop is next. The **Linux** tray/anchor path is a deliberate fallback
+> (see below), not a styled tray popup.
+>
+> **Pre-1.0:** muri is `0.0.x`. The public API may change between releases until
+> the Windows backend lands and the surface stabilizes; pin an exact version.
 
 ## Why muri exists
 
@@ -80,7 +90,7 @@ let tray = Tray::new(Icon::from_png_bytes(include_bytes!("icon.png").as_slice())
     .menu(menu)
     .on_click(|id| handle_click(id.as_str()));
 
-// tray.run()?; // installs the tray icon + runs the event loop (not implemented yet)
+// tray.run()?; // installs the tray icon + runs the event loop (works on macOS today; Windows/Linux WIP)
 ```
 
 See [`examples/usagio_menu.rs`](examples/usagio_menu.rs) for usagio's full real
@@ -89,11 +99,18 @@ rebuilt through the API.
 
 ## Platform support (honest matrix)
 
+Legend: ✅ working · 🚧 in progress · ❌ not offered (by design).
+
 | OS      | Tray icon | Styled anchored popup | Anchoring mechanism | Screen-reader a11y |
 |---------|-----------|-----------------------|---------------------|--------------------|
-| macOS   | ✅        | ✅                    | `NSStatusItem` button rect | NSAccessibility |
-| Windows | ✅        | ✅                    | `Shell_NotifyIconGetRect`  | UIA |
-| Linux   | ✅        | ❌ (see below)        | —                   | AT-SPI (fallback path) |
+| macOS   | ✅ | ✅ `Tray::run` (real popup, flyouts, dark mode, key-nav) | `NSStatusItem` button rect | ✅ AccessKit adapter wired behind `a11y` (VoiceOver pass pending) |
+| Windows | 🚧 installs icon (`Shell_NotifyIcon`) | 🚧 anchor rect + placement done; popup event loop next | `Shell_NotifyIconGetRect` (compile-verified) | 🚧 UIA (planned via AccessKit) |
+| Linux   | 🚧 fallback path | ❌ architecturally impossible (see below) | — | 🚧 AT-SPI (fallback, planned) |
+
+The pure cross-platform core — the menu model, `Flex`/`Align` layout, flyout
+placement, keyboard-nav state machine, theme resolution, and the a11y tree — is
+platform-independent and unit-tested on every OS. What differs per OS is only the
+tray anchoring and the live popup event loop.
 
 ### The Linux caveat (read this)
 
@@ -134,8 +151,8 @@ active theme (and to the matching `NSColor` on macOS).
 
 1. **macOS backend** — `NSStatusItem`-anchored custom-drawn panel, flush
    alignment, flyout submenus, transient dismiss, dark mode, keyboard navigation,
-   and a parallel accessibility tree with an AccessKit bridge (**done**;
-   attaching the AccessKit platform adapter + a VoiceOver pass remain).
+   a parallel accessibility tree, and an attached AccessKit platform adapter
+   (**done**; a live VoiceOver validation pass on a device remains).
 2. **Windows backend** — `WS_EX_NOACTIVATE` layered window anchored via
    `Shell_NotifyIconGetRect`, theme-follow, outside-click dismiss, UIA.
 3. **Linux** — native-menu fallback + pointer-anchored `ContextMenu`; AT-SPI via

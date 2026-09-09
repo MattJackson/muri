@@ -11,10 +11,18 @@ documentation = "https://docs.rs/muri"
 readme = "README.md"
 keywords = ["tray", "menu", "statusbar", "popup", "gui"]
 categories = ["gui", "os::macos-apis"]
-authors = ["Matthew Jackson"]
+authors = ["Matthew Jackson <1085847+MattJackson@users.noreply.github.com>"]
 
 [badges]
 maintenance = { status = "actively-developed" }
+
+# docs.rs builds on Linux by default; render the docs against macOS (the backend
+# that is actually implemented) with every feature on so the full API surface —
+# including the macOS tray/popup backend and the `a11y` AccessKit bridge — shows.
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-apple-darwin"
+targets = ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 
 [dependencies]
 # Portable CPU-raster scene drawer (all permissive-licensed). These draw the
