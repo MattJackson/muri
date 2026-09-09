@@ -2,17 +2,30 @@
 
 [![CI](https://github.com/MattJackson/muri/actions/workflows/ci.yml/badge.svg)](https://github.com/MattJackson/muri/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/muri.svg)](https://crates.io/crates/muri)
-[![downloads](https://img.shields.io/crates/d/muri.svg)](https://crates.io/crates/muri)
 [![docs.rs](https://img.shields.io/docsrs/muri)](https://docs.rs/muri)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.86-blue.svg)](Cargo.toml)
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/MattJackson)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://www.rust-lang.org)
 
 **Menu Utilities for Rust Interfaces** — a cross-platform, fully-styleable
 tray-icon + popup-menu system for Rust. Think "a better `muda` + `tray-icon`":
 muri owns the tray icon, the styled popup, *and* the anchoring, and draws **one
 consistent custom appearance on every OS** instead of delegating to native
 menus.
+
+## Install
+
+muri is pre-1.0 and **not yet released on crates.io** (a `0.0.0` placeholder may
+exist as the name is reserved). Depend on it from git until the first real
+release:
+
+```toml
+[dependencies]
+# Pre-1.0 / not yet released on crates.io — use a git dependency:
+muri = { git = "https://github.com/MattJackson/muri" }
+# (with accessibility) muri = { git = "https://github.com/MattJackson/muri", features = ["a11y"] }
+# Once published on crates.io:
+# muri = "0.1"
+```
 
 > **Status: macOS-first WIP.** On **macOS** the crate draws a real styled popup:
 > `Tray::run` installs the `NSStatusItem`, opens the custom-drawn menu anchored to
@@ -64,6 +77,17 @@ platform. That single owned surface is what makes these possible:
   custom-drawn widget tree — NSAccessibility (macOS), UIA (Windows), AT-SPI
   (Linux fallback) — targeted for v1.
 - **v1 OS order:** macOS → Windows → Linux.
+
+## Feature flags
+
+muri keeps its default surface minimal; optional integrations sit behind flags.
+Only `a11y` ships today — the rest are on the roadmap and are marked honestly.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `a11y` | off | AccessKit screen-reader bridge over the raster backend (NSAccessibility / UIA / AT-SPI). Ships today; **planned to be on-by-default at 1.0**. |
+| `muda-compat` | off | A `muda` / `tray-icon` drop-in compatibility facade so existing callers can migrate with minimal churn. **Planned — lands at M3.** |
+| `serde` | off | Optional `serde` derives on the menu data model (`Menu`, `Row`, `Segment`, …). **Planned / optional** — not yet wired. |
 
 ## Quick example
 
@@ -159,13 +183,29 @@ active theme (and to the matching `NSColor` on macOS).
    AccessKit. (A `wlr-layer-shell` anchored backend is a possible future
    community opt-in, wlroots/KWin only.)
 
+## Minimum supported Rust version
+
+muri's MSRV is **1.85**. This is checked in CI. The MSRV may be *lowered* as the
+crate's dependency footprint is trimmed on the way to 1.0; any change is a
+documented, deliberate decision rather than an accident of a transitive bump.
+
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
-build/test workflow and the `fmt` + `clippy` + `test` quality gate, and
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. Security
-issues should be reported privately per [SECURITY.md](SECURITY.md). Notable
-changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+build/test workflow and the `fmt` + `clippy` + `test` + `doc` quality gate, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. CI runs on
+the `dev` → `qa` → `main` flow, so a change is validated before it reaches
+`main`.
+
+## Security
+
+To report a vulnerability, follow the private disclosure process in
+[SECURITY.md](SECURITY.md) (GitHub security advisories, or the email listed
+there). Please do not open a public issue for security reports.
+
+## Changelog
+
+Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
