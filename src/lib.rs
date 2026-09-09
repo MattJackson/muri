@@ -90,9 +90,11 @@
 #![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 #![deny(missing_docs)]
 
+pub mod a11y;
 pub mod error;
 pub mod flyout;
 pub mod geometry;
+pub mod keynav;
 pub mod layout;
 pub mod menu;
 pub mod render;
@@ -100,9 +102,11 @@ pub mod style;
 pub mod theme;
 pub mod tray;
 
+pub use a11y::{announcement, build_tree, focused_id, AxId, AxNode, AxRole, AxTree};
 pub use error::{Error, Result, Unsupported};
 pub use flyout::{next_flyout, place_flyout, FlyoutPlacement, FlyoutSide, HoverTarget};
 pub use geometry::{Edge, Insets, LogicalPoint, LogicalRect, LogicalSize};
+pub use keynav::{handle_key, FlyoutFocus, MenuFocus, NavAction, NavKey};
 pub use menu::{
     Align, ClickHandler, Flex, Icon, Item, Menu, MenuEvent, MenuId, Row, Segment, StyleRun,
 };
@@ -204,6 +208,13 @@ impl Tray {
         &self.options
     }
 
+    /// Build the [`AxTree`] the platform screen reader walks over the current
+    /// menu. The backend rebuilds this whenever the menu is (re)opened or swapped
+    /// and feeds it to the platform accessibility API (via AccessKit).
+    pub fn accessibility_tree(&self) -> AxTree {
+        a11y::build_tree(&self.menu)
+    }
+
     /// Dispatch a click to the registered handler, if any. Used by the backend
     /// when a row is activated; exposed so the data flow is testable without a
     /// live event loop.
@@ -290,6 +301,11 @@ impl ContextMenu {
     /// Borrow the options.
     pub fn menu_options(&self) -> &MenuOptions {
         &self.options
+    }
+
+    /// Build the [`AxTree`] the platform screen reader walks over this menu.
+    pub fn accessibility_tree(&self) -> AxTree {
+        a11y::build_tree(&self.menu)
     }
 
     /// Dispatch a click to the registered handler, if any.

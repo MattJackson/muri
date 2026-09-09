@@ -30,13 +30,15 @@ use objc2_foundation::{NSData, NSSize, NSString};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize as WinitLogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::error::{Error, Result};
 use crate::flyout::{next_flyout, place_flyout, HoverTarget};
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
+use crate::keynav::{handle_key, FlyoutFocus, MenuFocus, NavAction, NavKey};
 use crate::menu::{Icon, Item, Menu};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
@@ -616,6 +618,19 @@ impl ApplicationHandler<UserEvent> for App {
                     self.close_popup();
                 }
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(navkey) = translate_key(&logical_key) {
+                    self.on_key(event_loop, navkey);
+                }
+            }
             WindowEvent::RedrawRequested if is_flyout => self.redraw_flyout(),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -666,6 +681,52 @@ impl App {
         }
     }
 
+    /// Apply a keyboard-navigation key to the live popup. The pure state machine
+    /// in [`crate::keynav`] decides the transition; this only translates its
+    /// result into window operations (open/close a flyout, dispatch, dismiss) and
+    /// keeps the highlight state (`hovered`, the flyout's `hovered`) in sync so
+    /// keyboard and mouse selection agree.
+    ///
+    /// Note: driving this requires the borderless popup to receive key events; on
+    /// macOS that is device-verified interactively (the pure transitions are
+    /// covered by `keynav`'s unit tests).
+    fn on_key(&mut self, event_loop: &ActiveEventLoop, key: NavKey) {
+        let mut focus = MenuFocus {
+            top: self.hovered,
+            flyout: self.flyout.as_ref().map(|f| FlyoutFocus {
+                parent: f.parent_index,
+                child: f.hovered,
+            }),
+        };
+        let action = handle_key(&self.tray.menu, &mut focus, key);
+        self.hovered = focus.top;
+        match action {
+            NavAction::None => return,
+            NavAction::Redraw => {}
+            NavAction::OpenFlyout(i) => self.open_flyout(event_loop, i),
+            NavAction::CloseFlyout => self.close_flyout(),
+            NavAction::Activate(id) => {
+                if !id.is_none() {
+                    self.tray.dispatch(&id);
+                }
+                self.close_popup();
+                return;
+            }
+            NavAction::CloseAll => {
+                self.close_popup();
+                return;
+            }
+        }
+        // Sync the flyout child highlight and repaint the affected windows.
+        if let (Some(fly), Some(ff)) = (self.flyout.as_mut(), focus.flyout) {
+            fly.hovered = ff.child;
+            fly.window.request_redraw();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn to_logical(&self, position: PhysicalPosition<f64>) -> LogicalPoint {
         let scale = self
             .window
@@ -673,6 +734,23 @@ impl App {
             .map(|w| w.scale_factor())
             .unwrap_or(1.0);
         LogicalPoint::new((position.x / scale) as f32, (position.y / scale) as f32)
+    }
+}
+
+/// Translate a winit logical key into a muri [`NavKey`], or `None` for keys the
+/// menu ignores.
+fn translate_key(key: &Key) -> Option<NavKey> {
+    match key {
+        Key::Named(NamedKey::ArrowDown) => Some(NavKey::Down),
+        Key::Named(NamedKey::ArrowUp) => Some(NavKey::Up),
+        Key::Named(NamedKey::ArrowRight) => Some(NavKey::Right),
+        Key::Named(NamedKey::ArrowLeft) => Some(NavKey::Left),
+        Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => Some(NavKey::Activate),
+        Key::Named(NamedKey::Escape) => Some(NavKey::Escape),
+        Key::Named(NamedKey::Home) => Some(NavKey::Home),
+        Key::Named(NamedKey::End) => Some(NavKey::End),
+        Key::Character(s) => s.chars().next().map(NavKey::Char),
+        _ => None,
     }
 }
 

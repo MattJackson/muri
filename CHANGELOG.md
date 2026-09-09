@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 3 — accessibility + keyboard navigation.**
+  - Pure, tested keyboard-navigation state machine (`keynav` module): `handle_key`
+    advances a `MenuFocus` (selected top-level row + optional open-flyout child)
+    for a normalized `NavKey` and returns a `NavAction` for the backend. Arrows
+    move the highlight (wrapping, skipping separators/headers/disabled/inert
+    rows), Home/End jump to the bounds, Right/Enter open the selected submenu's
+    flyout (focusing its first child), Left/Esc pop one level (Esc at the top
+    dismisses the whole menu), Enter/Space activate a leaf row, and a typed
+    character does type-ahead to the next matching row. Exposed as `handle_key`,
+    `MenuFocus`, `FlyoutFocus`, `NavKey`, `NavAction`.
+  - Live keyboard nav wired into the macOS popup: `Tray::run` translates winit key
+    events into `NavKey`s and applies the state machine, keeping the keyboard
+    highlight in sync with the mouse hover-stack (same `hovered`/flyout state) and
+    opening/closing the real flyout window, dispatching a row's `MenuId`, or
+    dismissing accordingly. The pure transitions are unit-tested; driving it on a
+    live borderless popup is device-verified interactively.
+  - Pure, tested accessibility-tree model (`a11y` module): `build_tree` maps the
+    declarative `Menu` into a parallel `AxTree` of `AxNode`s (roles `Menu` /
+    `MenuItem` / `MenuItemCheckbox` / `GroupLabel` / `Separator`) carrying
+    accessible name, enabled, checked, `has_popup`/`expanded`, and 1-based
+    set-position among focusable siblings; `focused_id` maps a `MenuFocus` onto
+    the node the screen reader should announce; `set_expanded` keeps a submenu's
+    open state truthful; `announcement` renders the spoken string. Exposed as
+    `AxTree`, `AxNode`, `AxRole`, `AxId`, `build_tree`, `focused_id`,
+    `announcement`, plus `Tray::accessibility_tree` / `ContextMenu::accessibility_tree`.
+  - AccessKit bridge behind the `a11y` feature (`a11y::accesskit::tree_update`):
+    converts an `AxTree` + focus into an AccessKit `TreeUpdate` (the data a
+    consumer feeds to `accesskit_macos` → NSAccessibility / `accesskit_windows` →
+    UIA). The pure tree is the design's "publish a parallel accessibility tree";
+    attaching the platform adapter to the winit event loop and the VoiceOver/NVDA
+    passes remain the device-verified final hop (see the roadmap).
 - **Phase 2 — flyout submenus + render polish.**
   - Pure, tested flyout geometry (`flyout` module): `place_flyout` positions a
     child panel flush against its parent's right edge, top-aligned to the hovered
