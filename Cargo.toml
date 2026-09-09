@@ -1,0 +1,27 @@
+[package]
+name = "muri"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT"
+description = "Menu Utilities for Rust Interfaces — a cross-platform, fully-styleable tray-icon and popup-menu system (a custom-drawn muda/tray-icon replacement)."
+repository = "https://github.com/MattJackson/muri"
+homepage = "https://github.com/MattJackson/muri"
+readme = "README.md"
+keywords = ["tray", "menu", "statusbar", "popup", "gui"]
+categories = ["gui", "os"]
+authors = ["Matthew Jackson"]
+
+[dependencies]
+# The public API skeleton has no runtime dependencies yet. The rendering/
+# anchoring backends added in later phases will pull in (all permissive):
+#   winit, softbuffer, tiny-skia, cosmic-text  (portable CPU-raster drawer)
+#   objc2 / objc2-app-kit / objc2-foundation   (macOS NSStatusItem anchoring)
+#   windows / windows-sys                       (Shell_NotifyIconGetRect, layered window)
+#   accesskit                                   (screen-reader tree on the raster path)
+# They are intentionally omitted here so the API skeleton compiles instantly.
+
+[features]
+default = []
+# Screen-reader integration via AccessKit on the raster backend (see README).
+a11y = []
