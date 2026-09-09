@@ -20,7 +20,7 @@ maintenance = { status = "actively-developed" }
 # Portable CPU-raster scene drawer (all permissive-licensed). These draw the
 # menu identically on every OS and carry no windowing/GUI dependency, so the
 # offscreen render + snapshot test runs anywhere.
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 cosmic-text = "0.12"
 
 # Screen-reader bridge (optional, `a11y` feature). AccessKit's data model is a
