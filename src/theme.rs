@@ -26,9 +26,21 @@ pub enum ThemeSource {
 }
 
 impl ThemeSource {
-    /// Resolve the source to a concrete [`Theme`]. `FollowSystem` resolves to the
-    /// light theme in this pure layer; the platform backend substitutes the live
-    /// OS palette at runtime.
+    /// Decide whether the dark palette should be used, given a way to query the
+    /// live OS appearance. `FollowSystem` defers to `system_dark`; the explicit
+    /// sources ignore it. Lets the platform backend pass its own OS query.
+    pub fn wants_dark(&self, system_dark: impl Fn() -> bool) -> bool {
+        match self {
+            ThemeSource::FollowSystem => system_dark(),
+            ThemeSource::Light => false,
+            ThemeSource::Dark => true,
+            ThemeSource::Custom(_) => false,
+        }
+    }
+
+    /// Resolve the source to a concrete [`Theme`]. `FollowSystem` resolves via
+    /// the given `system_is_dark` (the platform backend passes the live OS
+    /// appearance; the pure layer passes a fixed value).
     pub fn resolve_theme(&self, system_is_dark: bool) -> Theme {
         match self {
             ThemeSource::FollowSystem => {

@@ -223,9 +223,19 @@ impl Tray {
     /// to the registered handler. On Linux this returns
     /// [`Error::Unsupported`]`(`[`Unsupported::TrayAnchor`]`)`.
     ///
-    /// Not implemented in the API skeleton.
+    /// On macOS this installs the `NSStatusItem` and runs the winit event loop.
+    /// On other platforms it is not implemented yet (Windows) / returns
+    /// [`Unsupported::TrayAnchor`] (Linux).
     pub fn run(self) -> Result<()> {
-        todo!("tray install + event loop — see the muri design doc roadmap")
+        #[cfg(target_os = "macos")]
+        {
+            crate::tray::macos::run_tray(self)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self;
+            todo!("tray install + event loop — see the muri design doc roadmap")
+        }
     }
 }
 
