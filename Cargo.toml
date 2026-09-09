@@ -17,13 +17,22 @@ authors = ["Matthew Jackson"]
 maintenance = { status = "actively-developed" }
 
 [dependencies]
-# The public API skeleton has no runtime dependencies yet. The rendering/
-# anchoring backends added in later phases will pull in (all permissive):
-#   winit, softbuffer, tiny-skia, cosmic-text  (portable CPU-raster drawer)
-#   objc2 / objc2-app-kit / objc2-foundation   (macOS NSStatusItem anchoring)
-#   windows / windows-sys                       (Shell_NotifyIconGetRect, layered window)
-#   accesskit                                   (screen-reader tree on the raster path)
-# They are intentionally omitted here so the API skeleton compiles instantly.
+# Portable CPU-raster scene drawer (all permissive-licensed). These draw the
+# menu identically on every OS and carry no windowing/GUI dependency, so the
+# offscreen render + snapshot test runs anywhere.
+tiny-skia = "0.11"
+cosmic-text = "0.12"
+
+# macOS backend: the live tray icon (NSStatusItem via objc2) and the
+# winit/softbuffer popup window the scene drawer paints into. Gated to macOS
+# because Phase 1 only implements the macOS anchoring/popup shim.
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
 
 [features]
 default = []

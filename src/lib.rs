@@ -79,7 +79,10 @@
 //!
 //! [`winit`]: https://docs.rs/winit
 
-#![forbid(unsafe_code)]
+// The macOS backend (NSStatusItem via objc2, the winit/softbuffer popup surface)
+// genuinely requires `unsafe`; the portable scene drawer and data model do not.
+// So `unsafe` is forbidden everywhere except the macOS build.
+#![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 #![deny(missing_docs)]
 
 pub mod error;
