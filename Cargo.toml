@@ -23,6 +23,12 @@ maintenance = { status = "actively-developed" }
 tiny-skia = "0.11"
 cosmic-text = "0.12"
 
+# Screen-reader bridge (optional, `a11y` feature). AccessKit's data model is a
+# pure, portable set of node/tree types; the muri `a11y` tree maps straight onto
+# it, and consumers feed the resulting `TreeUpdate` to `accesskit_macos` /
+# `accesskit_windows` (which bridge to NSAccessibility / UIA).
+accesskit = { version = "0.17", optional = true }
+
 # macOS backend: the live tray icon (NSStatusItem via objc2) and the
 # winit/softbuffer popup window the scene drawer paints into. Gated to macOS
 # because Phase 1 only implements the macOS anchoring/popup shim.
@@ -37,4 +43,4 @@ objc2-app-kit = "0.3"
 [features]
 default = []
 # Screen-reader integration via AccessKit on the raster backend (see README).
-a11y = []
+a11y = ["dep:accesskit"]

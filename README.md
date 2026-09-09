@@ -11,11 +11,16 @@ muri owns the tray icon, the styled popup, *and* the anchoring, and draws **one
 consistent custom appearance on every OS** instead of delegating to native
 menus.
 
-> **Status: early / macOS-first WIP.** This crate currently ships the **public
-> API surface only** — the types, the builder, and the documented architecture.
-> Nothing is rendered yet; methods that need a live renderer are `todo!()`. See
-> [`docs/design/muri.md` in the usagio repo](https://github.com/MattJackson/usagio)
-> for the full design and roadmap.
+> **Status: macOS-first WIP.** On **macOS** the crate draws a real styled popup:
+> `Tray::run` installs the `NSStatusItem`, opens the custom-drawn menu anchored to
+> it, opens flyout submenu panels, follows dark/light, and now supports
+> **keyboard navigation** (arrows / Home-End / Right-Left / Enter-Space / Esc /
+> type-ahead) over the same hover-stack the mouse drives. muri also publishes a
+> **parallel accessibility tree** (`Tray::accessibility_tree`) that maps the menu
+> onto menu/menuitem roles with name, checked, enabled, submenu-expanded, and
+> set-position, and (behind the `a11y` feature) converts it to an AccessKit
+> `TreeUpdate` for NSAccessibility / UIA. The Windows and Linux backends, and
+> attaching the AccessKit platform adapter to the event loop, are still to come.
 
 ## Why muri exists
 
@@ -128,7 +133,9 @@ active theme (and to the matching `NSColor` on macOS).
 ## Roadmap
 
 1. **macOS backend** — `NSStatusItem`-anchored custom-drawn panel, flush
-   alignment, submenus, transient dismiss, NSAccessibility, dark mode.
+   alignment, flyout submenus, transient dismiss, dark mode, keyboard navigation,
+   and a parallel accessibility tree with an AccessKit bridge (**done**;
+   attaching the AccessKit platform adapter + a VoiceOver pass remain).
 2. **Windows backend** — `WS_EX_NOACTIVATE` layered window anchored via
    `Shell_NotifyIconGetRect`, theme-follow, outside-click dismiss, UIA.
 3. **Linux** — native-menu fallback + pointer-anchored `ContextMenu`; AT-SPI via

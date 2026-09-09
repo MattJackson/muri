@@ -32,13 +32,18 @@
 //!
 //! ## Status
 //!
-//! **Early / macOS-first WIP.** On **macOS** the crate draws a real styled popup:
+//! **macOS-first WIP.** On **macOS** the crate draws a real styled popup:
 //! `Tray::run` installs the `NSStatusItem`, opens the custom-drawn menu anchored
-//! to it, and opens **flyout submenu** panels beside submenu rows. The shared
-//! scene drawer, the `Flex`/`Align` flush-right layout, and the flyout
-//! placement/hover-stack logic are pure and unit-tested. `Tray::open`,
-//! `ContextMenu::open_at`, the Windows/Linux backends, and screen-reader a11y are
-//! still `todo!()`/`Unsupported`. See the README for the roadmap
+//! to it, opens **flyout submenu** panels beside submenu rows, and supports
+//! **keyboard navigation** ([`keynav`]) over the same hover-stack the mouse
+//! drives. muri also publishes a parallel **accessibility tree** ([`a11y`]) —
+//! [`Tray::accessibility_tree`] — mapping the menu onto menu/menuitem roles, with
+//! an AccessKit `TreeUpdate` bridge behind the `a11y` feature. The shared scene
+//! drawer, the `Flex`/`Align` flush-right layout, the flyout placement/hover-stack
+//! logic, the keyboard-nav state machine, and the a11y-tree construction are all
+//! pure and unit-tested. `Tray::open`, `ContextMenu::open_at`, the Windows/Linux
+//! backends, and attaching the AccessKit platform adapter to the event loop are
+//! still `todo!()`/follow-up. See the README for the roadmap
 //! (macOS → Windows → Linux).
 //!
 //! ## Crate layout

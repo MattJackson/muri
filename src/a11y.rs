@@ -10,9 +10,9 @@
 //!
 //! The tree here is backend-neutral. On macOS/Windows the live backend feeds it to
 //! the platform AT through **AccessKit** (`accesskit_macos` → NSAccessibility,
-//! `accesskit_windows` → UIA); the [`accesskit`](crate::a11y::accesskit) adapter,
-//! enabled by the `a11y` feature, converts an [`AxTree`] straight into an
-//! AccessKit `TreeUpdate`. The mapping mirrors the design:
+//! `accesskit_windows` → UIA); the `a11y::accesskit` adapter module (enabled by
+//! the `a11y` feature) converts an [`AxTree`] straight into an AccessKit
+//! `TreeUpdate`. The mapping mirrors the design:
 //!
 //! - the popup → an [`AxRole::Menu`] container (`AXMenu` / UIA `Menu`);
 //! - an interactive row → an [`AxRole::MenuItem`], or [`AxRole::MenuItemCheckbox`]
@@ -24,9 +24,9 @@
 //!   [`AxRole::Menu`]'s worth of items.
 //!
 //! Keyboard navigation ([`crate::keynav`]) owns the focus; [`focused_id`] maps a
-//! [`MenuFocus`](crate::keynav::MenuFocus) onto the tree node the backend should
-//! announce, and [`announcement`] renders the human-readable string a screen
-//! reader speaks for a node.
+//! [`MenuFocus`] onto the tree node the backend should announce, and
+//! [`announcement`] renders the human-readable string a screen reader speaks for a
+//! node.
 
 use crate::keynav::MenuFocus;
 use crate::menu::{Item, Menu};
@@ -491,6 +491,26 @@ mod tests {
         assert_eq!(tree.root.children[5].expanded, Some(true));
         set_expanded(&mut tree, 5, false);
         assert_eq!(tree.root.children[5].expanded, Some(false));
+    }
+
+    #[cfg(feature = "a11y")]
+    #[test]
+    fn accesskit_update_carries_every_node_and_the_focus() {
+        use crate::keynav::FlyoutFocus;
+        let tree = build_tree(&menu());
+        let focus = MenuFocus {
+            top: Some(5),
+            flyout: Some(FlyoutFocus {
+                parent: 5,
+                child: Some(0),
+            }),
+        };
+        let fid = focused_id(&tree, &focus).unwrap();
+        let update = super::accesskit::tree_update(&tree, Some(fid));
+        // One AccessKit node per muri node, and the focus points at "One".
+        assert_eq!(update.nodes.len(), tree.node_count());
+        assert_eq!(update.focus, ::accesskit::NodeId(fid.0));
+        assert!(update.tree.is_some());
     }
 
     #[test]
