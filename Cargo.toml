@@ -7,10 +7,14 @@ license = "MIT"
 description = "Menu Utilities for Rust Interfaces — a cross-platform, fully-styleable tray-icon and popup-menu system (a custom-drawn muda/tray-icon replacement)."
 repository = "https://github.com/MattJackson/muri"
 homepage = "https://github.com/MattJackson/muri"
+documentation = "https://docs.rs/muri"
 readme = "README.md"
 keywords = ["tray", "menu", "statusbar", "popup", "gui"]
-categories = ["gui", "os"]
+categories = ["gui", "os::macos-apis"]
 authors = ["Matthew Jackson"]
+
+[badges]
+maintenance = { status = "actively-developed" }
 
 [dependencies]
 # The public API skeleton has no runtime dependencies yet. The rendering/

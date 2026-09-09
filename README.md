@@ -1,5 +1,10 @@
 # muri
 
+[![CI](https://github.com/MattJackson/muri/actions/workflows/ci.yml/badge.svg)](https://github.com/MattJackson/muri/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/muri.svg)](https://crates.io/crates/muri)
+[![docs.rs](https://img.shields.io/docsrs/muri)](https://docs.rs/muri)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Menu Utilities for Rust Interfaces** — a cross-platform, fully-styleable
 tray-icon + popup-menu system for Rust. Think "a better `muda` + `tray-icon`":
 muri owns the tray icon, the styled popup, *and* the anchoring, and draws **one
@@ -130,6 +135,18 @@ active theme (and to the matching `NSColor` on macOS).
    AccessKit. (A `wlr-layer-shell` anchored backend is a possible future
    community opt-in, wlroots/KWin only.)
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+build/test workflow and the `fmt` + `clippy` + `test` quality gate, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. Security
+issues should be reported privately per [SECURITY.md](SECURITY.md). Notable
+changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-MIT © Matthew Jackson
+Licensed under the [MIT License](LICENSE). © Matthew Jackson
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in muri by you shall be licensed as above, without any additional
+terms or conditions.
