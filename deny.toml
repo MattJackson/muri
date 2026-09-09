@@ -1,0 +1,49 @@
+# cargo-deny configuration for muri.
+#
+# Kept intentionally minimal and green: this gates `cargo deny check
+# advisories bans sources` in .github/workflows/security.yml. The license
+# allow-list is enumerated from the crate that is actually resolved for each
+# dependency (`cargo deny list --layout crate`), not guessed.
+
+[advisories]
+# Security vulnerabilities are always hard errors (cargo-deny v2 advisories:
+# there is no knob to downgrade them — which is what we want).
+#
+# Scope the "unmaintained" check to muri's own workspace so an unmaintained
+# advisory buried deep in a transitive of winit / cosmic-text / objc2 cannot
+# red-wall CI for something we cannot directly fix.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Every license that appears as the *chosen* license of a resolved crate in
+# muri's tree (macOS + Windows + Linux targets). OR-licensed crates that offer
+# a permissive option (e.g. self_cell = "Apache-2.0 OR GPL-2.0-only",
+# r-efi = "MIT OR Apache-2.0 OR LGPL-2.1-or-later") resolve to the permissive
+# side below, so GPL/LGPL never need allowing.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# muri's native-window stack carries known, benign duplicate versions
+# (objc2 0.5/0.6, block2 0.5/0.6, objc2-* 0.2/0.3 via winit vs. direct deps,
+# bitflags 1/2, ttf-parser 0.20/0.21, core-foundation, miniz_oxide, rustix,
+# linux-raw-sys, ...). Surface them for review but do not fail on them.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
