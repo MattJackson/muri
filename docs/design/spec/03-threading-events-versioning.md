@@ -86,11 +86,15 @@ the UI thread.** Windows and Linux backends must adopt the same shape (a
 
 ### The requirement
 
-Decision #1 requires muda's **global `MenuEvent` channel**. muri's shipped model
-is a **per-surface closure**. 1.0 must present both, and — critically — fold
-**native-passthrough** menu-bar events and **custom-surface** events into **one**
-channel so a migrated app's single `MenuEvent::receiver()` loop sees *all*
-activations regardless of which surface produced them.
+muri emits its **own** native events (locked decision #5 — no dependency on the muda
+crate for native events). The **native** model is per-item `.on(FnMut)` callbacks
+plus a muri event stream keyed by `MenuId` ([`01` §6](01-api-contract.md)); the
+**global `MenuEvent` channel** exists as a *projection* of those native events so the
+muda-compat drop-in works unchanged. Because muri owns emission for **all** surfaces
+it draws — the custom tray/context menus **and** the native application menu bar it
+installs (via objc2/Win32/GTK, not the muda crate) — there is **one** event source,
+and a migrated app's single `MenuEvent::receiver()` loop sees every activation with
+no cross-channel bridge (contrast the old wrapped-muda design, below).
 
 ### Specification
 
@@ -106,42 +110,40 @@ impl MenuEvent {
 
 **Dispatch contract when a row is activated (mouse / keyboard / AccessKit
 `Click`):**
-1. If the surface has an `on_click` closure, it is invoked **synchronously on the
-   UI thread** with `&MenuId`.
-2. The `MenuEvent { id }` is **also** sent to the global channel (and to
-   `set_event_handler` if installed), matching muda.
-3. Inert ids (`MenuId::none()`) fire neither.
+1. If the item has a per-item `.on(FnMut)` handler (looked up in the surface's
+   `MenuId`-keyed registry, [`01` §6](01-api-contract.md)), it is invoked
+   **synchronously on the UI thread**; likewise a surface-level `.on_event(&MenuId)`.
+2. The `MenuEvent { id }` is **also** emitted on muri's native event stream and
+   **projected** onto the global `MenuEvent::receiver()` channel (and to
+   `set_event_handler` if installed), which is what the muda-compat door reads.
+3. Inert ids (`MenuId::none()`) fire nothing.
 
-Both fire, so a consumer can use *either* style; the facade relies on (2). Ordering
-is: closure first (UI thread, synchronous), then channel send. `set_event_handler`
-mirrors muda's escape hatch for apps that forward events into their own loop
-(e.g. tao/tauri) rather than polling the receiver.
+All fire, so a native consumer uses `.on()`/the stream and a compat consumer uses
+the global channel. Ordering: per-item/surface handler first (UI thread,
+synchronous), then stream + channel. `set_event_handler` mirrors muda's escape hatch
+for apps that forward events into their own loop (e.g. tao/tauri) rather than polling
+the receiver.
 
-### Folding in native-passthrough events (the seam)
+### Native menu-bar events (decision #5 — no bridge, no wrapped muda)
 
-Menu-bar surfaces are wrapped native `muda::Menu`s (doc 02 §2). muda's *own*
-`MenuEvent::receiver()` fires when a native menu-bar item is clicked. To present
-**one** channel, the facade must **bridge** the wrapped muda's channel into
-muri's:
+The application menu bar passes through to a **native OS menu** (decision #2), but
+muri **installs and owns that native menu itself** — an `NSMenu`/`HMENU`/GTK menu
+built via objc2/windows-sys/gtk, **not** the muda crate (decision #5). Its
+target/action (or equivalent) is wired into **the same** muri dispatch path as a
+custom surface, so a menu-bar click emits on muri's native stream and the global
+channel exactly like a tray click. There is **one** emission source; the old
+"wrapped `muda::Menu` + forwarder thread bridging two channels" design is
+**eliminated**.
 
-- Option A (**chosen**): at facade init, spawn a lightweight forwarder that
-  `recv()`s on the wrapped `muda::MenuEvent::receiver()` and re-sends each event on
-  muri's global channel. Since ids are shared verbatim (doc 02 §3), the forwarded
-  `MenuEvent` is identical.
-- Consequence / hazard: **two channels exist under the hood** (native muda's and
-  muri's); the forwarder is the only place they join. It must not drop or reorder
-  events. **1.0 test gate:** a fixture with one native menu-bar item and one muri
-  tray item must deliver both activations, in order, on `muri::MenuEvent::receiver()`.
-- Alternative rejected: re-implement muda's channel — impossible without forking
-  muda's native emission. Bridging is the only faithful path.
-
-**Adversarial note for reviewers:** this bridge is the subtlest correctness risk
-in the whole compat story. A native menu-bar click and a custom-surface click take
-*completely different code paths* (one through AppKit/Win32/GTK + wrapped muda, one
-through muri's `dispatch`) yet must be indistinguishable at the receiver. Attack:
-event ordering under rapid interleaving; the forwarder thread's shutdown on app
-exit; double-emission if a consumer accidentally polls *both* muda's and muri's
-receivers.
+**Why this is simpler and safer.** The earlier plan wrapped muda, let muda emit on
+*its* channel, and bridged that into muri's — two channels joined by a forwarder
+thread, which [this doc previously] called "the subtlest correctness risk" (ordering
+under interleaving, forwarder shutdown, double-emission). Owning emission natively
+removes that seam entirely: menu-bar and custom-surface activations flow through one
+`dispatch`, so they are indistinguishable at the receiver by construction. **1.0 test
+gate (unchanged in intent):** a fixture with one native menu-bar item and one muri
+tray item delivers both activations, in order, on the single
+`muri::MenuEvent::receiver()`.
 
 ## 4. Dependencies, feature flags, MSRV
 
@@ -170,9 +172,10 @@ Windows target:
 - `crossbeam-channel` (the global `MenuEvent` channel — same crate muda uses, for
   behavioral parity).
 - `dpi` (the position type muda re-exports; pin to muda's version — doc 02 §6).
-- On Linux: a `dbusmenu` / SNI stack (e.g. `ksni` or muda-via-gtk) for the
-  native-menu fallback, plus GTK for `init_for_gtk_window` passthrough. **Version
-  stance TBD in [`22-platform-linux.md`](22-platform-linux.md).**
+- On Linux: a `dbusmenu` / SNI stack (e.g. `ksni`) for the native-menu fallback,
+  plus GTK for the `init_for_gtk_window` native menu bar — which muri builds itself
+  via GTK (decision #5: not the muda crate). **Version stance TBD in
+  [`22-platform-linux.md`](22-platform-linux.md).**
 
 **Version-pinning discipline:** `winit`, `accesskit`, and `accesskit_winit` are a
 **coupled triple** — they must be co-compatible (0.30 / 0.17 / 0.23 today). Any
@@ -185,8 +188,8 @@ together" rule.
 | Feature | Default | Pulls in | Purpose |
 |---|---|---|---|
 | *(none / core)* | — | tiny-skia, cosmic-text | pure engine + `RasterDrawer`; compiles everywhere, `forbid(unsafe_code)` off-macOS/Windows |
-| `a11y` | off | accesskit, accesskit_winit (+ platform adapters) | screen-reader bridge; **1.0-change: on by default** given decision #4 makes a11y non-optional. Kept as a flag so a size-constrained consumer can drop it, but the default flips to include it. |
-| `muda-compat` | off | crossbeam-channel, dpi, wrapped muda + gtk (Linux) | the `compat::muda` / `compat::tray_icon` facade + global `MenuEvent` channel |
+| `a11y` | **on** | accesskit, accesskit_winit (+ platform adapters) | screen-reader bridge; **on by default (locked decision #7)** — decision #4 makes a11y non-optional and a default-inaccessible drop-in would silently regress muda's free a11y. Kept as a flag so a size-constrained consumer can *opt out*, but the default includes it. |
+| `muda-compat` | off | crossbeam-channel, dpi, gtk + dbusmenu (Linux, for `init_for_gtk_window` + SNI fallback) | the `compat::muda` / `compat::tray_icon` drop-in layer + global `MenuEvent` channel. **Note (decision #5):** it does **not** pull in the `muda` crate — muri emits native events itself; the layer maps muda's *API surface* onto muri and projects events onto the global channel. |
 | `serde` (optional) | off | serde | derive on the data model for consumers that persist menus — 1.0-optional, low priority |
 
 Platform backends are selected by `cfg(target_os)`, **not** features (per the

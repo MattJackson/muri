@@ -14,33 +14,46 @@ raster surface (`winit` + `softbuffer` + `tiny-skia` + `cosmic-text`), giving th
 consumer total control of alignment, color, font, logo, and layout — identical
 across OSes.
 
-## The 1.0 north star (owner's words)
+## The 1.0 north star (owner's words) and the pivot
 
 > "Anyone on `muda` can move to muri and have their product look the **same** with
 > minimal code changes, but suddenly gain massive flexibility to change the look
 > however they want — vs 'this is what it is'."
 
-So `s/muda/muri/` should compile and look native by default, then let a consumer
-progressively restyle every pixel.
+**The design pivot:** design the **RIGHT native API for muri first** — for a *live*
+app (usagio) that rewrites its menu ~0.75s — and let muda compatibility ride on top.
+muri's own native API is the **primary, first-class** surface (a fluent
+`Menu::new().add(…)` builder, per-item styling, a retained `TrayHandle`, native
+typed events). muda-compat (`muri::compat::muda`) is a **first-class, faithful
+drop-in on-ramp** built on it: `s/muda/muri/` compiles, runs, and looks native
+(vibrancy included), preserving muda's passive event-loop model — then the consumer
+progressively adopts muri's native features.
 
-## The four locked 1.0 decisions
+## Locked 1.0 decisions
 
-These are **fixed**. The specs design *to* them; they are not relitigated here.
-Full rationale in [`00-overview.md`](00-overview.md).
+These are **fixed**. The specs design *to* them; they are not relitigated. Full
+rationale and the single source of truth are in [`00-overview.md` §4](00-overview.md).
 
-1. **muda drop-in compatibility is a hard 1.0 requirement.** 1.0 ships a
-   `muri::compat::muda` facade (same type names, builders, `MenuId`, and the
-   **global `MenuEvent` channel** semantics) plus a `Theme::native()` default, so
-   an existing muda app migrates by changing imports and looks the same.
-2. **Hybrid menu bar.** muri custom-draws tray + context + dropdown/popup menus.
-   The OS-owned **application menu bar / system menu** (which a custom renderer
-   fundamentally cannot own, especially on macOS) **passes through to the real
-   native menu**. The facade routes menu-bar surfaces to native and custom
-   surfaces to muri, transparently.
+1. **Native-first API; muda-compat is a first-class drop-in built on it** (the pivot).
+2. **Hybrid menu bar** — muri custom-draws tray/context/dropdown/popup menus; the
+   OS **application menu bar / system menu** passes through to a real native menu
+   (which muri installs itself, not via the muda crate).
 3. **All three platforms ship in 1.0**: macOS, Windows, Linux (Linux via a
-   pointer-anchored context-menu path, since tray-anchoring is unsupported there).
+   pointer-anchored context-menu path + native-menu fallback, since tray-anchoring
+   is architecturally unsupported there).
 4. **All screen readers verified in 1.0**: VoiceOver (macOS), NVDA + Narrator
    (Windows), AT-SPI / Orca (Linux).
+5. **Native events, re-implemented** — no dependency on the muda crate for native
+   events; the compat layer projects muri's native events onto the global channel.
+6. **`Theme::native()` requires real vibrancy** — macOS `NSVisualEffectView`,
+   Windows acrylic (not an opaque approximation).
+7. **`a11y` on by default** — `accesskit` is a default dependency.
+8. **N-level nested submenus** in 1.0 — the flyout is a stack, not one level.
+
+## Build handoff
+
+New to this repo and implementing 1.0? Start at [`HANDOFF.md`](HANDOFF.md) — the
+build-team kickoff, the decision log (the "why"), and the current state of the code.
 
 ## Incremental adoption (usable before 1.0)
 
@@ -70,32 +83,34 @@ menu, dropdown, flyout, menu bar, surface); and the high-level architecture
 diagram (engine core → surfaces → platform backends → facade). **Read this
 first.**
 
-#### [`01-api-contract.md`](01-api-contract.md) — muri's own native, styleable API
-The public API a consumer uses *directly* (past the facade) to reach the full
-flexibility unlock: the `Menu` / `Item` / `Row` / `Segment` data model; the
-`Style` / `Theme` / `Color` / `Font` surface (alignment, semantic vs literal
-color, fonts, logos, spacing, per-row layout, theme-follow); the surface types
-(`Tray`, `ContextMenu`, and the 1.0-new `Popup` / `Dropdown`); event delivery
-(the closure model and the global channel); ownership, lifetimes, and exact type
-signatures grounded in the shipped code.
+#### [`01-api-contract.md`](01-api-contract.md) — muri's native API (the north star)
+The **primary, first-class** public API: the fluent owned `Menu::new().add(impl
+Into<Item>)` builder; the item kinds (`Text` / `Image` / `Separator` / `Submenu` /
+`Check` / `Predefined`) with per-item modifiers (`.color`/`.align`/`.icon`/`.on`/…);
+the `MenuNode` extension seam for future/third-party rows; native typed events
+(per-item `.on()` + a muri stream, *not* muda's global channel); the retained
+`TrayHandle` for live runtime updates; N-level submenus; the `Theme` / `Color` /
+`Font` surface and the lower-level `Row`/`Segment` flush-right primitive; ownership,
+lifetimes, and exact signatures grounded in the shipped code.
 
-#### [`02-muda-compat.md`](02-muda-compat.md) — The muda facade (load-bearing)
-The critical document. Enumerates **muda's entire public API** (`Menu`,
-`Submenu`, `MenuItem`, `CheckMenuItem`, `IconMenuItem`, `PredefinedMenuItem`
-including every OS-action item, `Accelerator`, `MenuId`, `MenuEvent` + global
-receiver, the `ContextMenu` / `IsMenuItem` traits, `init_for_hwnd` /
-`init_for_nsapp` / `init_for_gtk_window`, `show_context_menu_for_*`) **and the
-`tray-icon` crate surface muri subsumes**. For each item: how the facade mirrors
-it, which surface it maps to (custom muri vs native passthrough per decision #2),
-and the exact fidelity/behavior contract. Specifies `Theme::native()` and the
-`s/muda/muri/` migration guarantee precisely, with every documented
-divergence and caveat.
+#### [`02-muda-compat.md`](02-muda-compat.md) — muda compat: the first-class drop-in on-ramp
+How `muri::compat::muda` lets an unchanged muda app change imports and **compile,
+run, and look native**, built *on top of* the native API (each muda kind maps 1:1
+onto a native constructor). Enumerates muda's public API (`Menu`, `Submenu`,
+`MenuItem`, `CheckMenuItem`, `IconMenuItem`, `PredefinedMenuItem`, `Accelerator`,
+`MenuId`, `MenuEvent` + global receiver, `ContextMenu`/`IsMenuItem`, `init_for_*`,
+`show_context_menu_for_*`) **and the `tray-icon` surface muri subsumes**; specifies
+that the layer **preserves muda's passive event-loop model** (does not force
+`Tray::run`/`TrayHandle`), the surface routing (custom muri vs native passthrough per
+decision #2), and the honest MAP / PARTIAL / CANNOT divergence register.
 
 #### [`03-threading-events-versioning.md`](03-threading-events-versioning.md) — Threading, events, versioning
 muda's threading constraints (menus/events on the main/UI thread; the global
-event channel) vs muri's threading model; event routing that folds native
-passthrough events and custom-surface events into **one unified channel** matching
-muda; the pre-1.0 early-embedder stability contract; the semver / API-stability
+event channel) vs muri's threading model; muri's native event emission for **all**
+surfaces it draws (custom + the native menu bar it installs) through **one**
+`dispatch` (decision #5 — no wrapped-muda channel, no forwarder), projected onto the
+global channel for the compat door; the pre-1.0 early-embedder stability contract;
+the semver / API-stability
 policy for 1.0; the feature-flag matrix; MSRV; dependency stance
 (winit / softbuffer / tiny-skia / cosmic-text / accesskit versions); and the error
 model.
@@ -179,13 +194,13 @@ plan (VoiceOver, NVDA, Narrator, Orca) as a 1.0 gate.
 Home/End, Right/Enter open a flyout, Left/Esc pop one level (Esc at top =
 close-all), Enter/Space activate, type-ahead by first character. Spec the
 mouse hover-stack (`flyout::next_flyout`, `HoverTarget`) and how keyboard and
-mouse share the *same* single-flyout-level focus state. Spec accelerators /
+mouse share the *same* flyout-stack focus state. Spec accelerators /
 mnemonics: display of accelerator text, in-menu mnemonic handling, and the
 explicit **non-goal** of global system hotkeys. Define type-ahead timeout /
 multi-char buffering (today it is single-char, first-letter only — a 1.0 gap).
 Define dismiss semantics across all surfaces (click-outside, Esc, activate,
-focus-loss) and the **single-level-flyout limitation** (nested descent is a no-op
-today; decide whether 1.0 lifts it).
+focus-loss) and the **N-level flyout stack** (locked decision #8 — Right/Enter
+pushes a level, Left/Esc pops one).
 
 #### [`50-testing-verification.md`](50-testing-verification.md) — Testing & verification
 **Brief:** Spec the test strategy: pure-logic unit tests (already dense in

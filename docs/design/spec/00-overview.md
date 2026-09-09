@@ -23,42 +23,74 @@ every OS. That single owned surface is the whole point: it is what makes true
 left/center/right alignment, arbitrary color and font, embedded logos, and
 **flush-right values with no reserved chevron column** actually possible.
 
-## 2. The vision (north star)
+## 2. The vision (north star) and the design pivot
 
 > "Anyone on `muda` can move to muri and have their product look the **same** with
 > minimal code changes, but suddenly gain massive flexibility to change the look
 > however they want — vs 'this is what it is'."
 
-Concretely: `s/muda/muri/` (change the import path) should compile, and the app
-should look native by default. Then the consumer can *progressively* restyle —
-first a `Theme`, then per-row `Segment` / `Flex` / `Align` / `Color` — without a
-rewrite. This is a two-layer product:
+**The design pivot (owner's direction, and the frame for this whole spec):** design
+the **RIGHT API for muri first** — shaped for muri's actual use, a *live* app (like
+usagio) that rewrites its menu ~every 0.75s — **and if it maps cleanly onto muda,
+great.** muri's **own native API is the primary, first-class surface** ([`01`](01-api-contract.md)):
+a fluent, owned `Menu::new().add(…)` builder with per-item styling and a native,
+typed event model (a `.on(callback)` per item and/or a muri event stream keyed by
+id), driven by a retained `TrayHandle` you keep and call to update the menu at
+runtime. This is what the feature layer is built around; it is not a byproduct of
+mimicking muda.
 
-- a **compatibility layer** (`muri::compat::muda`) that mirrors muda 1:1 for a
-  zero-thought migration (see [`02-muda-compat.md`](02-muda-compat.md)); and
-- muri's **own native API** (see [`01-api-contract.md`](01-api-contract.md)) that
-  the consumer reaches into once they want the flexibility the facade hides.
+**muda compatibility is a first-class adoption on-ramp built *on top of* the native
+API — not a constraint that shapes it.** Because the native item model maps **1:1
+onto muda's item kinds** (§`01`), the compatibility layer (`muri::compat::muda`,
+[`02`](02-muda-compat.md)) is a mechanical wrapper that lets an existing muda app
+migrate by changing imports (`use muri::compat::muda as muda;`) and **compile, run,
+and look native by default** (`Theme::native()` with real vibrancy). Crucially the
+compat layer **preserves muda's passive integration model** — the host keeps
+owning its own event loop and reads the global `MenuEvent` channel, exactly like
+muda — so a drop-in does **not** force the app onto muri's `Tray::run` / `TrayHandle`
+model. Two doors into one engine:
+
+- the **native API** — the feature layer: the `add(…)` builder, per-item styling,
+  the retained handle, and typed `.on()` callbacks (see [`01`](01-api-contract.md));
+- the **muda-compat layer** — the simple, faithful drop-in that rides on the same
+  engine and progressively unlocks the native features (see [`02`](02-muda-compat.md)
+  and the worked migration in [`60`](60-migration-guide.md)).
+
+"Drop in simply, then progressively add features" is the adoption story;
+"the right native API for a live menu app" is the design story. Both are load-bearing.
 
 ## 3. Goals and non-goals
 
 ### Goals (1.0)
 
+- **A native-first, feature-rich API** (locked decision #1, the pivot): a fluent
+  owned `Menu::new().add(…)` builder with per-item styling and a native typed event
+  model, driven by a retained `TrayHandle` for live runtime updates — shaped for a
+  live menu app, not for mimicking muda. See [`01`](01-api-contract.md).
 - **One consistent, fully custom-drawn look** on macOS, Windows, and Linux for the
   surfaces muri owns (tray, context menu, dropdown/popup, flyout submenus).
-- **muda drop-in compatibility** (locked decision #1): the facade, `Theme::native()`,
-  and the global `MenuEvent` channel.
+- **A first-class muda drop-in on-ramp** (locked decision #1): `muri::compat::muda`
+  + `Theme::native()` + the global `MenuEvent` channel, so an unchanged muda app
+  compiles, runs, and looks native — built *on* the native API, riding on it.
 - **Hybrid menu bar** (locked decision #2): custom surfaces are muri; the OS
   application menu bar / system menu passes through to native.
-- **Full presentation control**: per-segment alignment and multi-column rows;
-  literal or semantic colors; fonts (family / size / weight); leading & trailing
-  icons/logos (PNG or SVG bytes); enabled / checked state; separators; section
-  headers; nested submenus as flyout panels; a full `Theme` override surface.
+- **Full presentation control**: per-item and per-segment alignment and multi-column
+  rows; literal or semantic colors; fonts (family / size / weight); leading &
+  trailing icons/logos (PNG or SVG bytes); enabled / checked state; separators;
+  section headers; **N-level nested submenus** as flyout panels (locked decision #8);
+  a full `Theme` override surface; and an **extension seam** (`MenuNode` trait) so
+  new content kinds are additive over 1.x (§`00.11`, [`01`](01-api-contract.md)).
+- **Native events, re-implemented** (locked decision #5): muri owns native
+  menu-bar handling and event emission; no dependency on the muda crate for native
+  events.
 - **Follows OS dark/light + accent by default**, HiDPI-crisp, opens with no
-  perceptible delay (CPU raster, no GPU warm-up).
-- **Accessibility as a first-class 1.0 gate**: a published parallel a11y tree
-  bridged through AccessKit to NSAccessibility / UIA / AT-SPI, plus muri-owned
-  keyboard navigation, verified against **all** target screen readers
-  (locked decision #4).
+  perceptible delay (CPU raster, no GPU warm-up), and **`Theme::native()` renders
+  with real translucent vibrancy** (locked decision #6) — macOS `NSVisualEffectView`,
+  Windows acrylic — not an opaque approximation.
+- **Accessibility as a first-class 1.0 gate, on by default** (locked decisions #4 &
+  #7): a published parallel a11y tree bridged through AccessKit to NSAccessibility /
+  UIA / AT-SPI, plus muri-owned keyboard navigation, verified against **all** target
+  screen readers, with the `a11y` feature (and `accesskit`) enabled by default.
 
 ### Non-goals (1.0 and beyond)
 
@@ -69,38 +101,69 @@ rewrite. This is a two-layer product:
   popup deliberately cannot host a first-responder text field.
 - **Not a fork of muda.** muda is a data-model sync over native menu objects;
   there is no drawable layer to fork. Custom drawing means bypassing native menus
-  entirely — which is exactly what muri does. (The facade *wraps* muda for
-  passthrough surfaces; see decision #2.)
+  entirely — which is exactly what muri does. The **application menu bar** still
+  passes through to a *native* OS menu (AppKit/Win32/GTK) per decision #2, but muri
+  drives that itself and does **not** depend on the muda crate for native events
+  (decision #5); the compat layer maps muda's *API surface* onto muri, it does not
+  re-host muda's engine.
 - **Not a global-hotkey provider.** Accelerator *text* is displayed and in-menu
   mnemonics are handled, but system-wide hotkeys are out of scope (that is the
   `global-hotkey` crate's job). See [`40-input-interaction.md`](40-input-interaction.md).
 - **Not a tray-anchored styled popup on Linux.** Architecturally impossible on
   SNI/AppIndicator + Wayland; muri says so honestly (decision #3, §6 below).
 
-## 4. The four locked decisions and their rationale
+## 4. Locked decisions and their rationale (the single source of truth)
 
-These are fixed for 1.0. Design *to* them.
+These are **fixed for 1.0**. Every other document designs *to* them and does not
+relitigate them; where a section spec had a provisional/⚠-owner-confirm flag for
+one of these, that flag is removed. Decisions #1–#4 keep their reference numbers
+from the original spec (with #1 reframed by the pivot); #5–#8 are the pivot's newly
+locked decisions.
 
-### Decision 1 — muda drop-in compatibility is a hard requirement
+| # | Locked decision |
+|---|---|
+| 1 | **Native-first API; muda-compat is a first-class drop-in built on it** (the pivot). |
+| 2 | **Hybrid menu bar** — custom surfaces muri, app menu bar passthrough to native. |
+| 3 | **All three platforms** ship in 1.0 (macOS, Windows, Linux). |
+| 4 | **All screen readers verified** in 1.0 (VoiceOver, NVDA, Narrator, Orca). |
+| 5 | **Native events, re-implemented** — no dependency on the muda crate for native events. |
+| 6 | **`Theme::native()` requires real vibrancy** (macOS `NSVisualEffectView`, Windows acrylic). |
+| 7 | **`a11y` on by default** — `accesskit` is a default dependency. |
+| 8 | **N-level nested submenus** in 1.0 (flyout is a stack, not one level). |
 
-**What:** 1.0 ships `muri::compat::muda`, a facade with muda's type names,
-builders, `MenuId`, and the **global `MenuEvent::receiver()` channel** semantics,
-plus a `Theme::native()` default. An existing muda app migrates by changing the
-import and looks the same.
+### Decision 1 — Native-first API; muda-compat is a first-class drop-in built on it
 
-**Rationale:** adoption. The addressable market is every app already on muda /
-tao / tauri-style tray menus. A migration that is "change one import, ship, looks
-identical, then restyle at your leisure" is a categorically easier sell than "port
-your menu code." It also *forces* muri's native API to be expressive enough to
-express everything muda can — a useful design constraint.
+**What:** muri's **own native API is the primary, first-class design surface**
+([`01`](01-api-contract.md)) — a fluent owned `Menu::new().add(impl Into<Item>)`
+builder with per-item styling (`.color()`/`.align()`/`.icon()`/`.on()`/…), a native
+typed event model (per-item `.on(callback)` and/or a muri event stream keyed by id),
+N-level submenus, and a retained `TrayHandle` for live runtime updates. muda
+compatibility is **not** a hard requirement that shapes that API; it is a
+**first-class, faithful drop-in on-ramp** (`muri::compat::muda`, [`02`](02-muda-compat.md))
+built *on top of* the native engine. Because the native item model maps **1:1 onto
+muda's item kinds**, the compat layer is a mechanical wrapper: an unchanged muda app
+changes its imports and **compiles, runs, and looks native** (`Theme::native()`
+with vibrancy). The compat layer **preserves muda's passive model** — the host keeps
+its own event loop and the global `MenuEvent::receiver()` channel; it is not forced
+onto `Tray::run` / `TrayHandle`.
 
-**Tension it creates:** muda's event model is a **global crossbeam channel**
-(`MenuEvent::receiver()`); muri's shipped native model is a **per-surface closure**
-(`on_click: Box<dyn Fn(&MenuId)>`). The facade must present the global channel
-while muri's core prefers closures. Resolved in
-[`03-threading-events-versioning.md`](03-threading-events-versioning.md): 1.0 adds a
-process-global `muri::MenuEvent` channel alongside the closure, and the facade
-wires surfaces to forward into it.
+**Rationale:** two goals, one engine. (a) *Design* — muri exists for a live app that
+rewrites its menu ~0.75s and wants rich per-item styling; that app deserves the
+right API, not muda's shape bent onto a renderer. (b) *Adoption* — the only realistic
+path for muda users is a simple, faithful drop-in *first*, then progressive feature
+adoption. Both are served by making the native API primary and the muda mapping ride
+on top, rather than treating muda-parity as the design constraint. The pivot resolves
+the old tension where `s/muda/muri/` would silently change the app's event-loop model:
+the drop-in stays passive (muda-shaped), and only a consumer who *opts into* the
+native API adopts the handle+callback model.
+
+**Tension it resolves:** muda's event model is a **global crossbeam channel**
+(`MenuEvent::receiver()`); muri's native model is **typed per-item `.on()` callbacks
+plus a muri event stream**. 1.0 does **not** force the native API into muda's global
+channel: the native surface fires typed callbacks (and a native stream), and the
+**compat layer** exposes the global `MenuEvent` channel by mapping muri's native
+events onto it (decision #5, [`03`](03-threading-events-versioning.md) §3). Native
+consumers never touch the global channel; drop-in consumers get it for free.
 
 ### Decision 2 — Hybrid menu bar (custom surfaces muri, menu bar passthrough)
 
@@ -143,6 +206,71 @@ AT, so a compiled bridge is necessary but not sufficient; the gate is a real hum
 pass on each. This is the second-hardest part of the project after Linux; see
 [`30-accessibility.md`](30-accessibility.md).
 
+### Decision 5 — Native events, re-implemented (no muda-crate dependency)
+
+**What:** muri owns its **native** menu-bar handling and event emission end-to-end;
+1.0 does **not** depend on the `muda` crate for native events. The native surface
+emits typed per-item `.on()` callbacks and a muri event stream keyed by `MenuId`.
+The optional compat shim **maps muri's native events onto muda's global-channel
+shape** (`MenuEvent::receiver()`), so a drop-in app's channel loop still works.
+
+**Rationale:** the earlier design imagined *wrapping* muda's native menus for the
+passthrough menu bar and *bridging* muda's channel into muri's — two channels joined
+by a forwarder thread ([`03`](03-threading-events-versioning.md) called this "the
+subtlest correctness risk"). Owning emission natively removes that seam entirely for
+muri's own surfaces: there is one native event source, and the compat channel is a
+thin projection of it. (The **native application menu bar** is still OS-owned and
+passes through per decision #2; that is an AppKit/Win32/GTK menu, not a dependency on
+the muda crate's event machinery.)
+
+### Decision 6 — `Theme::native()` requires real vibrancy
+
+**What:** on macOS, `Theme::native()` **must** render with true translucent vibrancy
+for 1.0 — the raster layer is hosted over an `NSVisualEffectView` so the panel is a
+real blurred material, not an opaque fill. The Windows equivalent is **acrylic**; on
+Linux the styled surface is opaque (compositor-owned blur is not client-controllable)
+and the native-menu fallback is drawn by the host (n/a).
+
+**Rationale:** "looks native" is a load-bearing promise of the drop-in on-ramp
+(decision #1). A solid-color menu next to a real macOS menu reads as *not native*;
+vibrancy is the difference. This was previously booked as a permanent divergence
+(old D1) and a possible future enhancement; the pivot promotes it to a requirement.
+It forces a **transparency/compositing rework**: the shipped drawer blits opaque
+(un-premultiplied over the theme background); 1.0 adds an alpha-preserving present
+path so the effect view shows through, and the macOS backend hosts the surface over
+the effect view. See [`10`](10-rendering-layout.md) §11 and [`20`](20-platform-macos.md) §2.
+
+### Decision 7 — `a11y` on by default
+
+**What:** the `a11y` cargo feature is **on by default** in 1.0; `accesskit` (+
+`accesskit_winit` + platform adapters) is a default dependency. The flag survives so
+a size-constrained embedder can drop it, but the default flips to include it.
+
+**Rationale:** decision #4 makes accessibility non-optional, and a custom-drawn menu
+that is default-inaccessible would make the plain `s/muda/muri/` drop-in *silently
+lose* the accessibility muda gave for free — a regression that violates the spirit of
+decision #1. The parallel a11y tree is the only thing that gives a `tiny-skia` pixmap
+correct semantics, so it ships in the default build. See
+[`30-accessibility.md`](30-accessibility.md) §0 and
+[`03`](03-threading-events-versioning.md) §4.
+
+### Decision 8 — N-level nested submenus
+
+**What:** 1.0 supports **arbitrarily deep** nested submenus, not a single flyout
+level. A `Submenu` is itself `.add()`-able into a `Submenu`, so nesting is inherent
+in the builder; at runtime the flyout is a **stack** of popup windows (one OS window
+per open level), the keyboard-nav focus is a stack, and dismiss/hover generalize
+across the stack.
+
+**Rationale:** real menus nest, and the muda drop-in must not silently flatten a
+muda menu that nests >1 deep (the earlier plan's facade-flattening was a fidelity
+hole). Making nesting inherent in the `add(…)` builder means the native API and the
+compat mapping both get depth for free. The real cost is **accessibility**: N levels
+multiply the cross-OS-window screen-reader traversal problem (decision #4, §7 below),
+which [`30`](30-accessibility.md) owns. See [`40`](40-input-interaction.md) §5
+(flyout-stack state machine) and the platform docs (each manages a stack of popup
+windows).
+
 ## 5. Target platforms and rendering stack
 
 | OS | Tray icon | Styled anchored popup | Context menu (`open_at`) | Menu bar | Screen reader |
@@ -158,7 +286,11 @@ Rendering stack (all permissive-licensed, no GPU dependency):
 - **`tiny-skia` 0.11** — 2D raster (rounded rects, hairlines, glyph/icon blit).
 - **`cosmic-text` 0.12** — system-font lookup, shaping, layout.
 - **`accesskit` 0.17** (+ `accesskit_winit` 0.23, platform adapters) — the
-  screen-reader bridge, behind the `a11y` feature.
+  screen-reader bridge, behind the `a11y` feature, which is **on by default**
+  (decision #7).
+
+On macOS the styled surface is hosted over an `NSVisualEffectView` for real
+translucent vibrancy (decision #6); the Windows equivalent is acrylic.
 
 Why CPU raster and not a GPU toolkit: a popup must appear the instant the icon is
 clicked and cannot absorb a GPU device/surface warm-up (~0.5s cold). CPU raster
@@ -223,10 +355,10 @@ crate is in
 | Milestone | Scope | Usable by whom | Status |
 |---|---|---|---|
 | **M0 — API + pure logic** | Full public data model as compiling types; pure, unit-tested `layout` / `theme` / `anchor` / `flyout` / `keynav` / `a11y`. | Nobody yet (no live surface). | **Shipped** |
-| **M1 — macOS tray usable** | macOS `NSStatusItem` tray + styled popup + flyout submenus + mouse & keyboard nav + dark/light follow. muri's **native** API only (`Tray` / `Menu` / `ContextMenu` builders). No facade. | usagio behind its `custom-popup` flag, macOS only. | **Shipped** (VoiceOver device pass pending) |
-| **M2 — macOS a11y + context menu** | VoiceOver pass on macOS; `ContextMenu::open_at` implemented; the flyout-a11y model resolved. | usagio ships the styled macOS popup as default; keeps native muda one release as a kill-switch. | 1.0-new |
-| **M3 — muda facade + `Theme::native()`** | `muri::compat::muda` facade + global `MenuEvent` channel + `Theme::native()`, so a muda app drops in on macOS and looks native. | New muda-based adopters on macOS. | 1.0-new |
-| **M4 — Windows backend** | `WS_EX_NOACTIVATE` popup anchored via `Shell_NotifyIconGetRect`; theme follow; outside-click dismiss; UIA; NVDA + Narrator passes. Same scene drawer, new shim. | Cross-platform adopters (mac + Win). | 1.0-new (groundwork shipped) |
+| **M1 — macOS native API solid** | macOS `NSStatusItem` tray + styled popup + **N-level** flyout stack + mouse & keyboard nav + dark/light follow; the **native `add(…)` builder**, per-item styling + `.on()`, the retained **`TrayHandle`** for live updates, the native event stream, and **`Theme::native()` vibrancy** (`NSVisualEffectView`). muri's **native** API; no compat layer. | usagio behind its `custom-popup` flag, macOS only. | Partly shipped (builder/handle/vibrancy = 1.0-new; VoiceOver pass pending) |
+| **M2 — macOS a11y + context menu** | VoiceOver pass on macOS; `ContextMenu::open_at` implemented; the flyout-stack a11y model resolved (per-level adapters). | usagio ships the styled macOS popup as default; keeps native muda one release as a kill-switch. | 1.0-new |
+| **M3 — muda-compat drop-in + fidelity** | `muri::compat::muda` (passive-model drop-in: host keeps its loop + global `MenuEvent` channel + `init_for_*`) mapped 1:1 onto the native builder, so an unchanged muda app compiles, runs, and looks native (`Theme::native()` vibrancy). | New muda-based adopters on macOS via `s/muda/muri/`. | 1.0-new |
+| **M4 — Windows backend** | `WS_EX_NOACTIVATE` popup anchored via `Shell_NotifyIconGetRect`; theme follow + **acrylic** vibrancy; outside-click dismiss; N-level flyout stack; UIA; NVDA + Narrator passes. Same scene drawer, new shim. | Cross-platform adopters (mac + Win). | 1.0-new (groundwork shipped) |
 | **M5 — Linux backend** | Native-menu fallback + pointer `ContextMenu`; AT-SPI / Orca pass; `Unsupported::TrayAnchor` honestly returned. | Linux adopters (fallback tray + styled context menus). | 1.0-new (skeleton) |
 | **1.0** | All three platforms, all four screen readers verified, muda facade, hybrid menu bar, semver stability commitment. | Everyone; `s/muda/muri/` is a supported migration. | 1.0-new |
 
@@ -258,10 +390,11 @@ the OS) puts up.
   rectangle rather than the tray icon — e.g. a menu attached to a toolbar button.
   A 1.0-new surface (`Popup::anchored_to(rect, edge)`); see
   [`01-api-contract.md`](01-api-contract.md).
-- **Flyout** — a nested submenu panel drawn *beside* its parent row in a second
+- **Flyout** — a nested submenu panel drawn *beside* its parent row in a separate
   OS window (right by default, flipped left on spill). Opened by hover or by
-  keyboard Right/Enter. Currently **one level deep** (`flyout.rs`,
-  [`40-input-interaction.md`](40-input-interaction.md)).
+  keyboard Right/Enter. **N levels deep** (decision #8): each open level is its own
+  OS window, forming a **flyout stack** (`flyout.rs`,
+  [`40-input-interaction.md`](40-input-interaction.md) §5).
 - **Menu bar** — the OS application menu bar (macOS global top-of-screen menu; a
   Windows / GTK window menu bar) and the macOS system/status menus. **Passthrough
   to native** per decision #2; muri never draws it.
@@ -271,48 +404,55 @@ the OS) puts up.
 ```
    Consumer app
         │
-        │  (A) muda drop-in                     (B) muri native API
+        │  (A) muri NATIVE API (primary)        (B) muda-compat drop-in (rides on A)
         ▼                                            ▼
- ┌───────────────────────────┐            ┌───────────────────────────────┐
- │  muri::compat::muda facade │            │  Surfaces (public API, doc 01) │
- │  Menu/Submenu/MenuItem/... │──builds──► │  Tray · ContextMenu · Popup    │
- │  global MenuEvent channel  │            │  Menu/Item/Row/Segment/Style   │
- │  Theme::native() default   │            │  Theme/ThemeSource · MenuId    │
- │  routes menu-bar → native  │            └───────────────┬───────────────┘
- └──────────────┬────────────┘                            │
-        native   │  custom                                 │  one unified
-     passthrough │  surfaces                               │  MenuEvent channel
-                 ▼                                          ▼
-        ┌────────────────┐               ┌─────────────────────────────────────┐
-        │  real native    │              │  Engine core (pure, portable, doc 10)│
-        │  menu (NSMenu /  │              │  menu model · layout(Flex/Align) ·   │
-        │  HMENU / GTK)    │              │  theme resolve · anchor · flyout ·   │
-        │  via wrapped     │              │  keynav · a11y tree                  │
-        │  muda            │              └──────────────────┬──────────────────┘
-        └────────┬────────┘                                  │
-                 │                          ┌────────────────▼────────────────┐
-                 │                          │  Shared scene drawer (ONE impl)  │
-                 │                          │  softbuffer + tiny-skia +        │
-                 │                          │  cosmic-text  → Pixmap           │
-                 │                          └────────────────┬─────────────────┘
-                 │                                           │  platform shim:
-                 │                                           │  anchor(rect/point),
-                 │                                           │  dismiss, theme query,
-                 │                                           │  a11y adapter
-                 ▼                          ┌────────────────┼────────────────┐
-          (OS draws it)                     ▼                ▼                ▼
-                                       macOS backend    Windows backend   Linux backend
-                                       NSStatusItem     Shell_NotifyIcon  SNI + no anchor
-                                       + NSPanel        + NOACTIVATE win   → native fallback
-                                       + NSAccessibility + UIA             + AT-SPI, pointer
-                                                                            ContextMenu only
+ ┌───────────────────────────────┐        ┌───────────────────────────┐
+ │  Surfaces (public API, doc 01) │        │  muri::compat::muda        │
+ │  Tray + TrayHandle · Context   │◄─maps──│  Menu/Submenu/MenuItem/... │
+ │  Menu/Popup · Menu.add(Item)   │  1:1   │  global MenuEvent channel  │
+ │  per-item style · .on() + stream│        │  Theme::native() default   │
+ │  MenuNode extension trait      │        │  init_for_* → native bar   │
+ └───────────────┬───────────────┘        │  (host keeps its own loop) │
+                 │  native typed events    └─────────────┬─────────────┘
+                 │  (callbacks + stream);          native │  custom
+                 │  compat projects them          passthru│  surfaces
+                 │  onto the global channel               │
+                 ▼                          ┌─────────────┼───────────────────────┐
+ ┌─────────────────────────────────────┐   │             ▼                        │
+ │  Engine core (pure, portable, doc 10)│   │   ┌────────────────┐                 │
+ │  menu model · layout(Flex/Align) ·   │◄──┘   │  OS app menu    │  (menu bar only,│
+ │  theme resolve · anchor · flyout     │       │  bar (NSMenu /   │   decision #2 — │
+ │  STACK · keynav · a11y tree          │       │  HMENU / GTK)    │   OS-owned, not │
+ └──────────────────┬──────────────────┘       └────────┬────────┘   the muda crate)│
+                    │                          └─────────┼───────────────────────┘
+     ┌──────────────▼──────────────────┐                 ▼
+     │  Shared scene drawer (ONE impl)  │           (OS draws it)
+     │  softbuffer + tiny-skia +        │
+     │  cosmic-text → Pixmap (alpha-    │
+     │  preserving; hosted over an      │
+     │  NSVisualEffectView on macOS)    │
+     └────────────────┬─────────────────┘
+                      │  platform shim: anchor(rect/point), dismiss,
+                      │  theme query, vibrancy backdrop, a11y adapter
+      ┌───────────────┼───────────────┐
+      ▼               ▼               ▼
+ macOS backend    Windows backend   Linux backend
+ NSStatusItem     Shell_NotifyIcon  SNI + no anchor
+ + NSPanel        + NOACTIVATE win   → native fallback
+ + NSVisualEffect + acrylic          + AT-SPI, pointer
+ + NSAccessibility + UIA             ContextMenu only
 ```
 
 Four layers, top to bottom:
 
-1. **Facade + native surfaces** — two entry points into the same engine. The
-   facade (A) exists for migration; the native API (B) is where the flexibility
-   unlock lives.
+1. **Native surfaces (primary) + muda-compat door.** Two entry points into the same
+   engine. The native API (A) is primary — the builder, per-item styling, the
+   retained handle, and typed events are the flexibility unlock. The muda-compat door
+   (B) is a first-class drop-in that maps 1:1 onto (A) and preserves muda's passive
+   loop + global channel; it *rides on* the native API, never reshapes it. muri emits
+   native events itself (decision #5) and only *projects* them onto the global channel
+   for the compat door; the OS application menu bar is passthrough (decision #2) and
+   is a native AppKit/Win32/GTK menu, not a dependency on the muda crate.
 2. **Engine core** — pure, portable, exhaustively unit-testable: the menu data
    model, the `Flex`/`Align` layout, theme resolution, popup/flyout placement
    math, the keyboard-nav state machine, and the accessibility tree. No I/O, no
@@ -325,3 +465,27 @@ Four layers, top to bottom:
 The invariant: **everything above the platform backends is portable and tested
 without a window server; each backend is only a shim.** That is what keeps three
 platforms tractable in one crate.
+
+## 11. Extensibility & roadmap — `add(…)` is a permanently stable door
+
+The native builder's `Menu::add(impl Into<Item>)` is designed to be the **one stable
+door** that never has to change as muri grows new content kinds. Two mechanisms make
+that true and are specified in [`01`](01-api-contract.md):
+
+- **`Item` is `#[non_exhaustive]`.** 1.0's built-in nodes — **Text, Image,
+  Separator, Submenu, Check, Predefined** — are the kinds the renderer handles
+  first-class. Promoting a future kind (e.g. `Video`) to a blessed built-in variant
+  later is **not** a breaking change.
+- **The `MenuNode` extension trait ships in 1.0** (even though rich nodes do not).
+  It exposes the row contract — measure (constraints → layout), draw (into the
+  `tiny-skia` scene), hit-test, and accessibility (role/name/state → the `AxNode`
+  model in [`30`](30-accessibility.md)). `Item::Custom(Box<dyn MenuNode>)` lets an
+  arbitrary third-party or future row plug into the **same `add(…)`** and the **same
+  render / keynav / a11y pipeline**. Per-row dyn dispatch is fine — menus have few
+  rows.
+
+**1.0 scope** is "the builder + the core nodes + the extension trait." **1.x
+roadmap** (additive, no breaking change, built on the 1.0 `MenuNode` trait): rich
+content nodes such as **Video** and other embedded media. The muda-compat layer only
+ever maps muda's kinds onto the **built-in** nodes; it never touches the extension
+seam.

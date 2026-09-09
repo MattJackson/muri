@@ -1,13 +1,18 @@
 # 01 — API contract: muri's native, styleable public API
 
-Status: **foundational spec.** This document specifies muri's **own** public API —
-the one a consumer reaches past the facade to unlock full styling. The muda
-compatibility facade is [`02-muda-compat.md`](02-muda-compat.md); threading and
+Status: **foundational spec — the north star.** This document specifies muri's
+**own** public API. Per the pivot (locked decision #1, [`00`](00-overview.md) §2/§4),
+the native API is the **primary, first-class** surface — designed for a live menu
+app, not derived from muda. The muda-compat drop-in is a first-class on-ramp that
+maps **1:1 onto this API** ([`02-muda-compat.md`](02-muda-compat.md)); threading and
 event semantics are [`03-threading-events-versioning.md`](03-threading-events-versioning.md).
 
-Signatures below are grounded in the shipped crate. Where a type is **shipped** it
-is quoted as-is; where 1.0 adds or changes something it is marked **1.0-new** or
-**1.0-change** with the rationale.
+Signatures below are grounded in the shipped crate. The 1.0 native API adds a
+fluent, **owned `Menu::new().add(…)` builder** with typed item kinds, per-item
+styling, native typed events, N-level submenus, and an extension seam; where this
+differs from the shipped `Row`-centric model it is marked **1.0-change** and the
+migration is noted. Where a type is **shipped** it is quoted as-is; **1.0-new** marks
+additions.
 
 ---
 
@@ -32,43 +37,163 @@ is quoted as-is; where 1.0 adds or changes something it is marked **1.0-new** or
    `Flex`/`Align`/`Color`/`Font` (restyle per row). No cliff between "muda-like"
    and "fully custom."
 
-## 2. The declarative menu tree
+## 2. The declarative menu tree and the `add(…)` builder
 
-All types in `muri::menu`, re-exported at the crate root. **Shipped** unless noted.
+All types in `muri::menu`, re-exported at the crate root. The **1.0 primary surface**
+is a fluent, owned `Menu::new().add(…)` builder; the north-star shape (owner's
+sketch):
 
 ```rust
-pub struct Menu { pub items: Vec<Item> }
+Menu::new()
+    .add(text("Text row"))
+    .add(submenu("Sub Menu")
+        .add(text("SubMenu Text 1"))
+        .add(separator())
+        .add(image("logo.png"))
+        .add(text("Quit").color(Color::Red).align(Align::Right).on(|| quit())));
+```
+
+### 2.1 `Menu` and the one stable door (`add`)
+
+```rust
+pub struct Menu { /* items + a MenuId→handler registry (see §6) */ }
 
 impl Menu {
     pub fn new() -> Self;
-    pub fn item(self, item: Item) -> Self;
-    pub fn row(self, row: Row) -> Self;
-    pub fn separator(self) -> Self;
-    pub fn section_header(self, row: Row) -> Self;
-    pub fn submenu(self, label: Row, menu: Menu) -> Self;
+    pub fn add(self, item: impl Into<Item>) -> Self;   // 1.0-new — THE stable door
     pub fn len(&self) -> usize;
     pub fn is_empty(&self) -> bool;
-    pub fn interactive_count(&self) -> usize;   // focusable items at this level
-}
-
-pub enum Item {
-    Row(Row),
-    Separator,
-    SectionHeader(Row),                          // styled, non-interactive heading
-    Submenu { label: Row, menu: Menu },          // opens a flyout panel beside it
-}
-
-impl Item {
-    pub fn is_interactive(&self) -> bool;        // rows/submenus with a real id & enabled
+    pub fn interactive_count(&self) -> usize;          // focusable items at this level
+    pub fn items(&self) -> &[Item];                    // pure data view (layout/a11y/keynav)
 }
 ```
 
-`Menu` is `Default` (empty). `interactive_count` and `is_interactive` are the
-single source of truth for "what can be focused/clicked" and are consumed by both
+`add(impl Into<Item>)` accepts **any** item kind — `Text`, `Image`, `Separator`,
+`Submenu`, `Check`, `Predefined`, or a `Custom` node — via `Into<Item>`. It is
+deliberately the *only* growth point: new content kinds (1.x) plug into the same
+`add` (§9, [`00` §11](00-overview.md)). N-level nesting is **inherent**: a `Submenu`
+is itself `.add()`-able into a `Submenu`.
+
+**1.0-change (migration from the shipped `Row` model).** The shipped crate models
+`Menu { pub items: Vec<Item> }` with `Item::{Row, Separator, SectionHeader, Submenu}`
+and `Menu::{item,row,separator,section_header,submenu}` builders. 1.0 keeps that
+`Vec<Item>` **data representation** (so the pure layout/keynav/a11y core is
+unchanged) but reshapes the *public builder* to the typed-item `add(…)` form above.
+The shipped `row`/`item`/`submenu` methods and the `Row`/`Segment` primitives are
+**retained as the lower-level API** (§2.4); the typed builders (`Text`, `Submenu`,
+…) are ergonomic constructors over them. Migration is mechanical and additive.
+
+### 2.2 `Item` — the open kind set
+
+```rust
+#[non_exhaustive]                       // 1.0-change — future kinds are additive
+pub enum Item {
+    Text(Text),                         // a label row (the common case)
+    Image(Image),                       // an image/logo row
+    Separator,                          // a divider
+    SectionHeader(Text),                // styled, non-interactive heading
+    Submenu(Submenu),                   // opens a flyout panel beside it (N-level)
+    Check(Check),                       // a checkable row
+    Predefined(Predefined),             // a muda-style OS-action item (§ compat)
+    Custom(Box<dyn MenuNode>),          // 1.0-new — third-party / future rows (§9)
+}
+
+impl Item {
+    pub fn is_interactive(&self) -> bool;   // enabled rows/submenus/checks with a real id
+}
+```
+
+`Item` is `#[non_exhaustive]` so promoting a future built-in (e.g. `Video`) is not a
+breaking change ([`00` §11](00-overview.md)). `interactive_count` / `is_interactive`
+are the single source of truth for "what can be focused/clicked," consumed by both
 `keynav` and `a11y` — a separator, a section header, a disabled row, and an inert
 info row (`MenuId::none()`) are all non-interactive.
 
-### Row
+### 2.3 Typed item builders + free-function constructors (1.0-new)
+
+Each kind has a fluent builder with per-item modifiers, and a lowercase free-function
+constructor as an alternative to `::new` (idiomatic-Rust ergonomics):
+
+```rust
+pub fn text(s: impl Into<String>) -> Text;         // == Text::new(s)
+pub fn image(src: impl Into<Icon>) -> Image;       // == Image::new(src)
+pub fn submenu(label: impl Into<String>) -> Submenu;
+pub fn separator() -> Item;                          // == Item::Separator
+pub fn check(label: impl Into<String>) -> Check;
+
+pub struct Text { /* segments, id, enabled, on-handler … */ }
+impl Text {
+    pub fn new(s: impl Into<String>) -> Self;
+    pub fn id(self, id: impl Into<MenuId>) -> Self;   // else an internal id is assigned
+    pub fn color(self, c: Color) -> Self;             // per-item color (headline advantage)
+    pub fn align(self, a: Align) -> Self;             // Left | Center | Right
+    pub fn bold(self) -> Self;                        // == .weight(Weight::Bold)
+    pub fn font(self, f: Font) -> Self;
+    pub fn icon(self, icon: impl Into<Icon>) -> Self; // leading icon/logo
+    pub fn trailing(self, icon: impl Into<Icon>) -> Self;
+    pub fn enabled(self, yes: bool) -> Self;
+    pub fn accelerator(self, a: Accelerator) -> Self; // displayed + in-menu (doc 40 §3)
+    pub fn segment(self, s: Segment) -> Self;         // advanced multi-column (§2.4)
+    pub fn on(self, f: impl FnMut() + Send + 'static) -> Self;  // native click (§6)
+}
+// From<Text>/From<Image>/From<Submenu>/From<Check>/From<Predefined> for Item;
+// From<&str>/From<String> for Text (so .add("Quit") works).
+
+pub struct Submenu { /* label: Text, menu: Menu */ }
+impl Submenu {
+    pub fn new(label: impl Into<String>) -> Self;
+    pub fn add(self, item: impl Into<Item>) -> Self;  // nest (N-level, inherent)
+    pub fn icon(self, icon: impl Into<Icon>) -> Self;
+    pub fn enabled(self, yes: bool) -> Self;
+    pub fn id(self, id: impl Into<MenuId>) -> Self;
+}
+
+pub struct Check { /* like Text + checked: bool */ }
+impl Check {
+    pub fn new(label: impl Into<String>) -> Self;
+    pub fn checked(self, yes: bool) -> Self;
+    // + the same color/align/enabled/on/… modifiers as Text
+}
+
+pub struct Image { /* icon + optional id/on */ }
+impl Image { pub fn new(src: impl Into<Icon>) -> Self; pub fn on(self, f: impl FnMut()+Send+'static) -> Self; /* … */ }
+```
+
+Per-item modifiers (`.color`/`.align`/`.icon`/`.bold`/`.enabled`/`.checked`/
+`.accelerator`/`.on`) apply uniformly to the built-in kinds and, where meaningful, to
+`Custom` nodes (§9). **Per-item styling is muri's headline advantage over muda** — a
+native menu cannot color one value red or right-align it — so it is first-class on
+the common `Text`/`Check` row, not buried in a `Segment` API.
+
+### 2.3.1 Each muda item kind maps 1:1 onto a native constructor
+
+Because the native kinds were designed to *cover* muda's, the compat wrapper is
+mechanical — it never needs anything but these built-in constructors:
+
+| muda | muri native constructor |
+|---|---|
+| `MenuItem::new(text, enabled, accel)` | `text(text).enabled(..).accelerator(..)` |
+| `CheckMenuItem::new(text, .., checked, ..)` | `check(text).checked(..)` |
+| `IconMenuItem::new(text, icon, ..)` | `text(text).icon(..)` (or `image(..)`) |
+| `Submenu::new(text, enabled)` + children | `submenu(text).enabled(..).add(..)…` |
+| `PredefinedMenuItem::separator()` | `separator()` |
+| `PredefinedMenuItem::quit()/copy()/about()/…` | `Predefined::quit()/copy()/about()/…` |
+| `MenuId` / `with_id` | `.id(..)` (same `MenuId(String)`) |
+| accelerator | `.accelerator(Accelerator)` |
+
+The compat layer ([`02`](02-muda-compat.md)) is thus a thin translation onto these
+constructors; it never touches the `MenuNode` extension seam (§6.5).
+
+### 2.4 The lower-level `Row` / `Segment` primitive (retained)
+
+`Text` is sugar over a single-segment row; the multi-column, flush-right primitive
+(`Row` + `Segment`, §2.5 below and §`10`) is retained for rows that need several
+independently-aligned columns (a `Flex::Grow` label + an `Align::Right` value). A
+`Text` with more than one `.segment(…)` produces exactly such a `Row`. The `Row`
+data type (below) is what the pure layout/hit-test/a11y core consumes; the typed
+builders are constructors over it.
+
+### 2.5 `Row` (the lower-level row data type, retained)
 
 ```rust
 pub struct Row {
@@ -235,14 +360,18 @@ look native. Specification:
   `menu` background per OS) so `Theme::native()` can defer the background to the OS
   too. Without it, `Theme::light()/dark()` bake `rgb(246,246,246)` / `rgb(40,40,40)`
   which is *close* but not the exact OS menu material (no vibrancy/translucency).
-- **Honest caveat:** a CPU raster surface cannot reproduce macOS menu **vibrancy /
-  translucency** (the blurred backdrop) — that is a compositor effect over a
-  transparent `NSVisualEffectView`. `Theme::native()` yields an *opaque* menu of
-  the right color, not a vibrant one. This is a documented, permanent divergence
-  and is called out in [`02-muda-compat.md`](02-muda-compat.md) and
-  [`60-migration-guide.md`](60-migration-guide.md). The alternative (host the
-  raster layer over a native vibrancy view on macOS) is a possible future macOS-only
-  enhancement, not a 1.0 promise.
+- **Vibrancy is required (locked decision #6).** `Theme::native()` renders with
+  **real translucent vibrancy**, not an opaque approximation: on macOS the raster
+  layer is hosted over an `NSVisualEffectView` so the panel is a genuine blurred
+  material; the Windows equivalent is **acrylic**. This is not a future
+  enhancement — it is a 1.0 promise, because "looks native" is load-bearing for the
+  muda drop-in. It forces a transparency/compositing rework (the drawer must present
+  alpha-preserving output; the panel background draws at reduced alpha or is skipped
+  so the effect view shows through) specified in
+  [`10-rendering-layout.md`](10-rendering-layout.md) §11 and
+  [`20-platform-macos.md`](20-platform-macos.md) §2. On Linux the styled surface is
+  opaque (compositor-owned blur is not client-controllable) and the native-menu
+  fallback is host-drawn — the one place vibrancy does not apply.
 
 `ThemeSource::FollowSystem` (the default `MenuOptions.theme`) already resolves to
 `Theme::light()` / `Theme::dark()` by querying `system_is_dark`. **1.0-change:**
@@ -260,48 +389,64 @@ wants "my colors, but follow dark/light" has no path. 1.0 should add either
 
 ## 5. Surfaces
 
-muri's surfaces are the objects that put a `Menu` on screen. All own an optional
-`on_click` closure and expose `accessibility_tree()`.
+muri's surfaces are the objects that put a `Menu` on screen. All carry the `Menu`'s
+per-item `.on()` handlers plus an optional surface-level `.on_event(&MenuId)` sink
+(§6), and expose `accessibility_tree()`.
 
-### 5.1 `Tray` (shipped)
+### 5.1 `Tray` + `TrayHandle` (the live-app model — primary)
 
-Owns the tray icon + the tray-anchored popup + anchoring. Subsumes `tray-icon`.
+Owns the tray icon + the tray-anchored popup + anchoring. Subsumes `tray-icon`. The
+**retained handle is the primary runtime model** (locked decision #1): muri is built
+for a live app that rewrites its menu ~0.75s, so updating the menu *while the loop
+runs* is a first-class path, not an afterthought.
 
 ```rust
-pub struct Tray { /* icon, menu, tooltip, options, on_click */ }
+pub struct Tray { /* icon, menu, tooltip, options */ }
 impl Tray {
-    pub fn new(icon: Icon) -> Self;
+    pub fn new(icon: impl Into<Icon>) -> Self;
     pub fn menu(self, menu: Menu) -> Self;
     pub fn tooltip(self, text: impl Into<String>) -> Self;
     pub fn options(self, options: MenuOptions) -> Self;
     pub fn theme(self, theme: ThemeSource) -> Self;             // convenience for options.theme
-    pub fn on_click(self, handler: impl Fn(&MenuId) + Send + 'static) -> Self;
-    pub fn set_menu(&mut self, menu: Menu);                     // swap content at runtime
     pub fn accessibility_tree(&self) -> AxTree;
     pub fn dispatch(&self, id: &MenuId);                        // testable click path
-    pub fn open(&self) -> Result<()>;                           // 1.0-new (todo! today)
-    pub fn close(&self);                                        // 1.0-new (todo! today)
-    pub fn run(self) -> Result<()>;   // install icon + run event loop; consumes self
+    pub fn handle(&self) -> TrayHandle;   // 1.0-new — Clone+Send; valid to clone before run()
+    pub fn run(self) -> Result<()>;       // install icon + run event loop; consumes self
+}
+
+// 1.0-new — the retained, thread-safe handle for live updates (doc 03 §2)
+pub struct TrayHandle { /* posts commands into the running loop via EventLoopProxy */ }
+impl TrayHandle {                          // Clone + Send
+    pub fn set_menu(&self, menu: Menu);    // swap content; next paint re-renders
+    pub fn set_icon(&self, icon: impl Into<Icon>);
+    pub fn set_tooltip(&self, text: impl Into<String>);
+    pub fn set_visible(&self, visible: bool);
+    pub fn open(&self);
+    pub fn close(&self);
 }
 ```
 
 Behavior contract:
 
-- **`run` consumes `self` and blocks** running the platform event loop. On macOS
-  it must be called on the main thread (`MainThreadMarker`); it sets the app to
-  `Accessory` activation policy (no Dock icon) — **note the menu-bar-app conflict**
-  flagged in [`20-platform-macos.md`](20-platform-macos.md): an app that *also*
-  wants a native menu bar cannot be `Accessory`. The facade must reconcile.
-- On **Linux**, `run` returns `Err(Unsupported::TrayAnchor)`.
-- **`set_menu(&mut self, menu)`** swaps content cheaply; the next open re-renders.
-  This is the runtime-update path (usagio rebuilds on a tick). **Design tension:**
-  `run` consumes `self`, so after `run` the consumer no longer holds the `Tray` to
-  call `set_menu`. 1.0 must provide a `TrayHandle` (a `Clone + Send` handle
-  returned before/by `run`, or via a builder that splits handle from loop) so the
-  menu can be updated *while the loop runs*. This is a **1.0-new, load-bearing**
-  requirement for any live app and is under-specified in the shipped skeleton;
-  see [`03-threading-events-versioning.md`](03-threading-events-versioning.md) §2.
-- **`open` / `close`** are `todo!()` today; 1.0 implements programmatic show/hide.
+- **The retained-handle pattern (the resolution of the old `run(self)` tension).**
+  Obtain a `TrayHandle` from `tray.handle()` **before** `run` takes over, keep it,
+  and call `handle.set_menu(new_menu)` / `set_icon` / … from any thread as the app's
+  state changes. The handle posts commands into the UI loop (via the `winit`
+  `EventLoopProxy` the macOS backend already uses), which applies them on the UI
+  thread (rebuild `LaidMenu`, re-render). `TrayHandle` is `Clone + Send`. This is
+  **load-bearing for any live app** and an M1 deliverable, not 1.0 polish
+  ([`03`](03-threading-events-versioning.md) §2). It also cleanly replaces the muda
+  drop-in tension: a native consumer holds a handle; a *compat* consumer keeps its
+  own passive loop and never sees `run`/`TrayHandle` ([`02`](02-muda-compat.md)).
+- **`run` consumes `self` and blocks** running the platform event loop. On macOS it
+  must be called on the main thread (`MainThreadMarker`); a **tray-only** native app
+  sets `Accessory` activation policy (no Dock icon). The menu-bar-app conflict — an
+  app that *also* installs a native menu bar cannot be `Accessory` — is decided by
+  the surface combination (the compat layer sets `Regular` when `init_for_nsapp` is
+  used); see [`20-platform-macos.md`](20-platform-macos.md) §5.
+- On **Linux**, `run` returns `Err(Unsupported::TrayAnchor)` (decision #3).
+- **`open` / `close`** are `todo!()` today; 1.0 implements programmatic show/hide via
+  `TrayHandle`.
 
 ### 5.2 `ContextMenu` (skeleton)
 
@@ -350,20 +495,39 @@ same `place_popup` + scene drawer + dismiss logic. 1.0 should factor a shared
 `PopupSession` so the three surfaces are thin adapters, not three copies of the
 macOS `App` event handler.
 
-## 6. Event delivery
+## 6. Event delivery — native first (decision #5)
 
-Two mechanisms, both delivering the activated row's `MenuId`.
+muri emits its **own** native events (decision #5 — no dependency on the muda crate
+for events). The native surface has two mechanisms; the muda-style global channel is
+a **compat-only projection** of them, not the native model.
 
-1. **Per-surface closure (shipped):** `on_click(impl Fn(&MenuId) + Send +
-   'static)`. Invoked on the UI thread when a row is activated by mouse, keyboard
-   (`NavAction::Activate`), or an AccessKit `Click` action. Inert rows
-   (`MenuId::none()`) never fire.
-2. **Global channel (1.0-new, muda parity):** a process-global
+1. **Per-item `.on(FnMut)` callback (1.0-new, native primary).** `text("Quit").on(||
+   quit())` attaches a typed handler to *that item*. It runs on the UI thread when
+   the item is activated by mouse, keyboard (`NavAction::Activate`), or an AccessKit
+   `Click`. Zero-arg — the item's identity is implicit. Inert items never fire.
+2. **muri event stream keyed by id (1.0-new, native).** A surface-level stream /
+   handler delivering the activated `MenuId`, for consumers who prefer a single
+   sink over per-item closures: a surface `.on_event(impl FnMut(&MenuId))` (and a
+   pollable `muri::events()` stream). This is muri's *own* stream — not muda's global
+   channel.
+3. **Global `MenuEvent` channel (compat projection):** the process-global
    `muri::MenuEvent::receiver() -> &'static MenuEventReceiver` delivering
-   `MenuEvent { id: MenuId }`. Required by the facade (decision #1). muri's core
-   fires *both*: the closure (if set) and the global channel. See
-   [`03-threading-events-versioning.md`](03-threading-events-versioning.md) §3 for
-   the ordering and threading contract.
+   `MenuEvent { id }` exists so the **muda-compat** door works unchanged; muri
+   *projects* native activations onto it. A native consumer need never touch it.
+   See [`03`](03-threading-events-versioning.md) §3 for ordering/threading.
+
+**The purity tension and its resolution (1.0-change).** Attaching an `FnMut` to an
+item would make the menu tree non-`Clone`/non-`Debug`, breaking the pure-core
+testing invariant that layout / keynav / a11y / snapshot tests depend on
+([`50`](50-testing-verification.md), [`03` §1](03-threading-events-versioning.md)).
+So `.on(…)` does **not** store the closure in the data tree: the builder assigns the
+item a `MenuId` (an internal one if the consumer gave none) and registers the handler
+in the `Menu`/surface's **handler registry keyed by `MenuId`**. The `items(): &[Item]`
+data view stays pure, `Clone + Debug`, and drives all the pure engine functions;
+handlers are consulted only at dispatch. This keeps per-item `.on()` ergonomic
+*and* the core testable.
+
+`MenuEvent` and `MenuId`:
 
 `MenuEvent` and `MenuId`:
 
@@ -383,6 +547,36 @@ identical to muda's `MenuId`** — which is what lets the facade share ids witho
 conversion (decision #1). The empty-string `none()` sentinel is a muri addition
 for inert rows and has no muda equivalent (muda auto-assigns ids); the facade
 handles that mapping ([`02-muda-compat.md`](02-muda-compat.md) §3).
+
+## 6.5 The `MenuNode` extension seam (1.0-new — ships in 1.0)
+
+`add(…)` is the one stable door, and `Item::Custom(Box<dyn MenuNode>)` is how a
+row that is *not* a built-in kind plugs into the **same** builder and the **same**
+render / keynav / a11y pipeline. The trait ships in 1.0 even though the rich nodes
+built on it (Video, etc.) are 1.x roadmap ([`00` §11](00-overview.md)):
+
+```rust
+// 1.0-new
+pub trait MenuNode: Debug + Send + 'static {
+    fn measure(&self, ctx: &MeasureCtx, constraints: LogicalSize) -> LogicalSize; // intrinsic layout
+    fn draw(&self, scene: &mut dyn SceneDrawer, layout: LogicalRect, ctx: &DrawCtx); // into the tiny-skia scene
+    fn hit_test(&self, layout: LogicalRect, point: LogicalPoint) -> bool;
+    fn accessibility(&self) -> AxNodeSpec;   // role / name / state → the AxNode model (doc 30)
+    fn is_interactive(&self) -> bool { false }
+    fn id(&self) -> Option<&MenuId> { None }
+}
+```
+
+- **Same pipeline.** `render_menu` measures/draws a `Custom` node through the same
+  `SceneDrawer` ([`10`](10-rendering-layout.md) §2); `keynav` treats it as focusable
+  iff `is_interactive()`; `a11y::build_tree` folds its `accessibility()` into the
+  tree ([`30`](30-accessibility.md)). Per-item modifiers (`.on()`, `.enabled`) apply
+  to a custom node where meaningful (a custom node with an id + `is_interactive` can
+  carry an `.on()` handler).
+- **Dyn dispatch is fine** — menus have few rows.
+- **The compat layer never touches this seam.** muda's kinds map only onto the
+  *built-in* nodes ([`02`](02-muda-compat.md)); `Custom` is a native-API-only
+  extension.
 
 ## 7. Geometry and errors
 
@@ -410,28 +604,34 @@ closed set; the facade maps muda's richer `Error` onto these
 - **The menu tree is owned data** (`Clone + Debug`, `'static`). No borrows leak
   into it; `Icon` holds `Arc<[u8]>`. A consumer can build a `Menu`, clone it, hand
   it to a surface, and keep or drop its copy freely.
-- **`on_click` is `Box<dyn Fn(&MenuId) + Send + 'static>`** — owned by the surface,
-  `Send` so it can be moved to the UI thread, `'static` so it outlives
-  construction. It is **not** `Sync` and **not** `FnMut`; a handler needing mutable
-  shared state uses interior mutability (`Arc<Mutex<_>>` / atomics), as the shipped
-  tests do.
+- **Handlers live in a `MenuId`-keyed registry, not in the data tree.** Per-item
+  `.on(FnMut + Send + 'static)` handlers (and a surface `.on_event`) are owned by the
+  surface's handler registry keyed by `MenuId` (§6), so the `Item` data tree stays
+  pure `Clone + Debug` for the engine and tests. Handlers are `Send` (movable to the
+  UI thread) and `'static`; a handler needing shared state uses interior mutability
+  (`Arc<Mutex<_>>` / atomics), as the shipped tests do.
 - **Surfaces are not `Send`/`Sync`** once running — they own platform windows and
-  must live on the UI thread. Runtime interaction from other threads goes through
-  the global `MenuEvent` channel (read side) and the 1.0-new `TrayHandle` (write
-  side), never by moving the surface.
+  must live on the UI thread. Runtime interaction from other threads goes through the
+  **`TrayHandle`** (write side — live menu/icon updates) and muri's native event
+  stream / the compat global channel (read side), never by moving the surface.
 - **The a11y tree (`AxTree`) is a snapshot**, rebuilt from the menu on demand;
   it borrows nothing and is safe to build off the UI thread for testing.
 
 ## 9. What the public surface is (and is not)
 
-The complete 1.0 public export set: `Tray`, `ContextMenu`, `Popup`, `Menu`,
-`Item`, `Row`, `Segment`, `StyleRun`, `Align`, `Flex`, `Color`, `Rgba`, `Font`,
-`FontFamily`, `Weight`, `Icon`, `Theme`, `ThemeSource`, `MenuOptions`, `Insets`,
-`Edge`, `LogicalPoint`, `LogicalSize`, `LogicalRect`, `MenuId`, `MenuEvent`,
-`MenuEventReceiver`, `Error`, `Unsupported`, `Result`, plus the `compat` module
-(doc 02) and the lower-level `a11y` / `keynav` / `anchor` / `flyout` / `layout` /
-`render` modules (exposed for advanced integration and testing, semver-covered but
-lower-churn-risk-documented in doc 03).
+The complete 1.0 public export set: the surfaces `Tray`, `TrayHandle`,
+`ContextMenu`, `Popup`; the builder `Menu` + `add`; the item kinds and their
+builders `Item`, `Text`, `Image`, `Submenu`, `Check`, `Predefined`, and the
+`MenuNode` trait; the free-function constructors `text`, `image`, `submenu`,
+`separator`, `check`; the lower-level `Row`, `Segment`, `StyleRun`; the style
+primitives `Align`, `Flex`, `Color`, `Rgba`, `Font`, `FontFamily`, `Weight`, `Icon`;
+the accelerator model `Accelerator`, `Modifiers`, `Code` (1.0-new, [`40`](40-input-interaction.md));
+theming `Theme`, `ThemeSource`, `MenuOptions`, `Insets`; geometry `Edge`,
+`LogicalPoint`, `LogicalSize`, `LogicalRect`; events `MenuId`, `MenuEvent`,
+`MenuEventReceiver`; errors `Error`, `Unsupported`, `Result`; plus the `compat`
+module (doc 02) and the lower-level `a11y` / `keynav` / `anchor` / `flyout` /
+`layout` / `render` modules (exposed for advanced integration and testing,
+semver-covered but lower-churn-risk-documented in doc 03).
 
 Nothing consumer-specific leaks in: no usagio id grammar, no `switch:`/`capture:`
 strings, no snapshot types. muri knows only `Menu` and opaque `MenuId`s.

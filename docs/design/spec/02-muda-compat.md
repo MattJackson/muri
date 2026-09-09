@@ -1,14 +1,36 @@
-# 02 — The muda compatibility facade (load-bearing)
+# 02 — muda compatibility: the first-class drop-in on-ramp
 
-Status: **foundational spec — the critical one.** This document is the contract for
-locked decision #1 (muda drop-in) and #2 (hybrid menu bar). It enumerates muda's
-**entire** public API (and the `tray-icon` surface muri subsumes) and specifies,
-per item: how `muri::compat::muda` mirrors it, which surface it maps to (custom
-muri vs native passthrough), and the exact fidelity/behavior contract.
+Status: **foundational spec.** Per the pivot (locked decision #1, [`00` §2/§4](00-overview.md)),
+`muri::compat::muda` is **not** the design constraint — muri's native API is
+([`01`](01-api-contract.md)). It *is*, however, a **first-class, faithful adoption
+on-ramp**: because the native item model maps **1:1 onto muda's item kinds**
+([`01` §2.3.1](01-api-contract.md)), the compat layer is a mechanical wrapper that
+lets an unchanged muda app change its imports and **compile, run, and look native**.
 
-muda API details below reflect muda's published `docs.rs` surface (Windows /
-macOS / Linux-gtk). tray-icon likewise. Where muda's behavior is OS-specific it is
-noted per platform.
+The hard fidelity bar is deliberately strong: **"does the unchanged muda app compile
+and run?"** is a *goal*, not best-effort. Any divergence that would break a plain
+muda app is a bug to design around, not a footnote. Two properties make that
+achievable:
+
+1. **The compat layer preserves muda's passive integration model.** muda and
+   `tray-icon` are *passive* — the host app owns its own event loop (tao/winit) and
+   polls global channels. The compat layer keeps exactly that: it provides the menu
+   types, the global `MenuEvent`/`TrayIconEvent` channels, and `init_for_*` /
+   `show_context_menu_for_*`, and **attaches to the host's existing loop** (§2.1). It
+   does **not** require the app to adopt muri's native `Tray::run(self)` / `TrayHandle`
+   model — that is the *native* door ([`01` §5.1](01-api-contract.md)).
+2. **Everything maps onto the native built-in kinds.** Each muda type routes to a
+   native `Text`/`Check`/`Image`/`Submenu`/`Separator`/`Predefined` constructor
+   (§4); the compat layer never touches the `MenuNode` extension seam. Where a muda
+   behavior genuinely cannot be reproduced in a *custom* surface, it is documented as
+   MAP / PARTIAL-MAP / CANNOT-MAP (§4.6, §9) — but the OS-action items and the app
+   menu bar route to **native passthrough**, so they stay correct.
+
+This document enumerates muda's public API (and the `tray-icon` surface muri
+subsumes) and specifies, per item: the native constructor it maps to, whether it is
+custom-muri or native-passthrough, and the exact fidelity contract. muda API details
+reflect muda's published `docs.rs` surface (Windows / macOS / Linux-gtk); tray-icon
+likewise. OS-specific behavior is noted per platform.
 
 Cross-references: native API [`01-api-contract.md`](01-api-contract.md); threading
 & the global event channel [`03-threading-events-versioning.md`](03-threading-events-versioning.md);
@@ -31,16 +53,21 @@ the worked migration [`60-migration-guide.md`](60-migration-guide.md).
      `init_for_gtk_window`) pass through to the *real native menu* — byte-for-byte
      native, because it *is* native (decision #2);
    - **custom surfaces** (tray menu, `show_context_menu_for_*`) are drawn by muri
-     with `Theme::native()`, which resolves to live OS colors and the system font
-     — *visually near-native*, with the documented divergences in §9.
+     with `Theme::native()`, which resolves to live OS colors, the system font, **and
+     real vibrancy** (macOS `NSVisualEffectView` / Windows acrylic, decision #6) —
+     *visually native*, with only the minor documented divergences in §9.
 
 **What the guarantee does NOT promise:**
 
-- Pixel-identical custom-surface rendering vs the OS menu (no vibrancy/translucency;
-  muri's own metrics; see §9).
+- Byte-for-byte pixel identity with the OS menu (muri's own metrics — row height /
+  padding / radius — are tuned to look native but not guaranteed pixel-identical;
+  D2, §9). Vibrancy is now matched (decision #6); N-level submenus are supported
+  (decision #8), so those are no longer divergences.
 - That every `PredefinedMenuItem` OS action behaves natively *inside a custom
-  surface* (§4.6 — the hardest caveat).
-- Global accelerator activation from a custom tray/context menu (§5).
+  surface* (§4.6 — OS-action items are steered to the native menu bar where they
+  work perfectly; the custom-surface cases are enumerated MAP/PARTIAL/CANNOT).
+- Global accelerator activation from a custom tray/context menu (§5 — a stated
+  non-goal; menu-bar accelerators fire natively).
 - A styled tray-anchored popup on Linux (decision #3).
 
 The guarantee is deliberately scoped so it is *true*, not aspirational. §10
@@ -51,7 +78,7 @@ enumerates the supported set and every divergence.
 ```rust
 // muri::compat::muda  — mirrors muda's module layout and type names
 pub mod muda {
-    pub struct Menu { /* wraps either a native muda::Menu (menu-bar) or a muri::Menu */ }
+    pub struct Menu { /* a muri::Menu tree + a mode tag; menu-bar mode → a native OS menu muri builds itself */ }
     pub struct Submenu { .. }
     pub struct MenuItem { .. }
     pub struct CheckMenuItem { .. }
@@ -81,9 +108,9 @@ API gives:
 
 | Consumer calls | Intent | Facade routes to | Rendered by |
 |---|---|---|---|
-| `Menu::init_for_nsapp()` | macOS app menu bar | wrapped **native `muda::Menu`** | OS (NSMenu) |
-| `Menu::init_for_hwnd(hwnd)` | Windows window menu bar | wrapped **native muda** | OS (HMENU) |
-| `Menu::init_for_gtk_window(w, b)` | Linux window menu bar | wrapped **native muda** | OS (GTK) |
+| `Menu::init_for_nsapp()` | macOS app menu bar | **native `NSMenu`** muri builds (objc2) | OS (NSMenu) |
+| `Menu::init_for_hwnd(hwnd)` | Windows window menu bar | **native `HMENU`** muri builds (windows-sys) | OS (HMENU) |
+| `Menu::init_for_gtk_window(w, b)` | Linux window menu bar | **native GTK menu** muri builds (gtk) | OS (GTK) |
 | `menu.show_context_menu_for_nsview(view, pos)` | transient context menu | **muri `ContextMenu`** | muri (custom) |
 | `menu.show_context_menu_for_hwnd(hwnd, pos)` | transient context menu | **muri `ContextMenu`** | muri (custom) |
 | `menu.show_context_menu_for_gtk_window(w, pos)` | transient context menu | **muri `ContextMenu`** | muri (custom) |
@@ -93,7 +120,8 @@ API gives:
 used both as a menu bar (`init_for_nsapp`) and shown as a context menu
 (`show_context_menu_*`) — muda allows this. The facade cannot know at construction
 time which it will be. Therefore the facade `Menu` **builds a muri `Menu` tree
-eagerly (always)** and **lazily builds a native `muda::Menu` only if an `init_for_*`
+eagerly (always)** and **lazily builds a native OS menu (`NSMenu`/`HMENU`/GTK, via
+objc2/windows-sys/gtk — decision #5, not the muda crate) only if an `init_for_*`
 method is called.** A menu used both ways is drawn natively in the bar and by muri
 in the context menu — visually different in the two places. This is a documented
 divergence (§9, item D3). In practice apps do not reuse one `Menu` as both bar and
@@ -108,6 +136,32 @@ native menu bar cannot be `Accessory`. **Contract:** the facade sets the activat
 policy from the *combination* of surfaces the consumer installs — `Regular` if any
 `init_for_nsapp` is called, `Accessory` only for a tray-only app. This must be
 decided before any surface is shown. See [`20-platform-macos.md`](20-platform-macos.md).
+
+### 2.1 Preserving muda's passive loop (the crucial compat property)
+
+muda/tray-icon never own the event loop; the host app does, and polls
+`MenuEvent::receiver()` / `TrayIconEvent::receiver()` from inside it. The compat
+layer **must keep that model** so an unchanged muda app still runs — it must **not**
+force the host onto muri's native `Tray::run(self)` / `TrayHandle`
+([`01` §5.1](01-api-contract.md)). Concretely:
+
+- **`TrayIconBuilder::build()` returns immediately** (as tray-icon's does) with a
+  live tray handle; it does **not** block on a loop. The custom popup muri draws
+  needs a `winit` loop, so the compat tray **attaches to the host's loop**: if the
+  host runs a `winit` `EventLoop`, muri's backend posts through the same
+  `EventLoopProxy`/`UserEvent` mechanism its macOS backend already uses
+  ([`03` §2](03-threading-events-versioning.md)); the compat layer exposes an
+  integration entry the host calls from its loop (or, for a host with no loop of its
+  own, an opt-in "muri owns the loop" convenience — but that is *not* required for a
+  drop-in). This is the one place the drop-in is not literally zero-code (§`60` §3.3
+  shows both shapes), but it does **not** change the app's ownership model.
+- **Runtime menu updates** in a passive app go through the same tray handle's
+  `set_menu`/`set_icon` (mirroring tray-icon's post-construction API), which internally
+  posts to the loop — the host never has to hold a muri `TrayHandle` or call `run`.
+- **Events stay on the global channel.** The host keeps its `MenuEvent::receiver()`
+  loop; muri *projects* its native activations onto that channel (decision #5, §3,
+  [`03` §3](03-threading-events-versioning.md)). No forwarder thread bridging two
+  native channels is needed anymore, because muri emits the events itself.
 
 ## 3. `MenuId` and identity
 
@@ -154,12 +208,12 @@ muda's item types and the trait `IsMenuItem` (the object-safe supertype;
 - muda: a nested menu; `IsMenuItem`; has text, enabled, an id, children.
 - muri: `Item::Submenu { label: Row, menu: Menu }`. The submenu's text →
   `label.label(text)`; enabled → `label.enabled`; children → the nested `Menu`.
-- **Fidelity note:** muda submenus in a *native menu bar* nest as native
-  submenus. In a muri custom surface they open as **flyout panels** — one level
-  deep today ([`40-input-interaction.md`](40-input-interaction.md)). A muda menu
-  with **submenus nested >1 deep shown as a context menu** exceeds the current
-  flyout depth; 1.0 must either lift the single-level limit or the facade flattens
-  / documents it. **This is a 1.0 gate item**, flagged for doc 40.
+- **Fidelity note:** muda submenus in a *native menu bar* nest as native submenus.
+  In a muri custom surface they open as **flyout panels**, nested to **any depth**
+  (decision #8, N-level flyout stack — [`40-input-interaction.md`](40-input-interaction.md) §5).
+  A muda menu with submenus nested arbitrarily deep maps **directly** — the compat
+  layer never flattens (the old single-level limit is gone), so `Submenu` →
+  `Item::Submenu(submenu(text).add(..)…)` is faithful at every depth.
 
 ### 4.3 `MenuItem`
 
@@ -276,10 +330,13 @@ muda exposes these as the `ContextMenu` helper trait (implemented by `Menu` and
 - plus `hide_for_nsview` / `set_as_*` variants.
 
 **Facade contract:**
-- **`init_for_*` → native passthrough (decision #2).** The facade lazily
-  constructs a real `muda::Menu` from the tree and calls muda's real `init_for_*`.
-  The wrapped native menu owns menu-bar rendering, accelerators, and a11y for
-  free. muri draws nothing here.
+- **`init_for_*` → native passthrough (decision #2).** The facade lazily builds a
+  **native OS menu** from the tree (an `NSMenu`/`HMENU`/GTK menu via
+  objc2/windows-sys/gtk — decision #5, muri does this itself, not via the muda crate)
+  and installs it (`NSApplication.mainMenu` / `SetMenu` / GTK menu-bar box). That
+  native menu owns menu-bar rendering, accelerators, and a11y for free; muri draws
+  nothing here, and its target/action feeds the same `dispatch`/global-channel path
+  as custom surfaces ([`03` §3](03-threading-events-versioning.md)).
 - **`show_context_menu_for_*` → muri custom.** The facade builds a
   `muri::ContextMenu` from the tree and calls `open_at(point, edge)`, mapping the
   `Position` (or the current cursor when `None`) to a `LogicalPoint` and choosing
@@ -334,8 +391,12 @@ gets muri's `Theme::native()` look (§9).
 Referenced by id from doc 60. These are the complete, enumerated ways a migrated
 app can differ; the guarantee in §1 is "identical *except* these."
 
-- **D1 — No vibrancy/translucency.** Custom surfaces are opaque `Theme::native()`
-  color; macOS menu vibrancy is not reproduced (doc 01 §4). Permanent.
+- **D1 — Vibrancy: RESOLVED (no longer a divergence).** `Theme::native()` renders
+  with real vibrancy — macOS `NSVisualEffectView`, Windows acrylic (locked decision
+  #6, doc 01 §4, doc 10 §11). A custom surface is now visually native, not opaque.
+  The only residue: the Linux *styled* surface stays opaque (compositor-owned blur
+  is not client-controllable, doc 22), and pixel-exact metrics are still not promised
+  (D2).
 - **D2 — Metrics differ subtly.** Row height, padding, corner radius, and font
   metrics are muri's, tuned to look native but not guaranteed pixel-identical to
   the OS menu.
@@ -349,8 +410,9 @@ app can differ; the guarantee in §1 is "identical *except* these."
   1.0 ships `Symbol` rendering (§4.7).
 - **D7 — Linux tray** has no styled anchored popup; falls back to native menu or
   pointer context menu (decision #3).
-- **D8 — Submenu depth** >1 in a custom surface exceeds the shipped single-level
-  flyout until 1.0 lifts it (§4.2).
+- **D8 — Submenu depth: RESOLVED (no longer a divergence).** N-level nested submenus
+  ship in 1.0 (locked decision #8, §4.2, doc 40 §5); a muda menu of any submenu depth
+  maps directly with no flattening.
 - **D9 — macOS activation policy** may shift from `Accessory` to `Regular` when a
   native menu bar is installed alongside a tray (§2).
 
@@ -362,8 +424,9 @@ The guarantee holds for apps that:
 - install the app menu bar via `init_for_*` **and/or** use a tray menu **and/or**
   `show_context_menu_for_*`;
 - use `PredefinedMenuItem` items understanding the §4.6 custom-surface caveats;
-- do not rely on menu-bar accelerators firing from within a *custom* surface (D5),
-  on custom-surface vibrancy (D1), or on a styled tray popup on Linux (D7).
+- do not rely on menu-bar accelerators firing from within a *custom* surface (D5)
+  or on a styled tray popup on Linux (D7). (Custom-surface vibrancy is now provided,
+  D1; N-level submenus are supported, D8.)
 
 For apps entirely on the native menu bar, migration is transparent (everything is
 passthrough). The interesting migrations — and muri's actual value — are apps with
