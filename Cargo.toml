@@ -39,8 +39,12 @@ raw-window-handle = "0.6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+# macOS AccessKit platform adapter (optional, `a11y` feature): attaches the
+# already-built `a11y` tree to the winit popup window so VoiceOver can walk it.
+# 0.23 pairs with accesskit 0.17 + winit 0.30. Bridges to NSAccessibility.
+accesskit_winit = { version = "0.23", optional = true }
 
 [features]
 default = []
 # Screen-reader integration via AccessKit on the raster backend (see README).
-a11y = ["dep:accesskit"]
+a11y = ["dep:accesskit", "dep:accesskit_winit"]

@@ -35,9 +35,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
+use crate::anchor::place_popup;
 use crate::error::{Error, Result};
 use crate::flyout::{next_flyout, place_flyout, HoverTarget};
-use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
+use crate::geometry::{Edge, LogicalPoint, LogicalRect, LogicalSize};
 use crate::keynav::{handle_key, FlyoutFocus, MenuFocus, NavAction, NavKey};
 use crate::menu::{Icon, Item, Menu};
 use crate::render::paint::{render_menu, LaidMenu};
@@ -46,11 +47,23 @@ use crate::theme::Theme;
 use crate::tray::TrayAnchor;
 use crate::Tray;
 
-/// User events posted to the winit loop from the AppKit status-item click.
-#[derive(Debug, Clone)]
+/// User events posted to the winit loop from the AppKit status-item click and,
+/// under the `a11y` feature, from the AccessKit platform adapter.
+#[derive(Debug)]
 enum UserEvent {
     /// The tray icon was clicked — toggle the popup.
     ToggleTray,
+    /// An AccessKit adapter event (initial-tree request, action request, or
+    /// deactivation) for the popup window.
+    #[cfg(feature = "a11y")]
+    Accessibility(accesskit_winit::Event),
+}
+
+#[cfg(feature = "a11y")]
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        UserEvent::Accessibility(event)
+    }
 }
 
 static TRAY_PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
@@ -216,6 +229,8 @@ pub fn run_tray(tray: Tray) -> Result<()> {
         popup_origin: LogicalPoint::default(),
         flyout: None,
         focused: HashSet::new(),
+        #[cfg(feature = "a11y")]
+        adapter: None,
     };
 
     event_loop
@@ -255,6 +270,13 @@ struct App {
     /// only when this becomes empty, so opening a flyout (which momentarily moves
     /// focus off the parent) does not close the menu.
     focused: HashSet<WindowId>,
+    /// The AccessKit platform adapter bound to the main popup window (behind the
+    /// `a11y` feature). It bridges the published [`crate::a11y`] tree to
+    /// NSAccessibility so VoiceOver can walk the menu; `None` while the popup is
+    /// closed. The flyout is a separate OS window and is not (yet) adapted — its
+    /// items are still present as nested nodes in the popup window's tree.
+    #[cfg(feature = "a11y")]
+    adapter: Option<accesskit_winit::Adapter>,
 }
 
 impl App {
@@ -276,6 +298,10 @@ impl App {
         self.laid = None;
         self.hovered = None;
         self.focused.clear();
+        #[cfg(feature = "a11y")]
+        {
+            self.adapter = None;
+        }
     }
 
     fn open_popup(&mut self, event_loop: &ActiveEventLoop) {
@@ -294,17 +320,11 @@ impl App {
             None,
         );
 
+        // Anchor below the status item via the shared, unit-tested placement math
+        // (flips/clamps into the screen work area so it never spills off-screen).
         let anchor = self.anchor.anchor_rect().unwrap_or_default();
-        // Open below the status item, right edge roughly aligned to the icon.
-        let mut px = anchor.origin.x;
-        let py = anchor.origin.y + anchor.size.height + 2.0;
-        // Clamp to the primary screen work area so it never spills off-screen.
-        if let Some(screen) = NSScreen::screens(self.anchor.mtm).firstObject() {
-            let sw = screen.frame().size.width as f32;
-            if px + laid.size.width > sw {
-                px = (sw - laid.size.width - 4.0).max(4.0);
-            }
-        }
+        let origin = place_popup(anchor, laid.size, self.work_area(), Edge::Bottom, 2.0);
+        let (px, py) = (origin.x, origin.y);
 
         let attrs = Window::default_attributes()
             .with_decorations(false)
@@ -313,11 +333,24 @@ impl App {
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_inner_size(WinitLogicalSize::new(laid.size.width, laid.size.height))
             .with_position(LogicalPosition::new(px, py));
+        // The AccessKit adapter must be attached before the window is first shown,
+        // so under the `a11y` feature we create it hidden and reveal it below.
+        #[cfg(feature = "a11y")]
+        let attrs = attrs.with_visible(false);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(_) => return,
         };
+        #[cfg(feature = "a11y")]
+        {
+            if let Some(proxy) = TRAY_PROXY.get().cloned() {
+                self.adapter = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+                    &window, proxy,
+                ));
+            }
+            window.set_visible(true);
+        }
         let context = match Context::new(window.clone()) {
             Ok(c) => c,
             Err(_) => return,
@@ -336,6 +369,7 @@ impl App {
         self.popup_origin = LogicalPoint::new(px, py);
         self.flyout = None;
         window.request_redraw();
+        self.sync_a11y();
     }
 
     /// The child [`Menu`] of a top-level `Item::Submenu`, if `index` names one.
@@ -434,12 +468,14 @@ impl App {
             hovered: None,
         });
         window.request_redraw();
+        self.sync_a11y();
     }
 
     fn close_flyout(&mut self) {
         if let Some(old) = self.flyout.take() {
             self.focused.remove(&old.window.id());
         }
+        self.sync_a11y();
     }
 
     /// Repaint the flyout panel (mirrors [`App::redraw`] for the child window).
@@ -551,6 +587,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.open_popup(event_loop);
                 }
             }
+            #[cfg(feature = "a11y")]
+            UserEvent::Accessibility(ax_event) => self.on_a11y_event(event_loop, ax_event),
         }
     }
 
@@ -561,6 +599,15 @@ impl ApplicationHandler<UserEvent> for App {
         event: WindowEvent,
     ) {
         let is_flyout = self.flyout.as_ref().map(|f| f.window.id()) == Some(window_id);
+        // Let the AccessKit adapter observe every event for the popup window
+        // (focus, bounds, HiDPI changes) before muri handles it.
+        #[cfg(feature = "a11y")]
+        if Some(window_id) == self.window.as_ref().map(|w| w.id()) {
+            let win = self.window.clone();
+            if let (Some(adapter), Some(win)) = (self.adapter.as_mut(), win) {
+                adapter.process_event(&win, &event);
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(focused) => {
@@ -663,21 +710,33 @@ impl App {
             None if current.is_some() => self.close_flyout(),
             _ => {}
         }
+        // Keep the announced focus in step with the highlighted top-level row even
+        // when the flyout state itself did not change (open/close already sync).
+        self.sync_a11y();
     }
 
     /// Handle pointer movement over the flyout panel: keep it open and highlight
     /// the hovered child row.
     fn on_flyout_cursor(&mut self, position: PhysicalPosition<f64>) {
-        let Some(flyout) = self.flyout.as_mut() else {
-            return;
+        let changed = {
+            let Some(flyout) = self.flyout.as_mut() else {
+                return;
+            };
+            let scale = flyout.window.scale_factor();
+            let logical =
+                LogicalPoint::new((position.x / scale) as f32, (position.y / scale) as f32);
+            flyout.cursor = logical;
+            let hovered = flyout.laid.as_ref().and_then(|l| l.hit(logical));
+            if hovered != flyout.hovered {
+                flyout.hovered = hovered;
+                flyout.window.request_redraw();
+                true
+            } else {
+                false
+            }
         };
-        let scale = flyout.window.scale_factor();
-        let logical = LogicalPoint::new((position.x / scale) as f32, (position.y / scale) as f32);
-        flyout.cursor = logical;
-        let hovered = flyout.laid.as_ref().and_then(|l| l.hit(logical));
-        if hovered != flyout.hovered {
-            flyout.hovered = hovered;
-            flyout.window.request_redraw();
+        if changed {
+            self.sync_a11y();
         }
     }
 
@@ -724,6 +783,113 @@ impl App {
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+        self.sync_a11y();
+    }
+
+    /// The [`MenuId`] activated by selecting `(top, child)`, if that position
+    /// names an activatable leaf row. A submenu *parent* (`child == None` over a
+    /// submenu) has no direct id — it opens a flyout instead.
+    #[cfg(feature = "a11y")]
+    fn menu_id_at(&self, top: usize, child: Option<usize>) -> Option<crate::menu::MenuId> {
+        match (self.tray.menu.items.get(top), child) {
+            (Some(Item::Row(row)), None) => Some(row.id.clone()),
+            (Some(Item::Submenu { menu, .. }), Some(ci)) => match menu.items.get(ci) {
+                Some(Item::Row(row)) => Some(row.id.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Rebuild the published accessibility tree from the current menu + selection
+    /// and hand it to the AccessKit adapter (a no-op if the adapter is inactive,
+    /// i.e. no assistive technology is listening). Called whenever focus, the open
+    /// flyout, or the menu content changes so NSAccessibility stays truthful.
+    #[cfg(feature = "a11y")]
+    fn sync_a11y(&mut self) {
+        let focus = MenuFocus {
+            top: self.hovered,
+            flyout: self.flyout.as_ref().map(|f| FlyoutFocus {
+                parent: f.parent_index,
+                child: f.hovered,
+            }),
+        };
+        let menu = self.tray.menu.clone();
+        let Some(adapter) = self.adapter.as_mut() else {
+            return;
+        };
+        adapter.update_if_active(|| {
+            let mut tree = crate::a11y::build_tree(&menu);
+            if let Some(ff) = focus.flyout {
+                crate::a11y::set_expanded(&mut tree, ff.parent, true);
+            }
+            let fid = crate::a11y::focused_id(&tree, &focus);
+            crate::a11y::accesskit::tree_update(&tree, fid)
+        });
+    }
+
+    /// No-op stand-in when the `a11y` feature is off, so call sites stay clean.
+    #[cfg(not(feature = "a11y"))]
+    #[inline]
+    fn sync_a11y(&mut self) {}
+
+    /// Handle one AccessKit adapter event routed through the winit user-event
+    /// channel: serve the initial tree, apply an assistive-technology action, or
+    /// note deactivation.
+    #[cfg(feature = "a11y")]
+    fn on_a11y_event(&mut self, event_loop: &ActiveEventLoop, event: accesskit_winit::Event) {
+        use accesskit_winit::WindowEvent as AxWindowEvent;
+        match event.window_event {
+            AxWindowEvent::InitialTreeRequested => self.sync_a11y(),
+            AxWindowEvent::ActionRequested(req) => self.on_a11y_action(event_loop, req),
+            AxWindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
+    /// Apply an AccessKit action request (VoiceOver moving focus or activating an
+    /// item) onto the live popup, mirroring the mouse/keyboard paths.
+    #[cfg(feature = "a11y")]
+    fn on_a11y_action(&mut self, event_loop: &ActiveEventLoop, req: accesskit::ActionRequest) {
+        use accesskit::Action;
+        let tree = crate::a11y::build_tree(&self.tray.menu);
+        let Some((top, child)) = crate::a11y::locate(&tree, crate::a11y::AxId(req.target.0)) else {
+            return;
+        };
+        match req.action {
+            Action::Focus => {
+                self.hovered = Some(top);
+                if let Some(ci) = child {
+                    if self.flyout.as_ref().map(|f| f.parent_index) != Some(top) {
+                        self.open_flyout(event_loop, top);
+                    }
+                    if let Some(f) = self.flyout.as_mut() {
+                        f.hovered = Some(ci);
+                        f.window.request_redraw();
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                self.sync_a11y();
+            }
+            Action::Click => {
+                // A submenu parent expands its flyout; a leaf row activates and
+                // dismisses the whole stack.
+                if child.is_none() && self.submenu_child(top).is_some() {
+                    self.hovered = Some(top);
+                    self.open_flyout(event_loop, top);
+                    self.sync_a11y();
+                    return;
+                }
+                if let Some(id) = self.menu_id_at(top, child) {
+                    if !id.is_none() {
+                        self.tray.dispatch(&id);
+                    }
+                }
+                self.close_popup();
+            }
+            _ => {}
         }
     }
 

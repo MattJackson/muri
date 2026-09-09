@@ -96,6 +96,7 @@
 #![deny(missing_docs)]
 
 pub mod a11y;
+pub mod anchor;
 pub mod error;
 pub mod flyout;
 pub mod geometry;
@@ -107,7 +108,8 @@ pub mod style;
 pub mod theme;
 pub mod tray;
 
-pub use a11y::{announcement, build_tree, focused_id, AxId, AxNode, AxRole, AxTree};
+pub use a11y::{announcement, build_tree, focused_id, locate, AxId, AxNode, AxRole, AxTree};
+pub use anchor::place_popup;
 pub use error::{Error, Result, Unsupported};
 pub use flyout::{next_flyout, place_flyout, FlyoutPlacement, FlyoutSide, HoverTarget};
 pub use geometry::{Edge, Insets, LogicalPoint, LogicalRect, LogicalSize};

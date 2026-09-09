@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 4 — VoiceOver attach + Windows backend groundwork.**
+  - Shared, unit-tested popup-placement math (`anchor` module): `place_popup`
+    resolves a popup's top-left corner from an anchor rect, popup size, screen
+    work area, and grow-[`Edge`], flipping to the opposite side when it would
+    spill and clamping fully on-screen. Every backend obtains the anchor rect
+    natively and calls this one function; the macOS backend now uses it in place
+    of its inline placement. Exposed as `place_popup`.
+  - **AccessKit platform adapter attached on macOS** (behind the `a11y` feature):
+    the popup's winit window now hosts an `accesskit_winit::Adapter`, so the
+    already-published `a11y` tree is exposed to NSAccessibility / VoiceOver. muri
+    creates the window hidden, attaches the adapter, then shows it; forwards every
+    popup window event to the adapter; serves the initial tree and pushes a fresh
+    `TreeUpdate` (menu tree + focus + expanded flyout) on open, keyboard/mouse
+    selection, and flyout open/close; and applies AccessKit `Focus`/`Click` action
+    requests back onto the live popup (moving the highlight, opening a flyout, or
+    dispatching a row). A new pure helper `a11y::locate` maps an AccessKit node id
+    back to a `(top, child)` menu position (unit-tested). The wiring compiles and
+    is exercised by the pure tests; a **live VoiceOver pass on a device remains
+    the human-verified final hop**, and the flyout — a separate OS window — is not
+    yet independently adapted (its items are present as nested nodes in the popup
+    window's tree).
+
 - **Phase 3 — accessibility + keyboard navigation.**
   - Pure, tested keyboard-navigation state machine (`keynav` module): `handle_key`
     advances a `MenuFocus` (selected top-level row + optional open-flyout child)

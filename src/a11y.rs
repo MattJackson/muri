@@ -249,6 +249,25 @@ pub fn focused_id(tree: &AxTree, focus: &MenuFocus) -> Option<AxId> {
         .map(|n| n.id)
 }
 
+/// Locate a node by id as a `(top-level item index, optional submenu child item
+/// index)` pair. The live backend uses this to map an AccessKit action request
+/// (whose `target` is the [`AxId`]) back onto the [`Menu`] position to act on.
+pub fn locate(tree: &AxTree, id: AxId) -> Option<(usize, Option<usize>)> {
+    for top in &tree.root.children {
+        if top.id == id {
+            return top.item_index.map(|i| (i, None));
+        }
+        for child in &top.children {
+            if child.id == id {
+                if let (Some(ti), Some(ci)) = (top.item_index, child.item_index) {
+                    return Some((ti, Some(ci)));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Mark the submenu node whose `item_index` matches `parent` as expanded (or not)
 /// in place. The backend calls this when it opens/closes a flyout so the tree's
 /// `expanded` state — and any resulting AT notification — stays truthful.
@@ -482,6 +501,22 @@ mod tests {
         };
         let id = focused_id(&tree, &focus).unwrap();
         assert_eq!(tree.find(id).unwrap().name, "Settings");
+    }
+
+    #[test]
+    fn locate_maps_ids_back_to_menu_positions() {
+        let tree = build_tree(&menu());
+        // Top-level "you@example.com" is item index 2.
+        let top_id = tree.root.children[2].id;
+        assert_eq!(locate(&tree, top_id), Some((2, None)));
+        // Submenu "Settings" is item index 5; its child "Two" is child index 1.
+        let child_id = tree.root.children[5].children[1].id;
+        assert_eq!(locate(&tree, child_id), Some((5, Some(1))));
+        // The submenu parent itself resolves to (5, None).
+        let parent_id = tree.root.children[5].id;
+        assert_eq!(locate(&tree, parent_id), Some((5, None)));
+        // An unknown id is not found.
+        assert_eq!(locate(&tree, AxId(9999)), None);
     }
 
     #[test]
