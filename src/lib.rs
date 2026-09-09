@@ -32,11 +32,14 @@
 //!
 //! ## Status
 //!
-//! **Early / macOS-first WIP.** This crate ships the **public API surface** plus
-//! a pure, tested data-model/layout/theme foundation. No pixels are drawn yet;
-//! methods that require a live renderer (`Tray::run`, `Tray::open`,
-//! `ContextMenu::open_at`) and the per-OS anchoring/scene-drawer backends are
-//! `todo!()`. See the README for the roadmap (macOS → Windows → Linux).
+//! **Early / macOS-first WIP.** On **macOS** the crate draws a real styled popup:
+//! `Tray::run` installs the `NSStatusItem`, opens the custom-drawn menu anchored
+//! to it, and opens **flyout submenu** panels beside submenu rows. The shared
+//! scene drawer, the `Flex`/`Align` flush-right layout, and the flyout
+//! placement/hover-stack logic are pure and unit-tested. `Tray::open`,
+//! `ContextMenu::open_at`, the Windows/Linux backends, and screen-reader a11y are
+//! still `todo!()`/`Unsupported`. See the README for the roadmap
+//! (macOS → Windows → Linux).
 //!
 //! ## Crate layout
 //!
@@ -45,6 +48,8 @@
 //! - [`style`] / [`theme`] — visual primitives ([`Color`], [`Font`]) and the
 //!   [`Theme`] surface with pure semantic-color resolution.
 //! - [`layout`] — pure `Flex`/`Align` width resolution (the flush-right layout).
+//! - [`flyout`] — pure flyout-submenu placement (right/left flip, clamp) and
+//!   hover-stack transitions.
 //! - [`geometry`] — logical points/sizes/rects and [`Insets`]/[`Edge`].
 //! - [`render`] — the [`SceneDrawer`](render::SceneDrawer) interface shared by
 //!   the one CPU-raster backend on every OS.
@@ -86,6 +91,7 @@
 #![deny(missing_docs)]
 
 pub mod error;
+pub mod flyout;
 pub mod geometry;
 pub mod layout;
 pub mod menu;
@@ -95,6 +101,7 @@ pub mod theme;
 pub mod tray;
 
 pub use error::{Error, Result, Unsupported};
+pub use flyout::{next_flyout, place_flyout, FlyoutPlacement, FlyoutSide, HoverTarget};
 pub use geometry::{Edge, Insets, LogicalPoint, LogicalRect, LogicalSize};
 pub use menu::{
     Align, ClickHandler, Flex, Icon, Item, Menu, MenuEvent, MenuId, Row, Segment, StyleRun,
