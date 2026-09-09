@@ -14,7 +14,7 @@
 //! drives it with a small builder API:
 //!
 //! ```no_run
-//! use muri::{Tray, Menu, Item, Row, Icon};
+//! use muri::{Tray, Menu, Row, Icon};
 //!
 //! # fn demo(icon_png: &[u8]) {
 //! let menu = Menu::new()
@@ -32,11 +32,24 @@
 //!
 //! ## Status
 //!
-//! **Early / macOS-first WIP.** This crate currently ships the **public API
-//! surface only** — the types, the builder, and the documentation of how each
-//! backend will work. No pixels are drawn yet; methods that require a live
-//! renderer (`Tray::run`, `Tray::open`, …) are `todo!()`. See the design
-//! document and README for the roadmap (macOS → Windows → Linux).
+//! **Early / macOS-first WIP.** This crate ships the **public API surface** plus
+//! a pure, tested data-model/layout/theme foundation. No pixels are drawn yet;
+//! methods that require a live renderer (`Tray::run`, `Tray::open`,
+//! `ContextMenu::open_at`) and the per-OS anchoring/scene-drawer backends are
+//! `todo!()`. See the README for the roadmap (macOS → Windows → Linux).
+//!
+//! ## Crate layout
+//!
+//! - [`menu`] — the declarative `Segment` → `Row` → `Item` → `Menu` tree,
+//!   identifiers, events, and icons (pure data model).
+//! - [`style`] / [`theme`] — visual primitives ([`Color`], [`Font`]) and the
+//!   [`Theme`] surface with pure semantic-color resolution.
+//! - [`layout`] — pure `Flex`/`Align` width resolution (the flush-right layout).
+//! - [`geometry`] — logical points/sizes/rects and [`Insets`]/[`Edge`].
+//! - [`render`] — the [`SceneDrawer`](render::SceneDrawer) interface shared by
+//!   the one CPU-raster backend on every OS.
+//! - [`tray`] — the per-OS [`TrayAnchor`](tray::TrayAnchor) shims.
+//! - [`error`] — [`Error`] / [`Unsupported`].
 //!
 //! ## Rendering stack
 //!
@@ -67,678 +80,24 @@
 //! [`winit`]: https://docs.rs/winit
 
 #![forbid(unsafe_code)]
-
-use std::sync::Arc;
-
-// =============================================================================
-// Identity & events
-// =============================================================================
-
-/// A click identifier for a row. muri treats this as an opaque string and hands
-/// it back verbatim when the row is clicked — the *grammar* of the id (e.g.
-/// `"switch:claude:me@x.com"`, `"quit"`) is entirely the consumer's business.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub struct MenuId(pub String);
-
-impl MenuId {
-    /// A sentinel id for non-interactive rows (section headers, separators).
-    /// Rows carrying this id never emit a click event.
-    pub fn none() -> Self {
-        MenuId(String::new())
-    }
-
-    /// Borrow the id as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Whether this is the non-interactive sentinel ([`MenuId::none`]).
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl From<&str> for MenuId {
-    fn from(s: &str) -> Self {
-        MenuId(s.to_owned())
-    }
-}
-
-impl From<String> for MenuId {
-    fn from(s: String) -> Self {
-        MenuId(s)
-    }
-}
-
-/// Emitted when a row is activated (click, Enter, or `AXPress`).
-#[derive(Clone, Debug)]
-pub struct MenuEvent {
-    /// The [`MenuId`] of the activated row.
-    pub id: MenuId,
-}
-
-/// The callback invoked on row activation. Stored by [`Tray`]/[`ContextMenu`].
-pub type ClickHandler = Box<dyn Fn(&MenuId) + Send + 'static>;
-
-// =============================================================================
-// Errors
-// =============================================================================
-
-/// Things muri genuinely cannot do on a given platform. Surfaced rather than
-/// papered over, so consumers can fall back deliberately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unsupported {
-    /// Anchoring a styled popup to a tray icon. Returned on Linux/Wayland, where
-    /// the SNI/AppIndicator host owns the icon and no geometry or click
-    /// coordinate reaches the app. Use a native-menu fallback or a
-    /// pointer-anchored [`ContextMenu`] instead.
-    TrayAnchor,
-    /// Positioning a non-activating toplevel, which Wayland forbids by protocol.
-    ClientPositioning,
-}
-
-/// Errors returned by muri's fallible operations.
-#[derive(Debug)]
-pub enum Error {
-    /// A capability that is not available on the current platform.
-    Unsupported(Unsupported),
-    /// The supplied icon bytes could not be decoded.
-    BadIcon(String),
-    /// A platform API call failed while creating or anchoring the surface.
-    Platform(String),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Unsupported(u) => write!(f, "unsupported on this platform: {u:?}"),
-            Error::BadIcon(m) => write!(f, "bad icon: {m}"),
-            Error::Platform(m) => write!(f, "platform error: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-// =============================================================================
-// Geometry
-// =============================================================================
-
-/// A logical (DPI-independent) screen point.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct LogicalPoint {
-    /// Horizontal position in logical pixels.
-    pub x: f32,
-    /// Vertical position in logical pixels.
-    pub y: f32,
-}
-
-/// Which edge of the anchor the popup should grow from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Edge {
-    /// Open below the anchor (typical for a top menu bar). The default.
-    #[default]
-    Bottom,
-    /// Open above the anchor (typical for a bottom taskbar).
-    Top,
-    /// Open to the left of the anchor.
-    Left,
-    /// Open to the right of the anchor.
-    Right,
-}
-
-/// Per-side insets in logical pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Insets {
-    /// Top inset.
-    pub top: f32,
-    /// Right inset.
-    pub right: f32,
-    /// Bottom inset.
-    pub bottom: f32,
-    /// Left inset.
-    pub left: f32,
-}
-
-impl Insets {
-    /// Uniform insets on all four sides.
-    pub fn uniform(v: f32) -> Self {
-        Insets {
-            top: v,
-            right: v,
-            bottom: v,
-            left: v,
-        }
-    }
-
-    /// Separate horizontal and vertical insets.
-    pub fn symmetric(horizontal: f32, vertical: f32) -> Self {
-        Insets {
-            top: vertical,
-            right: horizontal,
-            bottom: vertical,
-            left: horizontal,
-        }
-    }
-}
-
-// =============================================================================
-// Color
-// =============================================================================
-
-/// A color: either a literal RGBA value, or a **semantic** role that resolves
-/// against the active [`Theme`] (and, on macOS, to the matching system
-/// `NSColor`) so dark/light and accent adapt automatically.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Color {
-    /// A literal 8-bit-per-channel RGBA color.
-    Rgba(u8, u8, u8, u8),
-    /// Primary text color (`labelColor`).
-    Label,
-    /// De-emphasized text color (`secondaryLabelColor`), e.g. a version tail.
-    SecondaryLabel,
-    /// The user's accent color (`controlAccentColor`).
-    Accent,
-    /// Separator / hairline color.
-    Separator,
-    /// System red — used for critical/over-limit severity.
-    SystemRed,
-    /// System orange — used for warning severity.
-    SystemOrange,
-    /// System green — used for healthy severity.
-    SystemGreen,
-    /// System yellow.
-    SystemYellow,
-}
-
-impl Color {
-    /// An opaque literal color from 8-bit channels.
-    pub fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Color::Rgba(r, g, b, 255)
-    }
-}
-
-// =============================================================================
-// Fonts
-// =============================================================================
-
-/// A font family selector. `System`/`SystemMono` resolve to the platform UI
-/// font so menus match the OS; `Named` looks up an installed family.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub enum FontFamily {
-    /// The platform UI font (San Francisco, Segoe UI, system default).
-    #[default]
-    System,
-    /// The platform monospace UI font.
-    SystemMono,
-    /// A specific installed family by name.
-    Named(String),
-}
-
-/// Font weight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Weight {
-    /// Regular / normal weight. The default.
-    #[default]
-    Regular,
-    /// Medium weight.
-    Medium,
-    /// Semibold weight.
-    Semibold,
-    /// Bold weight.
-    Bold,
-}
-
-/// A resolved font: family, size (in logical points), and weight.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Font {
-    /// The font family.
-    pub family: FontFamily,
-    /// Size in logical points.
-    pub size: f32,
-    /// Weight.
-    pub weight: Weight,
-}
-
-impl Default for Font {
-    fn default() -> Self {
-        Font {
-            family: FontFamily::System,
-            size: 13.0,
-            weight: Weight::Regular,
-        }
-    }
-}
-
-impl Font {
-    /// A system-font at the given size and weight.
-    pub fn system(size: f32, weight: Weight) -> Self {
-        Font {
-            family: FontFamily::System,
-            size,
-            weight,
-        }
-    }
-
-    /// A system monospace font at the given size and weight.
-    pub fn mono(size: f32, weight: Weight) -> Self {
-        Font {
-            family: FontFamily::SystemMono,
-            size,
-            weight,
-        }
-    }
-}
-
-// =============================================================================
-// Icons
-// =============================================================================
-
-/// A leading/trailing icon or logo. Raster formats are decoded at load; SVGs
-/// are rasterized per-DPI at draw time so they stay crisp on HiDPI.
-#[derive(Clone, Debug)]
-pub enum Icon {
-    /// A PNG (or other auto-detected raster format) from raw bytes.
-    Png(Arc<[u8]>),
-    /// An SVG from raw bytes, rasterized per-DPI.
-    Svg(Arc<[u8]>),
-    /// The themed checkmark glyph, drawn in the leading column.
-    Checkmark,
-    /// A named symbol: an SF Symbol on macOS, with a bundled fallback elsewhere.
-    Symbol(&'static str),
-}
-
-impl Icon {
-    /// Build an [`Icon::Png`] from raw image bytes.
-    pub fn from_png_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
-        Icon::Png(bytes.into())
-    }
-
-    /// Build an [`Icon::Svg`] from raw SVG bytes.
-    pub fn from_svg_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
-        Icon::Svg(bytes.into())
-    }
-}
-
-// =============================================================================
-// Segments & rows
-// =============================================================================
-
-/// Horizontal alignment of a [`Segment`] within the width it is allotted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Align {
-    /// Align to the leading edge. The default.
-    #[default]
-    Left,
-    /// Center within the allotted width.
-    Center,
-    /// Align to the trailing edge (true flush-right).
-    Right,
-}
-
-/// How a [`Segment`] claims horizontal space during row layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Flex {
-    /// Occupy only the segment's intrinsic width. The default.
-    #[default]
-    Fixed,
-    /// Absorb all leftover row width. A `Grow` label followed by an
-    /// `Align::Right` value yields a truly flush-right value with **no reserved
-    /// chevron column** — the core reason muri exists.
-    Grow,
-}
-
-/// A per-substring style span within a [`Segment`]'s text, used for severity
-/// coloring (e.g. a red over-limit percentage inside an otherwise normal line).
-///
-/// `start`/`len` are measured in **UTF-16 code units**, matching `NSRange` and
-/// usagio's existing span model.
-#[derive(Clone, Copy, Debug)]
-pub struct StyleRun {
-    /// Start offset, in UTF-16 code units.
-    pub start: usize,
-    /// Length, in UTF-16 code units.
-    pub len: usize,
-    /// The color applied to this span.
-    pub color: Color,
-    /// An optional weight override for this span.
-    pub weight: Option<Weight>,
-}
-
-impl StyleRun {
-    /// A span covering an explicit range with a color.
-    pub fn new(start: usize, len: usize, color: Color) -> Self {
-        StyleRun {
-            start,
-            len,
-            color,
-            weight: None,
-        }
-    }
-}
-
-/// One horizontal piece of a row. Rows are composed left→right from segments so
-/// multi-column layouts (`label ............ value`) are first-class rather than
-/// a tab-stop hack.
-#[derive(Clone, Debug, Default)]
-pub struct Segment {
-    /// The text to draw.
-    pub text: String,
-    /// Per-substring style spans (colors/weights). Empty → whole-segment style.
-    pub runs: Vec<StyleRun>,
-    /// Alignment within the segment's allotted width.
-    pub align: Align,
-    /// How the segment claims horizontal space.
-    pub flex: Flex,
-    /// Optional per-segment font override (else the row/theme font is used).
-    pub font: Option<Font>,
-    /// Optional whole-segment color (else [`Color::Label`]).
-    pub color: Option<Color>,
-}
-
-impl Segment {
-    /// A new segment with the given text (left-aligned, fixed width).
-    pub fn new(text: impl Into<String>) -> Self {
-        Segment {
-            text: text.into(),
-            ..Segment::default()
-        }
-    }
-
-    /// Set the alignment.
-    pub fn align(mut self, align: Align) -> Self {
-        self.align = align;
-        self
-    }
-
-    /// Set the flex behavior.
-    pub fn flex(mut self, flex: Flex) -> Self {
-        self.flex = flex;
-        self
-    }
-
-    /// Replace the per-substring style runs.
-    pub fn runs(mut self, runs: Vec<StyleRun>) -> Self {
-        self.runs = runs;
-        self
-    }
-
-    /// Set a per-segment font override.
-    pub fn font(mut self, font: Font) -> Self {
-        self.font = Some(font);
-        self
-    }
-
-    /// Set a whole-segment color.
-    pub fn color(mut self, color: Color) -> Self {
-        self.color = Some(color);
-        self
-    }
-}
-
-/// One menu row. A row is interactive (carries a [`MenuId`]) unless it is used
-/// as a [`Item::SectionHeader`].
-#[derive(Clone, Debug)]
-pub struct Row {
-    /// The click id. [`MenuId::none`] marks a non-interactive row.
-    pub id: MenuId,
-    /// Left→right segments (multi-column layout).
-    pub segments: Vec<Segment>,
-    /// Optional leading icon column (logo, avatar, checkmark).
-    pub leading: Option<Icon>,
-    /// Optional trailing icon column.
-    pub trailing: Option<Icon>,
-    /// Whether the row is clickable. Disabled rows are dimmed and inert.
-    pub enabled: bool,
-    /// `Some(true/false)` shows a check column; `None` reserves no check column.
-    pub checked: Option<bool>,
-    /// Optional explicit row background (else theme hover/selection handling).
-    pub background: Option<Color>,
-    /// Optional minimum row height in logical points (else the theme default).
-    pub min_height: Option<f32>,
-}
-
-impl Default for Row {
-    fn default() -> Self {
-        Row {
-            id: MenuId::none(),
-            segments: Vec::new(),
-            leading: None,
-            trailing: None,
-            enabled: true,
-            checked: None,
-            background: None,
-            min_height: None,
-        }
-    }
-}
-
-impl Row {
-    /// A new enabled row with the given click id and no segments.
-    pub fn new(id: impl Into<MenuId>) -> Self {
-        Row {
-            id: id.into(),
-            ..Row::default()
-        }
-    }
-
-    /// A non-interactive row (id = [`MenuId::none`]); handy for section headers
-    /// and pure info lines.
-    pub fn info() -> Self {
-        Row::default()
-    }
-
-    /// Append a plain-text left-aligned segment (convenience).
-    pub fn label(mut self, text: impl Into<String>) -> Self {
-        self.segments.push(Segment::new(text));
-        self
-    }
-
-    /// Append a pre-built segment.
-    pub fn segment(mut self, segment: Segment) -> Self {
-        self.segments.push(segment);
-        self
-    }
-
-    /// Replace all segments.
-    pub fn segments(mut self, segments: Vec<Segment>) -> Self {
-        self.segments = segments;
-        self
-    }
-
-    /// Set the leading icon.
-    pub fn leading(mut self, icon: Icon) -> Self {
-        self.leading = Some(icon);
-        self
-    }
-
-    /// Set the trailing icon.
-    pub fn trailing(mut self, icon: Icon) -> Self {
-        self.trailing = Some(icon);
-        self
-    }
-
-    /// Set enabled state.
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
-    /// Show a check column in the given state.
-    pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = Some(checked);
-        self
-    }
-
-    /// Set an explicit background color.
-    pub fn background(mut self, color: Color) -> Self {
-        self.background = Some(color);
-        self
-    }
-}
-
-// =============================================================================
-// Menu tree
-// =============================================================================
-
-/// A single entry in a [`Menu`].
-#[derive(Clone, Debug)]
-pub enum Item {
-    /// An interactive (or info) row.
-    Row(Row),
-    /// A horizontal divider.
-    Separator,
-    /// A styled, non-interactive group heading.
-    SectionHeader(Row),
-    /// A row that opens a nested flyout panel beside it.
-    Submenu {
-        /// The row shown in the parent menu (drawn with a flyout affordance).
-        label: Row,
-        /// The nested menu shown in the flyout.
-        menu: Menu,
-    },
-}
-
-/// A declarative menu: an ordered list of [`Item`]s. Build it with the fluent
-/// methods, or populate [`Menu::items`] directly.
-#[derive(Clone, Debug, Default)]
-pub struct Menu {
-    /// The ordered items.
-    pub items: Vec<Item>,
-}
-
-impl Menu {
-    /// An empty menu.
-    pub fn new() -> Self {
-        Menu::default()
-    }
-
-    /// Append any [`Item`].
-    pub fn item(mut self, item: Item) -> Self {
-        self.items.push(item);
-        self
-    }
-
-    /// Append an [`Item::Row`].
-    pub fn row(mut self, row: Row) -> Self {
-        self.items.push(Item::Row(row));
-        self
-    }
-
-    /// Append an [`Item::Separator`].
-    pub fn separator(mut self) -> Self {
-        self.items.push(Item::Separator);
-        self
-    }
-
-    /// Append an [`Item::SectionHeader`].
-    pub fn section_header(mut self, row: Row) -> Self {
-        self.items.push(Item::SectionHeader(row));
-        self
-    }
-
-    /// Append an [`Item::Submenu`].
-    pub fn submenu(mut self, label: Row, menu: Menu) -> Self {
-        self.items.push(Item::Submenu { label, menu });
-        self
-    }
-}
-
-// =============================================================================
-// Theming
-// =============================================================================
-
-/// Where the theme comes from.
-#[derive(Clone, Debug, Default)]
-pub enum ThemeSource {
-    /// Track the OS dark/light appearance and accent color. The default.
-    #[default]
-    FollowSystem,
-    /// Force the light theme.
-    Light,
-    /// Force the dark theme.
-    Dark,
-    /// Use a fully custom theme.
-    Custom(Theme),
-}
-
-/// The full visual theme. Every semantic [`Color`] resolves against one of these,
-/// and spacing/radius/row-height are tunable so a consumer can fully restyle.
-#[derive(Clone, Debug)]
-pub struct Theme {
-    /// Popup background fill.
-    pub background: Color,
-    /// Primary text color.
-    pub label: Color,
-    /// De-emphasized text color.
-    pub secondary_label: Color,
-    /// Accent color (selection, checkmarks).
-    pub accent: Color,
-    /// Separator / hairline color.
-    pub separator: Color,
-    /// Row background when hovered/selected.
-    pub row_highlight: Color,
-    /// Default row font.
-    pub row_font: Font,
-    /// Section-header font.
-    pub header_font: Font,
-    /// Default row height in logical points.
-    pub row_height: f32,
-    /// Corner radius of the popup and highlight in logical points.
-    pub corner_radius: f32,
-    /// Inner padding of the popup.
-    pub padding: Insets,
-    /// Horizontal gap between leading icon, segments, and trailing column.
-    pub column_gap: f32,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::light()
-    }
-}
-
-impl Theme {
-    /// The default light theme.
-    pub fn light() -> Self {
-        Theme {
-            background: Color::rgb(246, 246, 246),
-            label: Color::rgb(0, 0, 0),
-            secondary_label: Color::rgb(140, 140, 140),
-            accent: Color::Accent,
-            separator: Color::rgb(210, 210, 210),
-            row_highlight: Color::Accent,
-            row_font: Font::system(13.0, Weight::Regular),
-            header_font: Font::system(13.0, Weight::Bold),
-            row_height: 22.0,
-            corner_radius: 8.0,
-            padding: Insets::symmetric(6.0, 5.0),
-            column_gap: 10.0,
-        }
-    }
-
-    /// The default dark theme.
-    pub fn dark() -> Self {
-        Theme {
-            background: Color::rgb(40, 40, 40),
-            label: Color::rgb(255, 255, 255),
-            secondary_label: Color::rgb(150, 150, 150),
-            separator: Color::rgb(70, 70, 70),
-            ..Theme::light()
-        }
-    }
-}
-
-/// Tunable popup options layered on top of the [`Theme`].
-#[derive(Clone, Debug, Default)]
-pub struct MenuOptions {
-    /// Minimum popup width in logical points.
-    pub min_width: Option<f32>,
-    /// Maximum popup width in logical points.
-    pub max_width: Option<f32>,
-    /// Theme source.
-    pub theme: ThemeSource,
-}
+#![deny(missing_docs)]
+
+pub mod error;
+pub mod geometry;
+pub mod layout;
+pub mod menu;
+pub mod render;
+pub mod style;
+pub mod theme;
+pub mod tray;
+
+pub use error::{Error, Result, Unsupported};
+pub use geometry::{Edge, Insets, LogicalPoint, LogicalRect, LogicalSize};
+pub use menu::{
+    Align, ClickHandler, Flex, Icon, Item, Menu, MenuEvent, MenuId, Row, Segment, StyleRun,
+};
+pub use style::{Color, Font, FontFamily, Rgba, Weight};
+pub use theme::{MenuOptions, Theme, ThemeSource};
 
 // =============================================================================
 // Tray
@@ -835,11 +194,20 @@ impl Tray {
         &self.options
     }
 
+    /// Dispatch a click to the registered handler, if any. Used by the backend
+    /// when a row is activated; exposed so the data flow is testable without a
+    /// live event loop.
+    pub fn dispatch(&self, id: &MenuId) {
+        if let Some(handler) = &self.on_click {
+            handler(id);
+        }
+    }
+
     /// Programmatically show the popup anchored to the tray icon.
     ///
     /// Not implemented in the API skeleton; requires the rendering/anchoring
     /// backend built in a later phase.
-    pub fn open(&self) -> Result<(), Error> {
+    pub fn open(&self) -> Result<()> {
         todo!("anchoring/render backend — see the muri design doc roadmap")
     }
 
@@ -853,7 +221,7 @@ impl Tray {
     /// [`Error::Unsupported`]`(`[`Unsupported::TrayAnchor`]`)`.
     ///
     /// Not implemented in the API skeleton.
-    pub fn run(self) -> Result<(), Error> {
+    pub fn run(self) -> Result<()> {
         todo!("tray install + event loop — see the muri design doc roadmap")
     }
 }
@@ -904,10 +272,60 @@ impl ContextMenu {
         &self.options
     }
 
+    /// Dispatch a click to the registered handler, if any.
+    pub fn dispatch(&self, id: &MenuId) {
+        if let Some(handler) = &self.on_click {
+            handler(id);
+        }
+    }
+
     /// Show the menu at the given screen point, growing from `edge`.
     ///
     /// Not implemented in the API skeleton.
-    pub fn open_at(&self, _point: LogicalPoint, _edge: Edge) -> Result<(), Error> {
+    pub fn open_at(&self, _point: LogicalPoint, _edge: Edge) -> Result<()> {
         todo!("render backend — see the muri design doc roadmap")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn tray_builder_stores_configuration() {
+        let tray = Tray::new(Icon::Checkmark)
+            .tooltip("usagio")
+            .menu(Menu::new().row(Row::new("quit").label("Quit")))
+            .theme(ThemeSource::Dark);
+        assert_eq!(tray.tooltip_text(), Some("usagio"));
+        assert_eq!(tray.current_menu().len(), 1);
+        assert!(matches!(tray.menu_options().theme, ThemeSource::Dark));
+    }
+
+    #[test]
+    fn tray_dispatch_invokes_handler_with_id() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen2 = Arc::clone(&seen);
+        let tray = Tray::new(Icon::Checkmark).on_click(move |id| {
+            if id.as_str() == "quit" {
+                seen2.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        tray.dispatch(&MenuId::from("quit"));
+        tray.dispatch(&MenuId::from("other"));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn context_menu_dispatch_works() {
+        let hit = Arc::new(AtomicUsize::new(0));
+        let hit2 = Arc::clone(&hit);
+        let cm = ContextMenu::new(Menu::new()).on_click(move |_| {
+            hit2.fetch_add(1, Ordering::SeqCst);
+        });
+        cm.dispatch(&MenuId::from("x"));
+        assert_eq!(hit.load(Ordering::SeqCst), 1);
     }
 }
