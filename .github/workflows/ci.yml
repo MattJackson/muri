@@ -2,60 +2,117 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, qa, main]
   pull_request:
+    branches: [dev, qa, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # macOS is the implemented backend, so it runs the full gate including tests.
-  macos:
-    name: fmt + clippy + build + test (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: rustfmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: build
-        run: cargo build --all-targets
-      - name: build examples
-        run: cargo build --examples
-      - name: test
-        run: cargo test --all-features
-
-  # Windows/Linux backends are in progress; scope CI to compile + clippy so the
-  # cross-platform core stays green without depending on a headless popup/font
-  # environment. Promote to build+test as each backend's event loop lands.
-  cross:
-    name: check + clippy (${{ matrix.os }})
+  # Fast lane — runs on every push/PR (including dev), across all three
+  # platforms muri targets. Keeps dev quick per-OS while still catching
+  # platform-specific breakage before it reaches qa/main.
+  check:
+    name: fmt + clippy + build + test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          components: clippy
-      - name: check
-        run: cargo check --all-targets --all-features
-      - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-  # Guard the declared MSRV (rust-version in Cargo.toml) on the implemented
-  # backend.
+      # NOTE: `--all-features` is assumed to resolve on all three OSes; the
+      # Cargo.toml manifest is maintained so platform-specific backends are
+      # gated by target cfg, not by mutually-exclusive features. If a feature
+      # ever fails to resolve on a non-macOS runner, scope the flags per-OS
+      # here rather than dropping the gate.
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo build --all-targets
+        run: cargo build --all-targets
+      - name: cargo build --examples
+        run: cargo build --examples
+      - name: cargo test
+        run: cargo test
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
+
+  # MSRV gate — runs on every push/PR. Kept on Linux (fastest, cheapest) since
+  # the MSRV contract is toolchain-version, not platform, specific.
   msrv:
-    name: MSRV 1.86 build (macOS)
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: "1.85" # keep in sync with Cargo.toml rust-version
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo check on MSRV
+        run: cargo check --all-targets --all-features
+
+  # Advisory during 0.x: reports API-breaking changes vs the target branch
+  # without blocking (breaking changes are allowed pre-1.0, but should be
+  # visible in review).
+  semver:
+    name: semver-checks (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+      - name: Fetch baseline branch
+        # `actions/checkout` leaves the PR base branch without a local ref, so
+        # `--baseline-rev origin/<base>` can't be resolved; fetch it explicitly
+        # and compare against FETCH_HEAD.
+        run: git fetch --no-tags --depth=100 origin "${{ github.base_ref }}"
+      - name: Check for semver-breaking changes
+        run: cargo semver-checks --baseline-rev FETCH_HEAD
+
+  # Full lane — release build, only on the qa and main branches.
+  build:
+    name: release build
+    if: github.ref == 'refs/heads/qa' || github.ref == 'refs/heads/main'
+    needs: check
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.86.0
-      - name: build
-        run: cargo build --all-features
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo build --release
+        run: cargo build --release --locked
