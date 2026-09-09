@@ -88,6 +88,13 @@ pub struct RasterDrawer {
     pixmap: Pixmap,
     font_system: RefCell<FontSystem>,
     swash_cache: RefCell<SwashCache>,
+    /// The concrete family name the generic "system" font resolves to, pinned
+    /// once at construction. Using an explicit family (rather than the generic
+    /// `Family::SansSerif`) for *every* weight keeps a bold section header and a
+    /// regular row in the **same typeface** — otherwise `fontdb` can match the
+    /// bold request to a different family's bold face than the regular one, which
+    /// is the "different face for bold" glitch the Phase 1 report flagged.
+    ui_family: Option<String>,
 }
 
 impl std::fmt::Debug for RasterDrawer {
@@ -105,11 +112,14 @@ impl RasterDrawer {
     /// logical pixel). The backing pixmap starts at 1×1 and is reallocated by
     /// [`SceneDrawer::begin_frame`].
     pub fn new(scale: f32) -> Self {
+        let mut font_system = FontSystem::new();
+        let ui_family = resolve_ui_family(&mut font_system);
         RasterDrawer {
             scale: scale.max(0.1),
             pixmap: Pixmap::new(1, 1).expect("1x1 pixmap"),
-            font_system: RefCell::new(FontSystem::new()),
+            font_system: RefCell::new(font_system),
             swash_cache: RefCell::new(SwashCache::new()),
+            ui_family,
         }
     }
 
@@ -140,16 +150,76 @@ impl RasterDrawer {
         Metrics::new(px, px * 1.3)
     }
 
-    fn attrs(font: &Font, weight: Weight) -> Attrs<'static> {
+    fn attrs<'a>(&'a self, font: &'a Font, weight: Weight) -> Attrs<'a> {
         let family = match &font.family {
-            FontFamily::System => Family::SansSerif,
+            // Pin the generic "system" font to a concrete family so bold and
+            // regular text always come from the same typeface (see `ui_family`).
+            FontFamily::System => match &self.ui_family {
+                Some(name) => Family::Name(name),
+                None => Family::SansSerif,
+            },
             FontFamily::SystemMono => Family::Monospace,
-            FontFamily::Named(_) => Family::SansSerif,
+            FontFamily::Named(name) => Family::Name(name),
         };
         Attrs::new()
             .family(family)
             .weight(CtWeight(weight.ot_weight()))
     }
+}
+
+/// Resolve a concrete UI font family whose **regular and bold both actually
+/// shape within that same family**, so a bold section header and a regular row
+/// read as one typeface at two weights.
+///
+/// The generic `Family::SansSerif` is deliberately avoided, and a name-only
+/// lookup isn't enough: on macOS the native `.SF NS` (San Francisco) resolves
+/// for regular but has no static bold face `cosmic-text` will match, so a bold
+/// request silently falls back to **Menlo** (a monospace) — the exact "different
+/// face for bold" glitch the Phase 1 report flagged. So each candidate is
+/// verified by *actually shaping* both weights and confirming every glyph stays
+/// in-family; the first that passes wins (Helvetica Neue on stock macOS).
+fn resolve_ui_family(fs: &mut FontSystem) -> Option<String> {
+    for cand in [
+        ".SF NS",
+        "SF Pro Text",
+        "SF Pro",
+        "Segoe UI",
+        "Helvetica Neue",
+        "Arial",
+        "DejaVu Sans",
+        "Liberation Sans",
+    ] {
+        if family_shapes_both_weights(fs, cand) {
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
+/// Whether `name` shapes both a regular and a bold sample entirely within its own
+/// family (i.e. `cosmic-text` doesn't substitute a fallback face for either).
+fn family_shapes_both_weights(fs: &mut FontSystem, name: &str) -> bool {
+    for weight in [CtWeight(400), CtWeight(700)] {
+        let mut buffer = Buffer::new(fs, Metrics::new(13.0, 16.0));
+        buffer.set_size(fs, None, None);
+        let attrs = Attrs::new().family(Family::Name(name)).weight(weight);
+        buffer.set_text(fs, "Agy0", attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(fs, false);
+        let mut saw_glyph = false;
+        let all_in_family = buffer.layout_runs().all(|run| {
+            run.glyphs.iter().all(|g| {
+                saw_glyph = true;
+                fs.db()
+                    .face(g.font_id)
+                    .map(|f| f.families.iter().any(|(n, _)| n == name))
+                    .unwrap_or(false)
+            })
+        });
+        if !saw_glyph || !all_in_family {
+            return false;
+        }
+    }
+    true
 }
 
 fn sk_color(c: Rgba) -> tiny_skia::Color {
@@ -225,7 +295,7 @@ impl SceneDrawer for RasterDrawer {
         let metrics = self.metrics(font, false);
         let mut buffer = Buffer::new(&mut fs, metrics);
         buffer.set_size(&mut fs, None, None);
-        let attrs = Self::attrs(font, font.weight);
+        let attrs = self.attrs(font, font.weight);
         buffer.set_text(&mut fs, text, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut fs, false);
         buffer
@@ -251,7 +321,7 @@ impl SceneDrawer for RasterDrawer {
         let mut cache = self.swash_cache.borrow_mut();
         let mut buffer = Buffer::new(&mut fs, metrics);
         buffer.set_size(&mut fs, None, None);
-        let attrs = Self::attrs(run.font, run.weight);
+        let attrs = self.attrs(run.font, run.weight);
         buffer.set_text(&mut fs, run.text, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut fs, false);
 
