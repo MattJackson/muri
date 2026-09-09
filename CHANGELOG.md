@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Project infrastructure — dev/qa/main CI, security audit, crates.io name.**
+  - dev/qa/main CI policy (`.github/workflows/ci.yml`): `fmt` + `clippy`
+    (`-D warnings`) + `build --all-targets` + `build --examples` + `test` +
+    `doc` (`RUSTDOCFLAGS=-D warnings`) across a macOS / Ubuntu / Windows matrix on
+    every push/PR; an MSRV (1.85) check job; a PR-only, advisory
+    `cargo-semver-checks`; and a qa/main-only `--locked` release build.
+    Concurrency-grouped, least-privilege (`contents: read`), SHA-pinned actions.
+  - Security-audit workflow (`.github/workflows/security.yml`) running
+    `cargo deny check advisories bans sources` on push to `main`, on PRs, and
+    weekly, backed by a minimal, green `deny.toml`.
+  - README productized to the MattJackson house style: reordered badge set with
+    an MSRV badge, an install block (git dependency while pre-release), a
+    feature-flag table, and standalone Security / Changelog / MSRV sections.
+  - Reserved the `muri` name on crates.io with a `0.0.0` placeholder. crates.io
+    releases are reserved for complete, testable versions — development happens on
+    git (`dev`/`qa`/`main` branches, git dependencies), not a stream of `0.0.x`.
+
+### Changed
+
+- **MSRV lowered 1.86 → 1.85** to match the true dependency-tree floor (set by
+  `unicode-segmentation` via `cosmic-text`); dropped the unused
+  `Win32_Graphics_Gdi` windows-sys feature.
+- **Rendering stack unlocked — dependency-diet direction adopted** (see
+  `docs/design/adr/0001-own-the-menu-use-engines-not-frameworks.md`): own the menu
+  system and thin platform glue; use — not reinvent — the deep engines
+  (`rustybuzz`, `swash`, `fontdb`, `accesskit`) and raw OS FFI. Planned toward 1.0:
+  `cosmic-text` → `rustybuzz`/`swash`/`fontdb` + a muri-owned font-fallback layer
+  (MSRV → ~1.73, ≈14 fewer crates); `tiny-skia` → a small in-house anti-aliased
+  blitter; `winit`/`softbuffer` → native per-OS windowing folded into the mandatory
+  non-activating-`NSPanel` + vibrancy rewrite. Lands across the milestone ladder,
+  macOS green throughout, with the Tier-1/Tier-2 API stable for early embedders.
+
 - **Phase 4 — VoiceOver attach + Windows backend groundwork.**
   - Shared, unit-tested popup-placement math (`anchor` module): `place_popup`
     resolves a popup's top-left corner from an anchor rect, popup size, screen
