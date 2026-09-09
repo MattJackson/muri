@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 2 — flyout submenus + render polish.**
+  - Pure, tested flyout geometry (`flyout` module): `place_flyout` positions a
+    child panel flush against its parent's right edge, top-aligned to the hovered
+    row, flips to the parent's left when it would spill off the monitor, and
+    clamps into the work area; `next_flyout` encodes the hover-stack transitions
+    (hover a submenu parent to open/switch, hover a sibling to close, moving into
+    the flyout or across the gap keeps it open). Exposed as `place_flyout`,
+    `next_flyout`, `FlyoutPlacement`, `FlyoutSide`, `HoverTarget`.
+  - macOS live flyout: hovering (or clicking) a submenu row opens a second
+    softbuffer popup window beside it, painted by the same scene drawer with the
+    same flush-right layout; hovering a different parent switches it, moving into
+    the flyout keeps it open, clicking a leaf row fires its `MenuId` and closes
+    the whole stack, and focus-loss dismissal is tracked across both windows so
+    opening a flyout no longer dismisses the menu.
+  - Render polish: bold section headers and bold rows now share the **same
+    typeface** as regular rows. Previously `cosmic-text` matched a bold request
+    against the generic sans to a different (monospace) face; muri now pins a
+    concrete UI family verified to shape both regular and bold in-family.
+  - Snapshot proof: `snapshot_flyout_parent_plus_child_is_saved` renders a parent
+    panel with an open flyout and composites both panels (child to the right of
+    its highlighted parent row) into `target/muri-phase2-flyout.png`.
+  - `examples/demo_tray.rs` now exercises flyouts (per-account detail panels and
+    a populated Settings submenu).
 - **Phase 1 — macOS backend (a menu you can actually see).**
   - Real CPU-raster scene drawer: `RasterDrawer` implements `SceneDrawer` with
     `tiny-skia` (rounded-rect panel, row highlight, hairline separators, bitmap
@@ -30,8 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Headless render snapshot test writing `target/muri-phase1-render{,-light}.png`.
   - New deps: `tiny-skia`, `cosmic-text` (portable), and macOS-gated `winit`,
     `softbuffer`, `raw-window-handle`, `objc2`/`objc2-app-kit`/`objc2-foundation`.
-  - Still `todo!()`/follow-up: flyout submenus (Phase 2), Windows + Linux
-    backends, native screen-reader a11y (Phase 3), keyboard nav, animations.
+  - Still `todo!()`/follow-up: Windows + Linux backends, native screen-reader
+    a11y (Phase 3), keyboard nav, animations.
 - Initial crate scaffold (Phase 0): the complete public API surface as compiling
   types with `todo!()` renderer bodies — `Tray`, `ContextMenu`, `Menu`, `Item`,
   `Row`, `Segment`, `StyleRun`, `Align`, `Flex`, `Color`, `Font`/`FontFamily`/

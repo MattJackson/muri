@@ -1,16 +1,18 @@
-//! A runnable Phase 1 demo: installs a real macOS tray icon whose click opens
-//! muri's custom-drawn, styled popup — provider groups with flush-right colored
-//! values (no chevron column), a checkmark on the active account, separators, a
-//! Settings submenu, and a greyed version tail on Quit.
+//! A runnable demo: installs a real macOS tray icon whose click opens muri's
+//! custom-drawn, styled popup — provider groups with flush-right colored values
+//! (no chevron column), a checkmark on the active account, separators, **flyout
+//! submenus** (the account detail panel and Settings open a second panel beside
+//! the row), and a greyed version tail on Quit.
 //!
 //! ```sh
 //! cargo run --example demo_tray
 //! ```
 //!
 //! On macOS this shows a status-bar icon; left-click it to open the popup, hover
-//! to highlight a row, click a row to fire its id (printed to stdout) and close,
-//! or click outside to dismiss. Clicking "Quit" exits. On other platforms
-//! `Tray::run` is not implemented yet (Windows) or unsupported (Linux).
+//! to highlight a row, hover a `›` row to open its flyout to the right, click a
+//! leaf row to fire its id (printed to stdout) and close, or click outside to
+//! dismiss. Clicking "Quit" exits. On other platforms `Tray::run` is not
+//! implemented yet (Windows) or unsupported (Linux).
 
 use muri::{Align, Color, Flex, Font, Icon, Menu, Row, Segment, StyleRun, Tray, Weight};
 
@@ -31,6 +33,29 @@ fn swatch_png(r: u8, g: u8, b: u8) -> Vec<u8> {
     pm.encode_png().unwrap()
 }
 
+/// The per-account detail panel shown as a flyout beside an account row: reset
+/// windows (flush-right values), an "updated" line, then the account actions.
+fn account_submenu(slug: &str) -> Menu {
+    Menu::new()
+        .row(Row::info().segments(vec![
+            Segment::new("Session resets in").flex(Flex::Grow),
+            Segment::new("3h 12m")
+                .align(Align::Right)
+                .color(Color::SecondaryLabel),
+        ]))
+        .row(Row::info().segments(vec![
+            Segment::new("Weekly resets in").flex(Flex::Grow),
+            Segment::new("2d 4h")
+                .align(Align::Right)
+                .color(Color::SecondaryLabel),
+        ]))
+        .row(Row::info().segment(Segment::new("updated 1m ago").color(Color::SecondaryLabel)))
+        .separator()
+        .row(Row::new(format!("switch:{slug}")).label("Switch to this account"))
+        .row(Row::new(format!("launch:{slug}")).label("Launch client"))
+        .row(Row::new(format!("remove:{slug}")).label("Remove…"))
+}
+
 fn demo_menu() -> Menu {
     let claude_logo = swatch_png(217, 119, 87);
     let codex_logo = swatch_png(80, 80, 90);
@@ -41,8 +66,8 @@ fn demo_menu() -> Menu {
                 .leading(Icon::from_png_bytes(claude_logo))
                 .segment(Segment::new("Claude").font(Font::system(13.0, Weight::Bold))),
         )
-        .row(
-            Row::new("switch:claude:me")
+        .submenu(
+            Row::new("acct:claude:me")
                 .leading(Icon::Checkmark)
                 .checked(true)
                 .segments(vec![
@@ -53,13 +78,17 @@ fn demo_menu() -> Menu {
                         .align(Align::Right)
                         .runs(vec![StyleRun::new(6, 3, Color::SystemRed)]),
                 ]),
+            account_submenu("claude:me"),
         )
-        .row(Row::new("switch:claude:work").segments(vec![
-            Segment::new("work@example.com").flex(Flex::Grow),
-            Segment::new("12% / 30%")
-                .align(Align::Right)
-                .runs(vec![StyleRun::new(0, 3, Color::SystemGreen)]),
-        ]))
+        .submenu(
+            Row::new("acct:claude:work").segments(vec![
+                Segment::new("work@example.com").flex(Flex::Grow),
+                Segment::new("12% / 30%")
+                    .align(Align::Right)
+                    .runs(vec![StyleRun::new(0, 3, Color::SystemGreen)]),
+            ]),
+            account_submenu("claude:work"),
+        )
         .separator()
         .section_header(
             Row::info()
@@ -73,7 +102,14 @@ fn demo_menu() -> Menu {
                 .runs(vec![StyleRun::new(0, 6, Color::SystemOrange)]),
         ]))
         .separator()
-        .submenu(Row::new("settings").label("Settings"), Menu::new())
+        .submenu(
+            Row::new("settings").label("Settings"),
+            Menu::new()
+                .row(Row::new("settings:apikey").label("API key…"))
+                .row(Row::new("settings:autoswap").label("Auto-swap accounts"))
+                .separator()
+                .row(Row::new("settings:notifications").label("Notifications…")),
+        )
         .row(Row::new("quit").segments(vec![
             Segment::new("Quit").flex(Flex::Grow),
             Segment::new(concat!("usagio v", env!("CARGO_PKG_VERSION")))
