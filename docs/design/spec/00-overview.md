@@ -279,7 +279,8 @@ windows).
 | Windows | yes (`Shell_NotifyIcon`) | yes (`Shell_NotifyIconGetRect`) | yes | native passthrough | NVDA + Narrator |
 | Linux | yes (SNI/AppIndicator) | **no** (`Unsupported::TrayAnchor`) | yes (pointer) | native passthrough | AT-SPI / Orca |
 
-Rendering stack (all permissive-licensed, no GPU dependency):
+Rendering stack (all permissive-licensed, no GPU dependency) — **historical, being
+superseded; see §5.1 and [ADR-0001](../adr/0001-own-the-menu-use-engines-not-frameworks.md)**:
 
 - **`winit` 0.30** — windowing / event loop.
 - **`softbuffer` 0.4** — a CPU framebuffer for the window.
@@ -297,6 +298,60 @@ clicked and cannot absorb a GPU device/surface warm-up (~0.5s cold). CPU raster
 has no such cost, produces a tiny binary, and gives full pixel control. Native
 per-OS drawing was rejected because it cannot deliver one consistent custom look
 and is ~3× the code. Full rationale in the roadmap; the *choice* is locked.
+
+### 5.1 Rendering stack: UNLOCKED (dependency diet — see ADR-0001)
+
+**Update (2026-09-09).** The concrete crate stack in §5 above (`winit` + `softbuffer`
++ `tiny-skia` + `cosmic-text`, and `accesskit_winit`) is **no longer locked**. It is
+retained above as historical context and is **superseded** by the *dependency-diet*
+direction recorded in
+[**ADR-0001 — Own the menu, use engines not frameworks**](../adr/0001-own-the-menu-use-engines-not-frameworks.md).
+What is *unchanged and still locked*: CPU raster (no GPU warm-up), **one shared scene
+drawer** used identically on every OS, and all eight §4 decisions (vibrancy,
+a11y-on-by-default, N-level submenus, all three platforms, all four screen readers).
+The diet changes **which crates** produce those pixels, not the architecture above the
+platform shims.
+
+**Principle:** *own the menu system and the thin platform glue; **use** — do not
+reinvent — the deep engines.* Reinventing a text shaper (`rustybuzz`, a HarfBuzz port),
+a glyph rasterizer (`swash`), or the a11y platform bridges (`accesskit`) would be
+multi-year, buggier, slower work. The weight problem is the general-purpose
+**frameworks** wrapped around those engines, where muri uses only a sliver.
+
+**Target end-state (by 1.0):** depend on a handful of **engine** crates + raw OS FFI,
+owning all menu logic + rendering glue + windowing. Concretely:
+
+- **Text:** replace `cosmic-text` (43 transitive crates; it sets the MSRV floor at
+  **1.85** via a non-optional `unicode-segmentation 1.13.3`) with `rustybuzz` +
+  `swash` + `fontdb` used directly, plus a **muri-owned shaping-glue + font-fallback
+  layer (~300 lines)** that preserves cross-script fallback + color-emoji — **zero
+  menu-relevant feature loss**. Result: **MSRV 1.85 → ~1.73**, ≈**14 fewer crates**.
+  The `resolve_ui_family` bold-fallback invariant ([`10` §7.1](10-rendering-layout.md))
+  ports cleanly (its only `cosmic-text` touchpoint is `fs.db().face().families`).
+- **Raster:** replace `tiny-skia` with a **small in-house blitter** (fill rect,
+  anti-aliased rounded-rect, alpha blit — the only primitives muri uses) and rework
+  icon PNG handling to shed the ~9-crate png/zlib subtree; guard with **golden-image
+  tests**.
+- **Windowing:** go **native per-OS** and remove `winit` (~18 exclusive crates, and it
+  drags a **duplicate `objc2` 0.5** stack) — folded **into** the already-mandatory
+  non-activating-`NSPanel` + vibrancy rewrite on macOS, so windowing is rewritten
+  **once, not twice**. Drop `softbuffer` + `raw-window-handle` (present via
+  CALayer / CoreGraphics). Rebuild the a11y bridge on `accesskit_macos` /
+  `accesskit_windows` / `accesskit_unix` directly (**drop `accesskit_winit`**). Windows
+  uses a native Win32 message pump; Linux uses `xdg_popup` with the documented Wayland
+  tray-anchor carve-out (§6).
+- **Keep (do not reinvent):** engines `swash`, `rustybuzz`, `fontdb`, `accesskit`; raw
+  OS FFI `objc2` / `objc2-foundation` / `objc2-app-kit`, `windows-sys`.
+
+**Sequencing.** This is a **multi-release journey**, not one commit. The diet lands
+across the milestone ladder (§8): **M1** does the macOS native-windowing + text/raster
+swap; **M4/M5** carry it to Windows/Linux. Every step ships **usable + green**, and
+**macOS stays green throughout**. **1.0 = diet complete + all three platforms + all
+four screen readers verified.** The **Tier-1 data model + Tier-2 surface API**
+([`03` §5](03-threading-events-versioning.md)) stay stable through the diet, so for
+usagio (the early embedder / real-world tester of the macOS native surface) the diet
+is **internal-only churn**. Full context, measured facts, and consequences are in
+[ADR-0001](../adr/0001-own-the-menu-use-engines-not-frameworks.md).
 
 ## 6. The Linux carve-out (honest verdict)
 

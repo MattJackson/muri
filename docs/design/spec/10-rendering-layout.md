@@ -17,6 +17,13 @@ platform anchoring/dismiss shims [`20-platform-macos.md`](20-platform-macos.md),
 [`21-platform-windows.md`](21-platform-windows.md),
 [`22-platform-linux.md`](22-platform-linux.md).
 
+> **Stack unlocked (2026-09-09).** The concrete raster/text crates this document names
+> (`tiny-skia`, `softbuffer`, `cosmic-text`) are being replaced under the dependency
+> diet — see [ADR-0001](../adr/0001-own-the-menu-use-engines-not-frameworks.md) and
+> [`00` §5.1](00-overview.md). The `SceneDrawer` boundary (§2), the layout math (§3–§4),
+> and the `resolve_ui_family` invariant (§7.1) are unaffected — only their backing
+> crates change.
+
 ---
 
 ## 1. The rendering model in one paragraph
@@ -212,6 +219,11 @@ are `Metrics::new(px, px * 1.3)` (line height = 1.3 × size).
   least defensively.
 
 ## 7. Text shaping via cosmic-text
+
+> **1.0 direction:** `cosmic-text` is being replaced by `rustybuzz` + `swash` +
+> `fontdb` used directly, plus a ~300-line muri-owned shaping-glue + fallback layer —
+> see [ADR-0001](../adr/0001-own-the-menu-use-engines-not-frameworks.md). §7.1's
+> `resolve_ui_family` invariant ports cleanly onto `fontdb`.
 
 `RasterDrawer` owns a `FontSystem` (system font lookup + shaping) and a
 `SwashCache` (rasterized-glyph cache), both in `RefCell` for the `&self`

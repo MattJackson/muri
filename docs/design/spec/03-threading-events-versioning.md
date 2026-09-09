@@ -149,6 +149,16 @@ tray item delivers both activations, in order, on the single
 
 ### Dependency stance (grounded in `Cargo.toml`)
 
+> **Stack unlocked (2026-09-09).** The concrete stack below (`cosmic-text`,
+> `tiny-skia`, `winit`, `softbuffer`, `accesskit_winit`) is the *current* graph but is
+> **superseded** by the dependency-diet direction in
+> [ADR-0001](../adr/0001-own-the-menu-use-engines-not-frameworks.md) /
+> [`00` §5.1](00-overview.md): cosmic-text → `rustybuzz`/`swash`/`fontdb`, tiny-skia →
+> in-house raster, winit/softbuffer → native per-OS windowing, `accesskit_winit` →
+> `accesskit_{macos,windows,unix}`. Target **MSRV ~1.73** (off the cosmic-text 1.85
+> floor). The diet lands across M1/M4/M5 and is Tier-1/Tier-2-stable (§5), so it is
+> internal-only churn for embedders.
+
 Portable core (always):
 - `tiny-skia = "0.11"` — CPU 2D raster.
 - `cosmic-text = "0.12"` — font lookup / shaping / layout.
