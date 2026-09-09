@@ -44,6 +44,19 @@ objc2-app-kit = "0.3"
 # 0.23 pairs with accesskit 0.17 + winit 0.30. Bridges to NSAccessibility.
 accesskit_winit = { version = "0.23", optional = true }
 
+# Windows backend: the notification-area tray icon + anchor rect via
+# `Shell_NotifyIcon` / `Shell_NotifyIconGetRect`. Only the tray shim is
+# Windows-specific; the scene drawer and menu model are shared.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_System_LibraryLoader",
+] }
+
 [features]
 default = []
 # Screen-reader integration via AccessKit on the raster backend (see README).

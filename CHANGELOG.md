@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the human-verified final hop**, and the flyout — a separate OS window — is not
     yet independently adapted (its items are present as nested nodes in the popup
     window's tree).
+  - **Windows backend groundwork:** `WindowsAnchor` now really installs a
+    notification-area icon (`Shell_NotifyIcon`/`NIM_ADD` against a message-only
+    window it creates and tears down on `Drop`) and reports its on-screen
+    rectangle via `Shell_NotifyIconGetRect`, converted to logical coordinates
+    through the window's DPI (`GetDpiForWindow`). `WindowsAnchor::popup_origin`
+    wraps the shared `place_popup` so the future Windows popup uses the exact
+    placement macOS does. Built with `windows-sys` and compile-verified for
+    `x86_64-pc-windows-msvc` (`cargo check`/`clippy --target`). The popup event
+    loop and PNG→`HICON` decoding remain `todo!()` (the stock application icon is
+    shown until then). The `unsafe`-forbid attribute now also exempts the Windows
+    build.
 
 - **Phase 3 — accessibility + keyboard navigation.**
   - Pure, tested keyboard-navigation state machine (`keynav` module): `handle_key`
