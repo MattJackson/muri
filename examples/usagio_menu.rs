@@ -2,7 +2,14 @@
 //! express every feature usagio's hand-rolled `RowStyle` needs: provider group
 //! headers with logos, accounts with a flush-right colored "S% / W%" value and
 //! NO reserved chevron column, a checkmark + bold on the active account,
-//! per-account detail submenus, and a greyed version tail on Quit.
+//! per-account detail submenus, populated Capture/Settings submenus with nested
+//! flyouts and checkable rows, leading/trailing icons (PNG, SVG, checkmark, and
+//! a named symbol), and a greyed version tail on Quit.
+//!
+//! It also shows the pure, GUI-free parts of the API a consumer can rely on
+//! today: resolving semantic colors against a custom [`muri::Theme`], resolving
+//! the flush-right layout with [`muri::layout`], and building a
+//! [`muri::ContextMenu`] for the pointer-anchored path.
 //!
 //! This constructs the menu and prints a tree; it does not open a UI (the
 //! rendering backend is not implemented yet). Run with:
@@ -11,7 +18,10 @@
 //! cargo run --example usagio_menu
 //! ```
 
-use muri::{Align, Color, Flex, Font, Icon, Item, Menu, Row, Segment, StyleRun, Weight};
+use muri::layout::{resolve_segments, SegmentMetrics};
+use muri::{
+    Align, Color, ContextMenu, Flex, Font, Icon, Item, Menu, Row, Segment, StyleRun, Theme, Weight,
+};
 
 /// A stand-in for usagio's `Snapshot` so this example is self-contained.
 struct Account {
@@ -52,7 +62,12 @@ fn account_submenu(acct: &Account) -> Menu {
         .separator();
 
     if acct.active {
-        menu = menu.row(Row::new("noop").label("\u{2713} Active").enabled(false));
+        menu = menu.row(
+            Row::new("noop")
+                .leading(Icon::Checkmark)
+                .segment(Segment::new("Active").color(Color::SystemGreen))
+                .enabled(false),
+        );
     } else {
         menu = menu.row(
             Row::new(format!("switch:{}:{}", acct.provider, acct.key))
@@ -60,8 +75,12 @@ fn account_submenu(acct: &Account) -> Menu {
         );
     }
     if acct.supports_launch {
-        menu = menu
-            .row(Row::new(format!("launch:{}:{}", acct.provider, acct.key)).label("Launch client"));
+        menu = menu.row(
+            Row::new(format!("launch:{}:{}", acct.provider, acct.key))
+                .label("Launch client")
+                // A named symbol trails the action (SF Symbol on macOS).
+                .trailing(Icon::Symbol("arrow.up.forward.app")),
+        );
     }
     if acct.supports_remove {
         menu = menu.row(
@@ -69,6 +88,53 @@ fn account_submenu(acct: &Account) -> Menu {
         );
     }
     menu
+}
+
+/// The Capture submenu: one entry per provider to capture the current login.
+fn capture_submenu(groups: &[Group]) -> Menu {
+    let mut menu = Menu::new();
+    for group in groups {
+        menu = menu.row(
+            Row::new(format!("capture:{}", group.display_name.to_lowercase()))
+                .leading(Icon::from_png_bytes(group.icon_png))
+                .label(format!("Capture {} login", group.display_name)),
+        );
+    }
+    menu
+}
+
+/// The Settings submenu: a checkable toggle, an auto-swap threshold flyout, and
+/// a backup flyout — exercising nested submenus, `checked`, and an SVG icon.
+fn settings_submenu() -> Menu {
+    let autoswap = Menu::new()
+        .row(Row::new("autoswap:off").checked(false).label("Off"))
+        .row(Row::new("autoswap:80").checked(false).label("At 80%"))
+        .row(Row::new("autoswap:90").checked(true).label("At 90%"))
+        .separator()
+        .row(Row::new("autoswap:now").label("Swap now"));
+
+    let backup = Menu::new()
+        .row(Row::new("backup:save").label("Save backup\u{2026}"))
+        .row(Row::new("backup:restore").label("Restore backup\u{2026}"));
+
+    Menu::new()
+        .row(
+            Row::new("notifications:limits")
+                .checked(true)
+                .label("Notify near limits"),
+        )
+        .submenu(Row::new("autoswap").label("Auto-swap threshold"), autoswap)
+        .submenu(
+            Row::new("backup")
+                // An SVG leading icon, rasterized per-DPI at draw time.
+                .leading(Icon::from_svg_bytes(
+                    br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.as_slice(),
+                ))
+                .label("Backup"),
+            backup,
+        )
+        .separator()
+        .row(Row::new("refresh:now").label("Refresh now"))
 }
 
 fn build(groups: &[Group]) -> Menu {
@@ -110,13 +176,13 @@ fn build(groups: &[Group]) -> Menu {
         menu = menu.separator();
     }
 
-    // Bottom actions.
+    // Bottom actions — now with populated submenus.
     menu = menu
         .submenu(
             Row::new("capture").label("Capture current login"),
-            Menu::new(),
+            capture_submenu(groups),
         )
-        .submenu(Row::new("settings").label("Settings"), Menu::new());
+        .submenu(Row::new("settings").label("Settings"), settings_submenu());
 
     // "Quit ........ usagio vX" — label Grows, version tail is greyed + flush-right.
     menu = menu.row(Row::new("quit").segments(vec![
@@ -129,15 +195,44 @@ fn build(groups: &[Group]) -> Menu {
     menu
 }
 
+fn icon_tag(icon: &Option<Icon>) -> &'static str {
+    match icon {
+        None => "",
+        Some(Icon::Checkmark) => " [check]",
+        Some(Icon::Png(_)) => " [png]",
+        Some(Icon::Svg(_)) => " [svg]",
+        Some(Icon::Symbol(_)) => " [symbol]",
+    }
+}
+
+fn print_row(row: &Row, prefix: &str, pad: &str) {
+    let check = match row.checked {
+        Some(true) => "[x] ",
+        Some(false) => "[ ] ",
+        None => "",
+    };
+    let dim = if row.enabled { "" } else { " (disabled)" };
+    println!(
+        "{pad}{prefix}{}{check}{}{}{}  [{}]",
+        icon_tag(&row.leading),
+        row_text(row),
+        icon_tag(&row.trailing),
+        dim,
+        row.id.as_str(),
+    );
+}
+
 fn print_menu(menu: &Menu, depth: usize) {
     let pad = "  ".repeat(depth);
     for item in &menu.items {
         match item {
             Item::Separator => println!("{pad}----"),
-            Item::SectionHeader(row) => println!("{pad}# {}", row_text(row)),
-            Item::Row(row) => println!("{pad}- {} [{}]", row_text(row), row.id.as_str()),
+            Item::SectionHeader(row) => {
+                println!("{pad}#{} {}", icon_tag(&row.leading), row_text(row))
+            }
+            Item::Row(row) => print_row(row, "- ", &pad),
             Item::Submenu { label, menu } => {
-                println!("{pad}> {} [{}]", row_text(label), label.id.as_str());
+                print_row(label, "> ", &pad);
                 print_menu(menu, depth + 1);
             }
         }
@@ -150,6 +245,47 @@ fn row_text(row: &Row) -> String {
         .map(|s| s.text.as_str())
         .collect::<Vec<_>>()
         .join("  ")
+}
+
+fn demo_theme_resolution() {
+    // A consumer can resolve semantic colors against any theme with no GUI.
+    let dark = Theme::dark();
+    let label = dark.resolve(Color::Label);
+    let red = dark.resolve(Color::SystemRed);
+    println!(
+        "theme resolution (dark): Label -> rgba({},{},{},{}), SystemRed -> rgba({},{},{},{})",
+        label.r, label.g, label.b, label.a, red.r, red.g, red.b, red.a,
+    );
+}
+
+fn demo_flush_right_layout() {
+    // The "Quit ...... usagio v1" row: a Grow label + a Fixed, right-aligned
+    // version tail. Given measured intrinsic widths, the layout engine flushes
+    // the tail to the right edge with no reserved column.
+    let content_width = 220.0;
+    let segs = [
+        SegmentMetrics::new(30.0, Flex::Grow, Align::Left), // "Quit"
+        SegmentMetrics::new(60.0, Flex::Fixed, Align::Right), // "usagio v1"
+    ];
+    let boxes = resolve_segments(&segs, content_width);
+    println!(
+        "flush-right layout: content {content_width}px -> tail text starts at x={} (right edge {})",
+        boxes[1].text_x,
+        content_width - 60.0,
+    );
+}
+
+fn demo_context_menu() {
+    // The pointer-anchored primitive that also works on Linux.
+    let menu = Menu::new()
+        .row(Row::new("copy").label("Copy"))
+        .row(Row::new("paste").label("Paste"))
+        .separator()
+        .row(Row::new("select-all").label("Select All"));
+    let cm = ContextMenu::new(menu).on_click(|id| println!("context click: {}", id.as_str()));
+    // Exercise the dispatch path without a GUI.
+    cm.dispatch(&"copy".into());
+    println!("context menu has {} items", cm.menu().len());
 }
 
 fn main() {
@@ -200,4 +336,9 @@ fn main() {
     let menu = build(&groups);
     println!("usagio menu, as built through the muri API:\n");
     print_menu(&menu, 0);
+
+    println!("\n--- pure API demos (no GUI needed) ---");
+    demo_theme_resolution();
+    demo_flush_right_layout();
+    demo_context_menu();
 }
