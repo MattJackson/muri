@@ -13,6 +13,7 @@
 
 #![allow(unsafe_code)]
 
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -34,8 +35,9 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::error::{Error, Result};
+use crate::flyout::{next_flyout, place_flyout, HoverTarget};
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
-use crate::menu::Icon;
+use crate::menu::{Icon, Item, Menu};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
 use crate::theme::Theme;
@@ -209,11 +211,28 @@ pub fn run_tray(tray: Tray) -> Result<()> {
         laid: None,
         hovered: None,
         cursor: LogicalPoint::default(),
+        popup_origin: LogicalPoint::default(),
+        flyout: None,
+        focused: HashSet::new(),
     };
 
     event_loop
         .run_app(&mut app_state)
         .map_err(|e| Error::Platform(format!("run loop: {e}")))
+}
+
+/// The second popup window hosting an open submenu's flyout panel, positioned
+/// beside its parent row via [`place_flyout`].
+struct Flyout {
+    window: Rc<Window>,
+    surface: Surface<Rc<Window>, Rc<Window>>,
+    _context: Context<Rc<Window>>,
+    drawer: RasterDrawer,
+    laid: Option<LaidMenu>,
+    /// The parent menu item index this flyout belongs to.
+    parent_index: usize,
+    cursor: LogicalPoint,
+    hovered: Option<usize>,
 }
 
 struct App {
@@ -226,6 +245,14 @@ struct App {
     laid: Option<LaidMenu>,
     hovered: Option<usize>,
     cursor: LogicalPoint,
+    /// The parent popup's top-left in logical screen coordinates (for flyout
+    /// placement).
+    popup_origin: LogicalPoint,
+    flyout: Option<Flyout>,
+    /// Which of muri's windows currently hold focus. The whole stack is dismissed
+    /// only when this becomes empty, so opening a flyout (which momentarily moves
+    /// focus off the parent) does not close the menu.
+    focused: HashSet<WindowId>,
 }
 
 impl App {
@@ -240,11 +267,13 @@ impl App {
     }
 
     fn close_popup(&mut self) {
+        self.flyout = None;
         self.surface = None;
         self.context = None;
         self.window = None;
         self.laid = None;
         self.hovered = None;
+        self.focused.clear();
     }
 
     fn open_popup(&mut self, event_loop: &ActiveEventLoop) {
@@ -302,7 +331,164 @@ impl App {
         self.surface = Some(surface);
         self.laid = Some(laid);
         self.hovered = None;
+        self.popup_origin = LogicalPoint::new(px, py);
+        self.flyout = None;
         window.request_redraw();
+    }
+
+    /// The child [`Menu`] of a top-level `Item::Submenu`, if `index` names one.
+    fn submenu_child(&self, index: usize) -> Option<Menu> {
+        match self.tray.menu.items.get(index) {
+            Some(Item::Submenu { menu, .. }) => Some(menu.clone()),
+            _ => None,
+        }
+    }
+
+    /// Logical work area of the screen the menu bar lives on.
+    fn work_area(&self) -> LogicalRect {
+        let (w, h) = NSScreen::screens(self.anchor.mtm)
+            .firstObject()
+            .map(|s| {
+                let f = s.visibleFrame();
+                (f.size.width as f32, f.size.height as f32)
+            })
+            .unwrap_or((1440.0, 900.0));
+        LogicalRect::new(LogicalPoint::new(0.0, 0.0), LogicalSize::new(w, h))
+    }
+
+    /// Open (or replace) the flyout for the submenu parent at `parent_index`.
+    fn open_flyout(&mut self, event_loop: &ActiveEventLoop, parent_index: usize) {
+        if self.flyout.as_ref().map(|f| f.parent_index) == Some(parent_index) {
+            return; // already open for this parent
+        }
+        // Replacing a flyout for a different parent: drop the old one and forget
+        // its focus so the focus bookkeeping stays consistent.
+        if let Some(old) = self.flyout.take() {
+            self.focused.remove(&old.window.id());
+        }
+        let Some(child) = self.submenu_child(parent_index) else {
+            return;
+        };
+        let Some(row_rect) = self
+            .laid
+            .as_ref()
+            .and_then(|l| l.rows.iter().find(|r| r.index == parent_index))
+            .map(|r| r.rect)
+        else {
+            return;
+        };
+
+        let theme = self.theme();
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(2.0);
+        let mut probe = RasterDrawer::new(scale);
+        let child_laid = render_menu(&mut probe, &child, &theme, &self.tray.options, None);
+
+        let parent_rect = LogicalRect::new(
+            self.popup_origin,
+            self.laid.as_ref().map(|l| l.size).unwrap_or_default(),
+        );
+        let placement = place_flyout(parent_rect, row_rect, child_laid.size, self.work_area());
+
+        let attrs = Window::default_attributes()
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_inner_size(WinitLogicalSize::new(
+                child_laid.size.width,
+                child_laid.size.height,
+            ))
+            .with_position(LogicalPosition::new(placement.origin.x, placement.origin.y));
+
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Rc::new(w),
+            Err(_) => return,
+        };
+        let context = match Context::new(window.clone()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let surface = match Surface::new(&context, window.clone()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Pre-mark the flyout as focused so the brief window during which the
+        // parent yields focus (before the flyout gains it) doesn't look like
+        // "no window focused" and dismiss the whole stack.
+        self.focused.insert(window.id());
+        self.flyout = Some(Flyout {
+            drawer: RasterDrawer::new(window.scale_factor() as f32),
+            window: window.clone(),
+            surface,
+            _context: context,
+            laid: None,
+            parent_index,
+            cursor: LogicalPoint::default(),
+            hovered: None,
+        });
+        window.request_redraw();
+    }
+
+    fn close_flyout(&mut self) {
+        if let Some(old) = self.flyout.take() {
+            self.focused.remove(&old.window.id());
+        }
+    }
+
+    /// Repaint the flyout panel (mirrors [`App::redraw`] for the child window).
+    fn redraw_flyout(&mut self) {
+        let Some(flyout) = self.flyout.as_mut() else {
+            return;
+        };
+        let Some(child) = (match self.tray.menu.items.get(flyout.parent_index) {
+            Some(Item::Submenu { menu, .. }) => Some(menu.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let theme = self
+            .tray
+            .options
+            .theme
+            .resolve_theme(self.tray.options.theme.wants_dark(system_is_dark));
+        let laid = render_menu(
+            &mut flyout.drawer,
+            &child,
+            &theme,
+            &self.tray.options,
+            flyout.hovered,
+        );
+
+        let (dw, dh) = flyout.drawer.device_size();
+        let (Some(nw), Some(nh)) = (NonZeroU32::new(dw), NonZeroU32::new(dh)) else {
+            return;
+        };
+        if flyout.surface.resize(nw, nh).is_err() {
+            return;
+        }
+        let Ok(mut buffer) = flyout.surface.buffer_mut() else {
+            return;
+        };
+        let bg = theme.resolve(theme.background);
+        for (dst, px) in buffer
+            .iter_mut()
+            .zip(flyout.drawer.pixmap().pixels().iter())
+        {
+            let a = px.alpha() as u32;
+            let inv = 255 - a;
+            let (sr, sg, sb) = (px.red() as u32, px.green() as u32, px.blue() as u32);
+            let r = (sr + bg.r as u32 * inv / 255).min(255);
+            let g = (sg + bg.g as u32 * inv / 255).min(255);
+            let b = (sb + bg.b as u32 * inv / 255).min(255);
+            *dst = (r << 16) | (g << 8) | b;
+        }
+        let _ = buffer.present();
+        flyout.laid = Some(laid);
     }
 
     fn redraw(&mut self) {
@@ -369,24 +555,44 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        let is_flyout = self.flyout.as_ref().map(|f| f.window.id()) == Some(window_id);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Focused(false) => {
-                // Dismiss on click-outside / focus loss.
-                self.close_popup();
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    self.focused.insert(window_id);
+                } else {
+                    self.focused.remove(&window_id);
+                    // Dismiss the whole stack only once no muri window holds
+                    // focus — so opening a flyout doesn't close the menu.
+                    if self.focused.is_empty() {
+                        self.close_popup();
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } if is_flyout => {
+                self.on_flyout_cursor(position);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let logical = self.to_logical(position);
-                self.cursor = logical;
-                let hovered = self.laid.as_ref().and_then(|l| l.hit(logical));
-                if hovered != self.hovered {
-                    self.hovered = hovered;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                self.on_parent_cursor(event_loop, position);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if is_flyout => {
+                let clicked = self
+                    .flyout
+                    .as_ref()
+                    .and_then(|f| f.laid.as_ref().and_then(|l| l.id_at(f.cursor)));
+                if let Some(id) = clicked {
+                    if !id.is_none() {
+                        self.tray.dispatch(&id);
                     }
+                    self.close_popup();
                 }
             }
             WindowEvent::MouseInput {
@@ -394,6 +600,15 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // A submenu parent toggles its flyout; a leaf row dispatches and
+                // closes the whole stack.
+                let hit = self.laid.as_ref().and_then(|l| l.hit(self.cursor));
+                if let Some(i) = hit {
+                    if self.submenu_child(i).is_some() {
+                        self.open_flyout(event_loop, i);
+                        return;
+                    }
+                }
                 if let Some(id) = self.laid.as_ref().and_then(|l| l.id_at(self.cursor)) {
                     if !id.is_none() {
                         self.tray.dispatch(&id);
@@ -401,6 +616,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.close_popup();
                 }
             }
+            WindowEvent::RedrawRequested if is_flyout => self.redraw_flyout(),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -408,6 +624,48 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// Handle pointer movement over the parent popup: update the hovered row and
+    /// open/switch/close the flyout per the hover-stack rules.
+    fn on_parent_cursor(&mut self, event_loop: &ActiveEventLoop, position: PhysicalPosition<f64>) {
+        let logical = self.to_logical(position);
+        self.cursor = logical;
+        let hovered = self.laid.as_ref().and_then(|l| l.hit(logical));
+        if hovered != self.hovered {
+            self.hovered = hovered;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+
+        let target = match hovered {
+            Some(i) if self.submenu_child(i).is_some() => HoverTarget::ParentRow(i),
+            Some(_) => HoverTarget::OtherRow,
+            None => HoverTarget::Outside,
+        };
+        let current = self.flyout.as_ref().map(|f| f.parent_index);
+        match next_flyout(current, target) {
+            Some(i) if current != Some(i) => self.open_flyout(event_loop, i),
+            None if current.is_some() => self.close_flyout(),
+            _ => {}
+        }
+    }
+
+    /// Handle pointer movement over the flyout panel: keep it open and highlight
+    /// the hovered child row.
+    fn on_flyout_cursor(&mut self, position: PhysicalPosition<f64>) {
+        let Some(flyout) = self.flyout.as_mut() else {
+            return;
+        };
+        let scale = flyout.window.scale_factor();
+        let logical = LogicalPoint::new((position.x / scale) as f32, (position.y / scale) as f32);
+        flyout.cursor = logical;
+        let hovered = flyout.laid.as_ref().and_then(|l| l.hit(logical));
+        if hovered != flyout.hovered {
+            flyout.hovered = hovered;
+            flyout.window.request_redraw();
+        }
+    }
+
     fn to_logical(&self, position: PhysicalPosition<f64>) -> LogicalPoint {
         let scale = self
             .window
