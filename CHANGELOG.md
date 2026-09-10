@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-09-10
+
+Native-menu OEM parity on macOS: the menu renders in the real OS UI font and
+dismisses like a native menu. On-device appearance/interaction is
+`DEVICE-VERIFY(0.9.6)`.
+
+### Added
+
+- **`FontFamily::System` resolves to the OS native menu font (#10)** — a new
+  per-OS `Platform::system_menu_font()` supplies the host UI face (Segoe UI on
+  Windows via `SPI_GETNONCLIENTMETRICS`; the GNOME `font-name` on Linux;
+  `NSFont menuFontOfSize:0` on macOS) which the renderer registers into `fontdb`
+  and pins `FontFamily::System` to (`RasterDrawer::new_native`). Falls back to the
+  previous installed-font discovery when unavailable, so it never regresses.
+  Windows/Linux resolve the real UI family by name; macOS is best-effort (SF Pro's
+  protected file still needs CoreText URL loading — future work).
+- **macOS: native-menu dismissal (#11)** — the popup now closes on a click in
+  another app / the desktop (a global `NSEvent` monitor, which a non-activating
+  panel's `resignKey` never delivered) and when any other menu opens or the app
+  resigns active (`NSMenuDidBeginTracking` / `NSApplicationDidResignActive`
+  observers) — one menu open at a time. Watchers are unregistered on close (no
+  leaks). Windows/Linux already dismissed on outside click.
+
 ## [0.9.5] - 2026-09-09
 
 macOS menu-parity + performance: menu clicks now work on macOS, the menu paints
