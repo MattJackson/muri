@@ -171,7 +171,7 @@ impl Framebuffer {
 /// (`icon_pixmap`) and the macOS/Windows image paths all consume encoded bytes,
 /// so without this the facade icon never reaches the drawn tray (divergence D6)
 /// and, on GNOME, the appindicator extension drops an item with an empty pixmap.
-pub fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
     }

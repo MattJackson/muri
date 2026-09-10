@@ -207,3 +207,24 @@ pub use linux::LinuxPlatform as PlatformImpl;
 pub fn current() -> PlatformImpl {
     PlatformImpl::new()
 }
+
+/// Launch the `muri-tray` background UI thread that drives a tray to completion
+/// via `run`, returning once the thread is spawned. Shared by the Windows and
+/// Linux [`Platform::spawn_tray`] implementations (macOS installs on the main
+/// thread instead, so it does not use this). An install/run failure is reported
+/// on stderr, since the caller — the compat facade's `build()` — has already
+/// returned by the time this thread installs.
+#[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+pub(crate) fn spawn_tray_thread(tray: Tray, run: fn(Tray) -> Result<()>) -> Result<()> {
+    std::thread::Builder::new()
+        .name("muri-tray".to_owned())
+        .spawn(move || {
+            if let Err(e) = run(tray) {
+                eprintln!("muri: tray thread exited with error: {e}");
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| {
+            crate::error::Error::Platform(format!("failed to spawn muri tray thread: {e}"))
+        })
+}

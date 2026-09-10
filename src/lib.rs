@@ -226,6 +226,13 @@ pub(crate) enum TrayCommand {
     Open,
     /// Dismiss the popup if shown.
     Close,
+    /// Stop the tray: remove the OS status item and end the backend's run loop
+    /// (and, for a spawned tray, its background thread). Posted by the compat
+    /// facade's `Drop` (and [`TrayHandle::shutdown`]) so dropping a tray removes
+    /// its icon, matching `tray-icon`'s drop-removes contract. Best-effort and
+    /// asynchronous, like every other command; the process-exit path also
+    /// reclaims the OS registration on all three backends.
+    Shutdown,
 }
 
 /// A cheap, `Clone + Send` remote control for a running [`Tray`].
@@ -251,6 +258,18 @@ impl std::fmt::Debug for TrayHandle {
 }
 
 impl TrayHandle {
+    /// Test-only: drain and return the commands posted so far, so a unit test can
+    /// assert that a setter posted the *right* [`TrayCommand`] with the right
+    /// payload (the facade setters go through this path but the OS backend that
+    /// would otherwise consume it is not installed headlessly).
+    #[cfg(test)]
+    pub(crate) fn take_posted(&self) -> Vec<TrayCommand> {
+        self.queue
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
     fn post(&self, command: TrayCommand) {
         if let Ok(mut q) = self.queue.lock() {
             q.push(command);
@@ -297,6 +316,14 @@ impl TrayHandle {
     /// Dismiss the popup if shown.
     pub fn close(&self) {
         self.post(TrayCommand::Close);
+    }
+
+    /// Stop the tray: remove the OS status item and end its backend run loop (and
+    /// background thread, for a spawned tray). Best-effort and asynchronous — the
+    /// removal is applied on the backend's UI thread. Used by the compat facade
+    /// to remove the icon when its `TrayIcon` is dropped, matching `tray-icon`.
+    pub fn shutdown(&self) {
+        self.post(TrayCommand::Shutdown);
     }
 }
 
@@ -652,6 +679,31 @@ mod tests {
         assert_eq!(tray.title_text(), Some("45%"));
         assert_eq!(tray.current_menu().len(), 1);
         assert!(matches!(tray.menu_options().theme, ThemeSource::Dark));
+    }
+
+    #[test]
+    fn tray_handle_setters_post_the_matching_command() {
+        // Guards the mechanism every facade setter relies on: a TrayHandle setter
+        // must post the *right* TrayCommand with the right payload. A swap (e.g.
+        // set_title posting SetTooltip) would fail here — the facade unit tests
+        // can't catch that headlessly because no OS backend drains the queue.
+        let tray = Tray::new(Icon::Checkmark);
+        let handle = tray.handle();
+        handle.set_title(Some("45%"));
+        handle.set_tooltip(Some("tip"));
+        handle.set_visible(false);
+        let posted = handle.take_posted();
+        assert!(
+            matches!(&posted[0], TrayCommand::SetTitle(Some(s)) if s == "45%"),
+            "got {:?}",
+            posted.first()
+        );
+        assert!(
+            matches!(&posted[1], TrayCommand::SetTooltip(Some(s)) if s == "tip"),
+            "got {:?}",
+            posted.get(1)
+        );
+        assert!(matches!(&posted[2], TrayCommand::SetVisible(false)));
     }
 
     #[test]

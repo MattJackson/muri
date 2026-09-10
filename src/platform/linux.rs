@@ -172,17 +172,8 @@ impl Platform for LinuxPlatform {
         // `ksni` already runs its D-Bus service on its own thread; `run_sni_loop`
         // only parks draining `TrayHandle` commands, so hosting that drain on a
         // dedicated background thread is self-consistent and lets build() return
-        // immediately. build() has returned before this thread registers, so an
-        // SNI registration failure is reported on stderr rather than swallowed.
-        std::thread::Builder::new()
-            .name("muri-tray".to_owned())
-            .spawn(move || {
-                if let Err(e) = run_sni_loop(tray) {
-                    eprintln!("muri: tray thread exited with error: {e}");
-                }
-            })
-            .map(|_| ())
-            .map_err(|e| Error::Platform(format!("failed to spawn muri tray thread: {e}")))
+        // immediately.
+        super::spawn_tray_thread(tray, run_sni_loop)
     }
 
     /// Open the styled, pointer-anchored `ContextMenu::open_at` popup (spec 22 §2
@@ -252,6 +243,16 @@ fn run_sni_loop(tray: Tray) -> Result<()> {
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
         for command in pending {
+            if matches!(command, TrayCommand::Shutdown) {
+                // ksni's `Handle` has no `Drop` that unregisters — simply
+                // dropping it leaves ksni's own service thread and the live SNI
+                // item running forever. Explicitly shut the service down (closes
+                // the D-Bus connection and ends that thread) and wait for it to
+                // complete, then end this drain thread. Removes the tray item,
+                // matching tray-icon's drop-removes contract.
+                handle.shutdown().wait();
+                return Ok(());
+            }
             apply_command(&handle, command);
         }
         if handle.is_closed() {
@@ -305,6 +306,10 @@ fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
         // The SNI host owns menu presentation; muri cannot force-open or close a
         // host-drawn menu from the app side (spec 22 §1). Honest no-op.
         TrayCommand::Open | TrayCommand::Close => {}
+        // Intercepted in `run_sni_loop`'s drain before reaching here (it needs to
+        // end the loop + call `Handle::shutdown`), so this arm is never taken;
+        // present only to keep the match exhaustive.
+        TrayCommand::Shutdown => {}
     }
 }
 

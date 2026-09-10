@@ -74,7 +74,7 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon,
     DestroyWindow, DispatchMessageW, GetMessageW, GetWindowLongPtrW, GetWindowRect, PostMessageW,
-    RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, GWLP_USERDATA, HC_ACTION, HHOOK, HICON, HWND_MESSAGE, ICONINFO,
     KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_ACTIVATEAPP, WM_APP,
     WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WNDCLASSW,
@@ -1828,6 +1828,12 @@ impl AppState {
                 }
             }
             TrayCommand::Close => self.session.close_popup(),
+            TrayCommand::Shutdown => {
+                // Post WM_QUIT so GetMessageW returns 0 and run_event_loop exits;
+                // unwinding drops AppState -> WindowsAnchor::Drop, which removes
+                // the notification icon (NIM_DELETE). Ends the 'muri-tray' thread.
+                unsafe { PostQuitMessage(0) };
+            }
         }
     }
 
@@ -1993,18 +1999,8 @@ impl Platform for WindowsPlatform {
         // The tray's HWND, message pump and thread-local state all live on the
         // thread that runs `run_event_loop`, so a dedicated background thread is
         // fully self-consistent; a `TrayHandle` drives it cross-thread by
-        // `PostMessageW`-ing the (thread-safe) owner window. build() has already
-        // returned by the time this thread installs, so an install failure is
-        // reported on stderr rather than swallowed.
-        std::thread::Builder::new()
-            .name("muri-tray".to_owned())
-            .spawn(move || {
-                if let Err(e) = run_event_loop(tray) {
-                    eprintln!("muri: tray thread exited with error: {e}");
-                }
-            })
-            .map(|_| ())
-            .map_err(|e| Error::Platform(format!("failed to spawn muri tray thread: {e}")))
+        // `PostMessageW`-ing the (thread-safe) owner window.
+        super::spawn_tray_thread(tray, run_event_loop)
     }
 
     fn open_popup_session(
@@ -2072,6 +2068,11 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
         kbd_hook: null_mut(),
     };
 
+    // Keep an Arc to the waker slot before `tray` moves into `AppState`, so we
+    // can clear the stale `WakeFn` once the pump exits — otherwise a surviving
+    // `TrayHandle` would `PostMessageW` a destroyed owner HWND.
+    let waker_arc = std::sync::Arc::clone(&tray.waker);
+
     let state = Rc::new(RefCell::new(AppState { session, tray }));
     MAIN_APP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&state)));
 
@@ -2088,6 +2089,11 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
 
     MAIN_APP.with(|slot| *slot.borrow_mut() = None);
     OWNER_HWND.with(|h| h.set(0));
+    // Clear the waker so a `TrayHandle` outliving the pump can't post to the
+    // now-destroyed owner window.
+    if let Ok(mut waker) = waker_arc.lock() {
+        *waker = None;
+    }
     #[cfg(feature = "a11y")]
     A11Y_OWNER.store(0, Ordering::SeqCst);
     Ok(())

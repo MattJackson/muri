@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Release-gate code-audit fixes (10-lens audit of the 0.9.x tray/facade work).
+
+### Added
+
+- **`Tray::shutdown` via `TrayHandle::shutdown()` + `TrayCommand::Shutdown`** — a
+  best-effort teardown that removes the OS status item and ends the backend run
+  loop (and the spawned `muri-tray` thread).
+
+### Fixed
+
+- **`muda-compat`: dropping a `TrayIcon` now removes the OS tray icon** — the
+  facade spawned a background tray thread and discarded it with no `Drop`, so
+  dropping a `TrayIcon` leaked the thread and the live `Shell_NotifyIcon` / SNI
+  item until process exit (and diverged from `tray-icon`, which removes its icon
+  on drop). `TrayIcon` now has a `Drop` that posts `Shutdown`; Windows quits its
+  pump (→ `NIM_DELETE`), Linux calls ksni `Handle::shutdown()` (dropping the
+  handle alone unregisters nothing), macOS removes the `NSStatusItem` explicitly
+  (its `AppState` is parked in a thread-local, so `Drop` never fired).
+- **`Icon::from_rgba` no longer panics on overflowing dimensions** — `width *
+  height * 4` used unchecked `usize` arithmetic, panicking under the default debug
+  overflow checks (and wrapping to a wrong bound in release) for pathological
+  sizes from untrusted metadata. Now checked; overflow is a rejected icon.
+- **Windows: the tray waker is cleared when the pump exits** — a `TrayHandle`
+  outliving `run_event_loop` could `PostMessageW` a destroyed owner window.
+
+### Internal
+
+- `render::encode_rgba_png` is now `pub(crate)` (was accidentally public).
+- Shared `platform::spawn_tray_thread` helper de-duplicates the Windows/Linux
+  `spawn_tray` bodies. Corrected doc/changelog references that mislabeled the
+  facade tray-RGBA fix as spec divergence "D6" (D6 is `NativeIcon`/`Icon::Symbol`
+  rendering). Added regression tests for `TrayHandle`/facade command posting.
+
 ## [0.9.3] - 2026-09-09
 
 Patch release in the 0.9.x testing cycle: a **text-title status item** so apps
@@ -52,11 +85,13 @@ Windows and GNOME desktops as part of the 0.9.x cycle).
   and relies on the host's `NSApplication` run loop (best-effort). The facade
   drives it through a `TrayHandle` (`set_icon`/`set_menu`/`set_tooltip`/
   `set_visible` post to the running tray).
-- **`muda-compat`: the tray icon's RGBA never reached the drawn tray (D6)** — the
+- **`muda-compat`: the tray icon's RGBA never reached the drawn tray** — the
   facade carried the icon as raw RGBA but built the tray with a placeholder
   symbol, so the Linux SNI `icon_pixmap` / Windows `HICON` were empty and hosts
   dropped the item. The RGBA is now encoded to PNG (`render::encode_rgba_png`) and
-  handed to the tray as `Icon::Png`, closing divergence D6 for the facade.
+  handed to the tray as `Icon::Png`, so the facade's icon reaches the drawn tray.
+  (This was a facade-specific gap, distinct from the spec's `NativeIcon`/
+  `Icon::Symbol` divergence D6, which concerns menu-item glyph rendering.)
 
 ### Added
 
