@@ -66,6 +66,10 @@ pub(crate) use raster::encode_rgba_png;
 /// A decoded PNG icon: straight-alpha RGBA bytes plus its `(width, height)`.
 type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;
 
+/// Cache key for a shaped run: the text, the resolved primary face, the OpenType
+/// weight, and the device pixel size (as raw `f32` bits for exact equality).
+type ShapeKey = (String, Option<FaceId>, u16, u32);
+
 /// A [`RasterDrawer::icons`] cache entry: the decoded icon plus a strong
 /// clone of the source `Arc<[u8]>` it was decoded from (see the field doc for
 /// why retaining that `Arc` is load-bearing, not incidental).
@@ -291,6 +295,13 @@ impl RasterDrawer {
     pub fn encode_png(&self) -> Vec<u8> {
         self.fb.encode_png()
     }
+
+    /// Test-only: how many text runs have actually been shaped (cache misses),
+    /// used to assert that a repaint of unchanged text re-shapes nothing.
+    #[cfg(test)]
+    pub(crate) fn shape_miss_count(&self) -> usize {
+        self.fonts.shape_misses.get()
+    }
 }
 
 /// A glyph positioned along a shaped line: which face rendered it, its glyph id,
@@ -346,6 +357,10 @@ struct FaceBytes {
 /// Cap on [`FontStore::glyphs`]'s entry count (see [`FontStore::glyph_image`]).
 const GLYPH_CACHE_CAP: usize = 512;
 
+/// Cap on [`FontStore::shaped`]'s entry count. A menu has a few dozen distinct
+/// runs; the cap only bounds a long-lived drawer whose text changes every tick.
+const SHAPED_CACHE_CAP: usize = 1024;
+
 struct FontStore {
     db: Database,
     /// The concrete family name the generic "system" font resolves to, pinned
@@ -357,6 +372,35 @@ struct FontStore {
     ui_family: Option<String>,
     face_data: RefCell<HashMap<FaceId, Rc<FaceBytes>>>,
     glyphs: RefCell<HashMap<GlyphKey, Option<Rc<GlyphImage>>>>,
+    /// Compiled harfrust shaping tables (GSUB/GPOS/cmap caches), one per face,
+    /// built once and reused across every `shape` call. `ShaperData::new` is the
+    /// expensive step (it compiles the font's OpenType/AAT tables); rebuilding it
+    /// per run per frame made a single menu repaint take ~0.5s on real fonts, so
+    /// hover-highlight felt laggy. Cached here, only the cheap per-call `Shaper`
+    /// is rebuilt. Bounded by the handful of distinct faces a menu uses.
+    shaper_data: RefCell<HashMap<FaceId, Rc<ShaperData>>>,
+    /// Memoized codepoint coverage per `(face, char)`. `face_has_glyph` otherwise
+    /// re-parses the font and its cmap table on every call — and it is called per
+    /// char, per candidate face, per render. Caching it (with the fallback cache
+    /// below) is what keeps a hover-highlight repaint from re-scanning fonts.
+    coverage: RefCell<HashMap<(FaceId, char), bool>>,
+    /// Memoized font-fallback decision per `(char, ot_weight)`. `fallback_face_for`
+    /// otherwise scans the *entire system font DB* (loading + cmap-parsing each
+    /// face) for every codepoint the primary face lacks, on every render — the
+    /// dominant cost of a laggy menu with symbol/emoji/logo glyphs. The result is
+    /// stable for a given char+weight, so it is cached across frames.
+    fallback_cache: RefCell<HashMap<(char, u16), Option<FaceId>>>,
+    /// Memoized shaped runs per `(text, primary face, ot_weight, px-bits)`.
+    /// `shape` is called several times per run per render (measure pass + draw
+    /// pass), and a hover-highlight repaints unchanged text — so caching the
+    /// shaped glyph list across frames turns a repaint into a glyph-blit with no
+    /// re-shaping. Bounded by [`SHAPED_CACHE_CAP`] (cleared wholesale on overflow)
+    /// so a live menu whose text changes each tick can't grow it without limit.
+    shaped: RefCell<HashMap<ShapeKey, Rc<ShapedLine>>>,
+    /// Test-only counter of actual shaping runs (cache misses), so a test can
+    /// assert a repaint of unchanged text re-shapes nothing.
+    #[cfg(test)]
+    shape_misses: std::cell::Cell<usize>,
     scale_ctx: RefCell<ScaleContext>,
     /// Every face id in the db, in a stable order, scanned as the last-resort
     /// fallback when no [`FALLBACK_FAMILIES`] entry covers a codepoint.
@@ -371,6 +415,12 @@ impl FontStore {
             ui_family,
             face_data: RefCell::new(HashMap::new()),
             glyphs: RefCell::new(HashMap::new()),
+            shaper_data: RefCell::new(HashMap::new()),
+            coverage: RefCell::new(HashMap::new()),
+            fallback_cache: RefCell::new(HashMap::new()),
+            shaped: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            shape_misses: std::cell::Cell::new(0),
             scale_ctx: RefCell::new(ScaleContext::new()),
             fallback_order,
         }
@@ -410,27 +460,42 @@ impl FontStore {
 
     /// Whether `id` has a glyph for `ch` in its cmap.
     fn face_has_glyph(&self, id: FaceId, ch: char) -> bool {
-        self.face_bytes(id)
+        if let Some(&hit) = self.coverage.borrow().get(&(id, ch)) {
+            return hit;
+        }
+        let hit = self
+            .face_bytes(id)
             .and_then(|b| {
                 FontRef::from_index(&b.data, b.index as usize).map(|f| f.charmap().map(ch) != 0)
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.coverage.borrow_mut().insert((id, ch), hit);
+        hit
     }
 
     /// Pick a fallback face that covers `ch`: try the preferred families first,
     /// then scan the whole db in a stable order. Deterministic given the db.
     fn fallback_face_for(&self, ch: char, ot_weight: u16) -> Option<FaceId> {
-        for fam in FALLBACK_FAMILIES {
-            if let Some(id) = query_face(&self.db, DbFamily::Name(fam), ot_weight) {
-                if self.face_has_glyph(id, ch) {
-                    return Some(id);
+        if let Some(&cached) = self.fallback_cache.borrow().get(&(ch, ot_weight)) {
+            return cached;
+        }
+        let result = 'find: {
+            for fam in FALLBACK_FAMILIES {
+                if let Some(id) = query_face(&self.db, DbFamily::Name(fam), ot_weight) {
+                    if self.face_has_glyph(id, ch) {
+                        break 'find Some(id);
+                    }
                 }
             }
-        }
-        self.fallback_order
-            .iter()
-            .copied()
-            .find(|&id| self.face_has_glyph(id, ch))
+            self.fallback_order
+                .iter()
+                .copied()
+                .find(|&id| self.face_has_glyph(id, ch))
+        };
+        self.fallback_cache
+            .borrow_mut()
+            .insert((ch, ot_weight), result);
+        result
     }
 
     /// Split `text` into consecutive `(face, substring)` runs so each codepoint
@@ -463,7 +528,19 @@ impl FontStore {
 
     /// Shape a single line of `text` into positioned glyphs (device px), running
     /// each fallback sub-run through `harfrust` with its own face.
-    fn shape(&self, text: &str, primary: Option<FaceId>, ot_weight: u16, px: f32) -> ShapedLine {
+    fn shape(
+        &self,
+        text: &str,
+        primary: Option<FaceId>,
+        ot_weight: u16,
+        px: f32,
+    ) -> Rc<ShapedLine> {
+        let key = (text.to_owned(), primary, ot_weight, px.to_bits());
+        if let Some(cached) = self.shaped.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        #[cfg(test)]
+        self.shape_misses.set(self.shape_misses.get() + 1);
         let mut glyphs = Vec::new();
         let mut pen = 0.0_f32;
         for (face_id, sub) in self.segment_faces(text, primary, ot_weight) {
@@ -476,7 +553,18 @@ impl FontStore {
             // Shape in font units (no scale set on `ShapeOptions`) and convert
             // advances/offsets to device px with `s = px / upem`, matching the
             // previous `rustybuzz` scaling.
-            let shaper_data = ShaperData::new(&font);
+            //
+            // Reuse this face's compiled `ShaperData` (built once, cached) rather
+            // than recompiling the font's OpenType tables on every run — the
+            // difference between a snappy and a ~0.5s menu repaint on real fonts.
+            let shaper_data = {
+                let mut cache = self.shaper_data.borrow_mut();
+                Rc::clone(
+                    cache
+                        .entry(face_id)
+                        .or_insert_with(|| Rc::new(ShaperData::new(&font))),
+                )
+            };
             let shaper = shaper_data.shaper(&font).build();
             let upem = shaper.units_per_em() as f32;
             let s = if upem > 0.0 { px / upem } else { 0.0 };
@@ -498,7 +586,13 @@ impl FontStore {
                 pen += pos.x_advance as f32 * s;
             }
         }
-        ShapedLine { glyphs, width: pen }
+        let line = Rc::new(ShapedLine { glyphs, width: pen });
+        let mut cache = self.shaped.borrow_mut();
+        if cache.len() >= SHAPED_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&line));
+        line
     }
 
     /// The (ascent, descent) of the primary face at `px` (descent negative),

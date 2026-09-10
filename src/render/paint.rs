@@ -632,6 +632,32 @@ mod tests {
     }
 
     #[test]
+    fn repeated_render_reuses_shaped_runs_no_reshaping() {
+        // A hover-highlight repaints unchanged text; after the first render, a
+        // second identical render must re-shape nothing (all runs served from the
+        // shaped cache) — the fix for the ~0.5s hover latency. Instruments the
+        // real shape() miss counter rather than wall-clock (non-flaky).
+        let mut d = crate::render::RasterDrawer::new(2.0);
+        let menu = demo_menu();
+        let _ = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        let after_first = d.shape_miss_count();
+        assert!(after_first > 0, "the first render shapes its runs");
+        // Re-render the same menu with a different highlight (a hover change).
+        let _ = render_menu(
+            &mut d,
+            &menu,
+            &Theme::dark(),
+            &MenuOptions::default(),
+            Some(0),
+        );
+        assert_eq!(
+            d.shape_miss_count(),
+            after_first,
+            "a repaint of unchanged text must not re-shape any run"
+        );
+    }
+
+    #[test]
     fn render_produces_nonempty_size_and_hits() {
         let mut d = crate::render::RasterDrawer::new(2.0);
         let laid = render_menu(
