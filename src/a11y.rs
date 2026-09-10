@@ -188,7 +188,10 @@ fn build_level(menu: &Menu, next: &mut u64) -> Vec<AxNode> {
                 } else {
                     AxRole::MenuItem
                 },
-                name: row.accessible_name(),
+                name: row
+                    .accessibility_label
+                    .clone()
+                    .unwrap_or_else(|| row.accessible_name()),
                 enabled: row.enabled,
                 checked: row.checked,
                 has_popup: false,
@@ -205,7 +208,10 @@ fn build_level(menu: &Menu, next: &mut u64) -> Vec<AxNode> {
                 } else {
                     AxRole::MenuItem
                 },
-                name: label.accessible_name(),
+                name: label
+                    .accessibility_label
+                    .clone()
+                    .unwrap_or_else(|| label.accessible_name()),
                 enabled: label.enabled,
                 checked: label.checked,
                 has_popup: true,
@@ -222,62 +228,97 @@ fn build_level(menu: &Menu, next: &mut u64) -> Vec<AxNode> {
 }
 
 /// The id of the node a screen reader should focus for the given keyboard-nav
-/// selection: the selected child inside an open flyout, else the open flyout's
-/// parent, else the selected top-level row, else `None`.
+/// selection: the selected child inside the **deepest** open flyout level, else
+/// that level's parent, else the selected top-level row, else `None`.
+///
+/// Walks the flyout stack ([`MenuFocus::flyout`]) N levels deep, descending one
+/// nested [`AxRole::Menu`] per frame via each frame's `parent`, so a selection in
+/// an arbitrarily nested submenu resolves to the right node.
 pub fn focused_id(tree: &AxTree, focus: &MenuFocus) -> Option<AxId> {
-    if let Some(fly) = focus.flyout {
-        let parent = tree
+    let Some(last) = focus.flyout.last() else {
+        let top = focus.top?;
+        return tree
             .root
             .children
             .iter()
-            .find(|n| n.item_index == Some(fly.parent))?;
-        return match fly.child {
-            Some(ci) => parent
-                .children
-                .iter()
-                .find(|n| n.item_index == Some(ci))
-                .map(|n| n.id)
-                .or(Some(parent.id)),
-            None => Some(parent.id),
-        };
+            .find(|n| n.item_index == Some(top))
+            .map(|n| n.id);
+    };
+    // Descend to the deepest open submenu node, following each frame's `parent`.
+    let mut parent = &tree.root;
+    for frame in &focus.flyout {
+        parent = parent
+            .children
+            .iter()
+            .find(|n| n.item_index == Some(frame.parent))?;
     }
-    let top = focus.top?;
-    tree.root
-        .children
-        .iter()
-        .find(|n| n.item_index == Some(top))
-        .map(|n| n.id)
+    match last.child {
+        Some(ci) => parent
+            .children
+            .iter()
+            .find(|n| n.item_index == Some(ci))
+            .map(|n| n.id)
+            .or(Some(parent.id)),
+        None => Some(parent.id),
+    }
 }
 
 /// Locate a node by id as a `(top-level item index, optional submenu child item
 /// index)` pair. The live backend uses this to map an AccessKit action request
 /// (whose `target` is the [`AxId`]) back onto the [`Menu`] position to act on.
+///
+/// This resolves the top level plus **one** flyout level (matching the per-window
+/// adapter model, where each OS window's tree is one level deep — spec 30 §3.2
+/// Option B). For an arbitrarily nested node use [`locate_path`].
 pub fn locate(tree: &AxTree, id: AxId) -> Option<(usize, Option<usize>)> {
-    for top in &tree.root.children {
-        if top.id == id {
-            return top.item_index.map(|i| (i, None));
-        }
-        for child in &top.children {
-            if child.id == id {
-                if let (Some(ti), Some(ci)) = (top.item_index, child.item_index) {
-                    return Some((ti, Some(ci)));
-                }
-            }
-        }
+    let path = locate_path(tree, id)?;
+    match path.as_slice() {
+        [top] => Some((*top, None)),
+        [top, child, ..] => Some((*top, Some(*child))),
+        [] => None,
     }
-    None
 }
 
-/// Mark the submenu node whose `item_index` matches `parent` as expanded (or not)
-/// in place. The backend calls this when it opens/closes a flyout so the tree's
-/// `expanded` state — and any resulting AT notification — stays truthful.
-pub fn set_expanded(tree: &mut AxTree, parent: usize, expanded: bool) {
-    if let Some(node) = tree
-        .root
-        .children
-        .iter_mut()
-        .find(|n| n.item_index == Some(parent) && n.has_popup)
-    {
+/// Locate a node by id as the **full path** of `Menu::items` indices from the top
+/// level down to the node — one index per level (decision #8, N-level submenus).
+/// `[i]` is a top-level row; `[i, j, k]` is the `k`-th item of the `j`-th item of
+/// the `i`-th (a two-level-nested row). Empty for the root container / unknown id.
+pub fn locate_path(tree: &AxTree, id: AxId) -> Option<Vec<usize>> {
+    fn walk(node: &AxNode, id: AxId, path: &mut Vec<usize>) -> bool {
+        for child in &node.children {
+            let Some(idx) = child.item_index else {
+                continue;
+            };
+            path.push(idx);
+            if child.id == id || walk(child, id, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+    let mut path = Vec::new();
+    if walk(&tree.root, id, &mut path) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Mark the submenu node reached by following `path` (a list of `Menu::items`
+/// indices, one per level — as produced by [`locate_path`]) as expanded (or not)
+/// in place, N levels deep. The backend calls this when it opens/closes a flyout
+/// so the tree's `expanded` state — and any resulting AT notification — stays
+/// truthful. A single-element path is the shipped top-level case.
+pub fn set_expanded(tree: &mut AxTree, path: &[usize], expanded: bool) {
+    let mut node = &mut tree.root;
+    for &idx in path {
+        let Some(next) = node.children.iter_mut().find(|n| n.item_index == Some(idx)) else {
+            return;
+        };
+        node = next;
+    }
+    if node.has_popup {
         node.expanded = Some(expanded);
     }
 }
@@ -328,7 +369,7 @@ pub fn announcement(node: &AxNode) -> String {
 #[cfg(feature = "a11y")]
 pub mod accesskit {
     use super::{AxNode, AxRole, AxTree};
-    use accesskit::{Node, NodeId, Role, Toggled, Tree, TreeUpdate};
+    use accesskit::{HasPopup, Node, NodeId, Role, Toggled, Tree, TreeUpdate};
 
     fn role_of(node: &AxNode) -> Role {
         match node.role {
@@ -354,6 +395,7 @@ pub mod accesskit {
             None => {}
         }
         if node.has_popup {
+            n.set_has_popup(HasPopup::Menu);
             n.set_expanded(node.expanded.unwrap_or(false));
         }
         if let (Some(p), Some(s)) = (node.pos_in_set, node.set_size) {
@@ -469,7 +511,7 @@ mod tests {
         let tree = build_tree(&menu());
         let focus = MenuFocus {
             top: Some(2),
-            flyout: None,
+            flyout: Vec::new(),
         };
         let id = focused_id(&tree, &focus).unwrap();
         assert_eq!(tree.find(id).unwrap().name, "you@example.com");
@@ -480,10 +522,10 @@ mod tests {
         let tree = build_tree(&menu());
         let focus = MenuFocus {
             top: Some(5),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 5,
                 child: Some(1),
-            }),
+            }],
         };
         let id = focused_id(&tree, &focus).unwrap();
         assert_eq!(tree.find(id).unwrap().name, "Two");
@@ -494,10 +536,10 @@ mod tests {
         let tree = build_tree(&menu());
         let focus = MenuFocus {
             top: Some(5),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 5,
                 child: None,
-            }),
+            }],
         };
         let id = focused_id(&tree, &focus).unwrap();
         assert_eq!(tree.find(id).unwrap().name, "Settings");
@@ -520,12 +562,84 @@ mod tests {
     }
 
     #[test]
+    fn locate_path_resolves_full_nesting() {
+        // Two-level-deep fixture: submenu "Outer" (0) → submenu "Inner" (0) →
+        // leaf "Deep" (1); a top-level leaf "Quit" (1).
+        let m = Menu::new()
+            .submenu(
+                Row::new("outer").label("Outer"),
+                Menu::new().submenu(
+                    Row::new("inner").label("Inner"),
+                    Menu::new()
+                        .row(Row::new("d0").label("D0"))
+                        .row(Row::new("deep").label("Deep")),
+                ),
+            )
+            .row(Row::new("quit").label("Quit"));
+        let tree = build_tree(&m);
+        let deep = tree.root.children[0].children[0].children[1].id;
+        assert_eq!(locate_path(&tree, deep), Some(vec![0, 0, 1]));
+        let inner = tree.root.children[0].children[0].id;
+        assert_eq!(locate_path(&tree, inner), Some(vec![0, 0]));
+        let quit = tree.root.children[1].id;
+        assert_eq!(locate_path(&tree, quit), Some(vec![1]));
+        assert_eq!(locate_path(&tree, AxId(9999)), None);
+        // The shipped `locate` truncates to (top, first child).
+        assert_eq!(locate(&tree, deep), Some((0, Some(0))));
+    }
+
+    #[test]
     fn set_expanded_flips_the_submenu_state() {
         let mut tree = build_tree(&menu());
-        set_expanded(&mut tree, 5, true);
+        set_expanded(&mut tree, &[5], true);
         assert_eq!(tree.root.children[5].expanded, Some(true));
-        set_expanded(&mut tree, 5, false);
+        set_expanded(&mut tree, &[5], false);
         assert_eq!(tree.root.children[5].expanded, Some(false));
+    }
+
+    #[test]
+    fn set_expanded_reaches_nested_submenus() {
+        let m = Menu::new().submenu(
+            Row::new("outer").label("Outer"),
+            Menu::new().submenu(
+                Row::new("inner").label("Inner"),
+                Menu::new().row(Row::new("leaf").label("Leaf")),
+            ),
+        );
+        let mut tree = build_tree(&m);
+        set_expanded(&mut tree, &[0, 0], true);
+        assert_eq!(tree.root.children[0].children[0].expanded, Some(true));
+        // The outer level is untouched.
+        assert_eq!(tree.root.children[0].expanded, Some(false));
+    }
+
+    #[test]
+    fn focused_id_tracks_deeply_nested_selection() {
+        let m = Menu::new().submenu(
+            Row::new("outer").label("Outer"),
+            Menu::new().submenu(
+                Row::new("inner").label("Inner"),
+                Menu::new()
+                    .row(Row::new("d0").label("D0"))
+                    .row(Row::new("deep").label("Deep")),
+            ),
+        );
+        let tree = build_tree(&m);
+        let focus = MenuFocus {
+            top: Some(0),
+            flyout: vec![
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0),
+                },
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(1),
+                },
+            ],
+        };
+        let id = focused_id(&tree, &focus).unwrap();
+        assert_eq!(tree.find(id).unwrap().name, "Deep");
     }
 
     #[cfg(feature = "a11y")]
@@ -535,10 +649,10 @@ mod tests {
         let tree = build_tree(&menu());
         let focus = MenuFocus {
             top: Some(5),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 5,
                 child: Some(0),
-            }),
+            }],
         };
         let fid = focused_id(&tree, &focus).unwrap();
         let update = super::accesskit::tree_update(&tree, Some(fid));
@@ -546,6 +660,55 @@ mod tests {
         assert_eq!(update.nodes.len(), tree.node_count());
         assert_eq!(update.focus, ::accesskit::NodeId(fid.0));
         assert!(update.tree.is_some());
+    }
+
+    #[cfg(feature = "a11y")]
+    #[test]
+    fn accesskit_node_carries_has_popup_for_a_submenu() {
+        let tree = build_tree(&menu());
+        let update = super::accesskit::tree_update(&tree, None);
+        // Node index 5 in `menu()` is the "Settings" submenu row.
+        let submenu_id = ::accesskit::NodeId(tree.root.children[5].id.0);
+        let (_, submenu_node) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == submenu_id)
+            .expect("submenu node present in the update");
+        assert_eq!(submenu_node.has_popup(), Some(::accesskit::HasPopup::Menu));
+
+        // A plain (non-submenu) row must not claim has_popup.
+        let plain_id = ::accesskit::NodeId(tree.root.children[2].id.0);
+        let (_, plain_node) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == plain_id)
+            .expect("plain row node present in the update");
+        assert_eq!(plain_node.has_popup(), None);
+    }
+
+    #[test]
+    fn accessibility_label_overrides_the_ax_name_but_not_accessible_name() {
+        let row = Row::new("mute")
+            .leading(Icon::Symbol("bell.slash"))
+            .accessibility_label("Mute notifications");
+        // accessible_name() (type-ahead) is unaffected by the override.
+        assert_eq!(row.accessible_name(), "");
+        let tree = build_tree(&Menu::new().row(row));
+        assert_eq!(tree.root.children[0].name, "Mute notifications");
+    }
+
+    #[test]
+    fn icon_only_row_without_label_has_empty_ax_name() {
+        let row = Row::new("mute").leading(Icon::Symbol("bell.slash"));
+        let tree = build_tree(&Menu::new().row(row));
+        assert_eq!(tree.root.children[0].name, "");
+    }
+
+    #[test]
+    fn default_rows_still_use_accessible_name() {
+        let tree = build_tree(&menu());
+        // "you@example.com" row (index 2) has no accessibility_label set.
+        assert_eq!(tree.root.children[2].name, "you@example.com");
     }
 
     #[test]
