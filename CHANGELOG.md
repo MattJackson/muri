@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-09-10
+
+### Fixed
+
+- **OS accent on Windows and Linux (#14)** — `Color::Accent` (selection,
+  checkmarks) now follows the system accent on Windows (`DwmGetColorizationColor`)
+  and Linux/GNOME (gsettings `accent-color`, GNOME 47+ named accents), matching
+  the macOS path. muri already tracked dark/light and injected the macOS accent +
+  vibrancy by default (`ThemeSource::FollowSystem`), and the OS menu font landed
+  in 0.9.6 (#10), so this rounds out the "read the live OS appearance" parity.
+  Deferred refinements: applying the OS menu **point size** and the OS
+  label/separator colors to the theme. On-device appearance is
+  `DEVICE-VERIFY(0.9.7)`.
+
 ## [0.9.6] - 2026-09-10
 
 Native-menu OEM parity on macOS: the menu renders in the real OS UI font and
