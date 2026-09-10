@@ -1195,8 +1195,10 @@ impl PopupSession<'_> {
         };
         let scale = geom.scale.max(1.0);
 
-        let mut probe = RasterDrawer::new_native(scale);
-        let laid = render_menu(&mut probe, &self.menu, &theme, &self.options, None);
+        // Reuse the measuring drawer as the panel drawer so shaping/glyph caches
+        // carry into the first paint (menu not shaped twice per open) (#23).
+        let mut drawer = RasterDrawer::new_native(scale);
+        let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
             geom.anchor_rect_local(),
@@ -1229,7 +1231,7 @@ impl PopupSession<'_> {
 
         self.popup = Some(Panel {
             hwnd,
-            drawer: RasterDrawer::new_native(scale),
+            drawer,
             laid: Some(laid),
             cursor: LogicalPoint::default(),
             hovered: None,
@@ -1294,8 +1296,9 @@ impl PopupSession<'_> {
         let Some(geom) = self.anchor.geometry() else {
             return;
         };
-        let mut probe = RasterDrawer::new_native(scale);
-        let child_laid = render_menu(&mut probe, &child, &theme, &self.options, None);
+        // Reuse the measuring drawer as the flyout drawer (#23).
+        let mut drawer = RasterDrawer::new_native(scale);
+        let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
         let placement = place_flyout(
@@ -1329,7 +1332,7 @@ impl PopupSession<'_> {
             parent: parent_index,
             panel: Panel {
                 hwnd,
-                drawer: RasterDrawer::new_native(scale),
+                drawer,
                 laid: None,
                 cursor: LogicalPoint::default(),
                 hovered: None,

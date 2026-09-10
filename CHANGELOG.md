@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-09-10
+
+### Fixed
+
+- **#36 — `render_menu` no longer panics** when a consumer sets `min_width >
+  max_width` (`f32::clamp` requires `min <= max`); the floor now wins.
+- **#37 — focus-loss dismissal defeated while a submenu was open.** `open_flyout`
+  inserted a synthetic entry into the focus set that was never cleared (flyouts
+  use `orderFrontRegardless` and never take key), so `focused` stayed non-empty
+  after the popup resigned key — defeating the #17 dismissal. The focus set now
+  tracks only the real key window (the popup).
+- **OEM row alignment** — when a menu has checkmarks, muri now reserves a shared
+  leading gutter so **checked and unchecked rows align their text** (native
+  `NSMenu` look), instead of a checkmark indenting only its own row. Menus with
+  only a section-header icon (no checkmarks) stay per-row inline (#16 preserved).
+  macOS theme spacing nudged toward the native menu (taller rows, more padding).
+
+### Performance
+
+- **#22 — the system-font database is scanned once, not per popup open.**
+  `load_system_fonts` (the dominant open cost) now runs once per thread and the
+  scanned `Database` is cloned (a cheap metadata copy — fontdb `Arc`s the font
+  data) for each drawer.
+- **#23 — the menu is shaped once per open, not twice.** The offscreen measuring
+  drawer is now reused as the panel's drawer (macOS + Windows; Linux already did),
+  so its warm shaping/glyph caches carry into the first paint instead of a second
+  cold drawer re-shaping every row.
+
 ## [0.10.3] - 2026-09-10
 
 ### Added (muda-compat)

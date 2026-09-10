@@ -310,11 +310,13 @@ impl Theme {
                 Color::Rgba(246, 246, 246, 209)
             },
             corner_radius: 6.0,
-            row_height: 22.0,
-            padding: Insets::symmetric(6.0, 5.0),
+            // Roomier than a tight list to match the native menu's vertical
+            // rhythm (DEVICE-VERIFY against NSMenu).
+            row_height: 24.0,
+            padding: Insets::symmetric(10.0, 5.0),
             column_gap: 10.0,
-            row_font: Font::system(13.0, Weight::Regular),
-            header_font: Font::system(13.0, Weight::Bold),
+            row_font: Font::system(13.5, Weight::Regular),
+            header_font: Font::system(13.5, Weight::Bold),
             ..base
         }
     }
