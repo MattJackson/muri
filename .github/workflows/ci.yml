@@ -57,10 +57,12 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --no-deps --all-features
 
-  # MSRV gate — runs on every push/PR. Kept on Linux (fastest, cheapest) since
-  # the MSRV contract is toolchain-version, not platform, specific.
+  # MSRV gate — runs on every push/PR. Runs on Linux because Linux pulls the
+  # widest tree (the zbus SNI stack), so it exercises the true floor; the
+  # macOS/Windows/core trees build on 1.85, but the Linux D-Bus tray raises the
+  # honest crate-wide MSRV to 1.87.
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.87)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -68,7 +70,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: "1.85" # keep in sync with Cargo.toml rust-version
+          toolchain: "1.87" # keep in sync with Cargo.toml rust-version
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cargo check on MSRV
         run: cargo check --all-targets --all-features

@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/muri.svg)](https://crates.io/crates/muri)
 [![docs.rs](https://img.shields.io/docsrs/muri)](https://docs.rs/muri)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://www.rust-lang.org)
+[![MSRV](https://img.shields.io/badge/MSRV-1.87-blue.svg)](https://www.rust-lang.org)
 
 **Menu Utilities for Rust Interfaces** — a cross-platform, fully-styleable
 tray-icon + popup-menu system for Rust. Think "a better `muda` + `tray-icon`":
@@ -121,20 +121,86 @@ See [`examples/usagio_menu.rs`](examples/usagio_menu.rs) for usagio's full real
 menu — provider groups, flush-right colored percentages, and account submenus —
 rebuilt through the API.
 
+## Migrating from muda
+
+### Why
+
+[`muda`](https://crates.io/crates/muda) + [`tray-icon`](https://crates.io/crates/tray-icon)
+**sync a data model onto native OS menu objects** (`NSMenu`, Win32 `HMENU`, GTK
+menus), so you inherit the OS look and **cannot restyle** — no custom
+fonts/colors, no true multi-column alignment, and always a reserved
+chevron/submenu column that stops values sitting flush at the right edge. muri
+**draws the menu itself** on a CPU raster surface, identically on every OS, so you
+get full styling (flush-right values, colors, fonts, embedded logos, nested
+flyouts) while still following the OS dark/light + accent by default.
+
+The migration is designed so `s/muda/muri/` **compiles, runs, and looks native
+immediately** — then lets you restyle at your own pace, with no cliff.
+
+### How
+
+1. **Swap the dependency** — replace `muda` + `tray-icon` with:
+   ```toml
+   [dependencies]
+   muri = { version = "0.9", features = ["muda-compat"] }
+   ```
+2. **Redirect imports** — your menu-building code compiles unchanged:
+   ```rust
+   use muri::compat::muda as muda;
+   use muri::compat::tray_icon as tray_icon;
+   ```
+   `Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`, and
+   `MenuId` are all mirrored; `MenuId` is structurally identical, so
+   `event.id.0` still matches your existing handlers.
+3. **Keep your event reader** — `MenuEvent::receiver()` works as-is; muri fires
+   the same process-global channel (closure first, then the channel).
+4. **The one real code change — the event loop.** muda/tray-icon are *passive*
+   (they push to a global channel while *your* loop runs); muri's `Tray` *owns* a
+   loop (`Tray::run(self)`, main thread on macOS). Either let muri own it
+   (`tray.run()` blocks; read `MenuEvent::receiver()` off-thread) or drive it from
+   your own loop. For runtime menu updates, grab a `TrayHandle` **before** `run()`
+   and call `set_menu` / `set_icon` / `set_tooltip` from any thread.
+5. **Routing** — `Menu::init_for_nsapp/hwnd/gtk_window` passes through to the
+   **native** menu bar; `TrayIconBuilder…with_menu` and
+   `show_context_menu_for_*` render as muri's **custom** surface with
+   `Theme::native()`.
+6. **Then restyle progressively** — Step 1: swap the theme. Step 2: make a row a
+   `Flex::Grow` label + `Align::Right` colored value (flush-right, no chevron
+   column) with a `StyleRun` span. Step 3: add section headers, logos, and
+   submenus. Ids never change, so your handlers keep matching.
+
+### Honest caveats
+
+In *custom* surfaces (tray/context menus), `PredefinedMenuItem` OS actions are
+best-effort and inemulable ones render as **visible disabled rows** (never
+silently dropped); accelerators are displayed and handled **only while the menu
+is open** (no system-wide hotkey — use `global-hotkey` for that); **Linux** has no
+styled *tray-anchored* popup (native-menu fallback + pointer-anchored
+`ContextMenu`); and the facade maps entirely onto muri — it does **not** pull in
+the real `muda` / `tray-icon` crates. See the migration guide in
+[`docs/design/spec/60-migration-guide.md`](docs/design/spec/60-migration-guide.md)
+for the full divergence register.
+
 ## Platform support (honest matrix)
 
-Legend: ✅ working · 🚧 in progress · ❌ not offered (by design).
+Legend: ✅ working (automated-tested / live) · 🔬 code-complete, on-device
+verification pending (this is what the 0.9.0 testing release is for) ·
+🚧 planned before 1.0 · ❌ not offered (by design).
 
-| OS      | Tray icon | Styled anchored popup | Anchoring mechanism | Screen-reader a11y |
-|---------|-----------|-----------------------|---------------------|--------------------|
-| macOS   | ✅ | ✅ `Tray::run` (real popup, flyouts, dark mode, key-nav) | `NSStatusItem` button rect | ✅ AccessKit adapter wired behind `a11y` (VoiceOver pass pending) |
-| Windows | 🚧 installs icon (`Shell_NotifyIcon`) | 🚧 anchor rect + placement done; popup event loop next | `Shell_NotifyIconGetRect` (compile-verified) | 🚧 UIA (planned via AccessKit) |
-| Linux   | 🚧 fallback path | ❌ architecturally impossible (see below) | — | 🚧 AT-SPI (fallback, planned) |
+| OS      | Tray icon | Styled anchored popup | Context menu (`open_at`) | Screen reader |
+|---------|-----------|-----------------------|--------------------------|---------------|
+| macOS   | 🔬 `NSStatusItem` | 🔬 non-activating `NSPanel` + vibrancy, N-level flyouts, mouse + keyboard nav | 🔬 `open_at` + `Popup` (shared `PopupSession`) | 🔬 VoiceOver (per-window AccessKit adapters wired) |
+| Windows | 🔬 `Shell_NotifyIcon` | 🔬 `WS_EX_NOACTIVATE` layered popup, DWM acrylic, `WH_MOUSE_LL` dismiss | 🔬 `open_at` + `Popup` (reuses the layered popup) | 🔬 NVDA + Narrator (UIA via `accesskit_windows`) |
+| Linux   | 🔬 SNI/AppIndicator native menu | ❌ tray-anchored (by design — see below); use pointer `ContextMenu` | 🔬 X11 override-redirect `open_at` (Wayland: `Unsupported::ClientPositioning`) | 🔬 Orca (AT-SPI via the native menu) |
 
-The pure cross-platform core — the menu model, `Flex`/`Align` layout, flyout
-placement, keyboard-nav state machine, theme resolution, and the a11y tree — is
-platform-independent and unit-tested on every OS. What differs per OS is only the
-tray anchoring and the live popup event loop.
+**Will 0.9.0 be all-green? No — by design.** The pure cross-platform core (menu
+model, `Flex`/`Align` layout, flyout/anchor math, keyboard-nav state machine,
+theme resolution, a11y tree) is unit-tested green on every OS, and **every backend
+compiles + is clippy-clean on its target in CI**. The 🔬 cells are muri code that
+*builds* but hasn't been exercised on real hardware yet — verifying them, and the
+four screen readers, is exactly what the 0.9.0 testing release is for; each flips
+to ✅ as it's confirmed on the road to 1.0 (the all-four-screen-readers pass is a
+hard 1.0 gate). The Linux tray-anchored styled popup stays ❌ permanently.
 
 ### The Linux caveat (read this)
 
@@ -169,7 +235,34 @@ and exposes a full `Theme` (colors, fonts, spacing, corner radius, row height,
 column gap) for consumer overrides via `ThemeSource::Custom(Theme)`. Colors are
 either literal `Color::Rgba(..)` or **semantic** (`Color::Label`,
 `SecondaryLabel`, `Accent`, `SystemRed`/`Orange`/…) which resolve against the
-active theme (and to the matching `NSColor` on macOS).
+active theme (and to the matching `NSColor` on macOS). `Theme::native()` uses a
+translucent background so the OS vibrancy material (`NSVisualEffectView` on macOS,
+DWM acrylic on Windows) shows through.
+
+## Performance
+
+muri is built for **instant** popup open — a menu that appears the frame you click
+it. That drives two choices:
+
+- **CPU raster, not GPU.** The popup is drawn on the CPU (`swash` glyphs + muri's
+  own AA blitter) and blitted to the window. There is **no GPU warm-up** (adapter
+  init / shader compilation, ~hundreds of ms cold), which a transient popup can't
+  hide. Menus are tiny, so the CPU draw is sub-millisecond, and vibrancy blur is
+  the OS compositor's GPU work behind our transparent surface — we get it for free.
+- **Event-driven, cached.** The popup repaints only on state change (no idle
+  redraw loop) and reuses a per-frame glyph cache (zero re-rasterization on
+  repaint).
+
+**Recommended release profile for an embedding app** (muri is a library, so its
+own profile doesn't apply to your binary — mirror this):
+
+```toml
+[profile.release]
+opt-level = 3        # speed, not size — size-tuning hurts open latency
+lto = "fat"
+codegen-units = 1
+strip = true
+```
 
 ## Roadmap
 
@@ -185,9 +278,15 @@ active theme (and to the matching `NSColor` on macOS).
 
 ## Minimum supported Rust version
 
-muri's MSRV is **1.85**. This is checked in CI. The MSRV may be *lowered* as the
-crate's dependency footprint is trimmed on the way to 1.0; any change is a
-documented, deliberate decision rather than an accident of a transitive bump.
+muri's MSRV is **1.87**, verified in CI by a dedicated job that runs `cargo check`
+on 1.87. Lint, format, and tests run on the **latest stable** toolchain (so
+Clippy always uses current lints) — only the MSRV *build* is pinned.
+
+The floor is set by the **Linux** SNI tray's `zbus` D-Bus stack, which requires
+1.87; the macOS/Windows/core trees build on 1.85, but the crate-wide contract is
+the higher of the two, since a current, maintained D-Bus crate is the right
+dependency for the Linux tray. Any MSRV change is a documented, deliberate
+decision, not an accident of a transitive bump.
 
 ## Contributing
 
