@@ -1,22 +1,27 @@
-//! Pure keyboard-navigation state machine for the menu + one flyout level.
+//! Pure keyboard-navigation state machine for the menu and its N-level flyout stack.
 //!
 //! muri owns keyboard navigation directly (independent of any accessibility
 //! backend, per the design): arrow keys move the highlight, Right/Left open and
 //! close the flyout, Enter/Space activate, Esc pops one level, and a typed
 //! character jumps to the next matching row (type-ahead). Keeping the logic here
 //! — free of any window, event loop, or platform call — makes it exhaustively
-//! unit-testable; the live backend ([`crate::tray`]) only translates its platform
+//! unit-testable; the live backend ([`crate::platform`]) only translates its platform
 //! key events into [`NavKey`]s and applies the returned [`NavAction`].
 //!
 //! ## Focus model
 //!
-//! Navigation state is a [`MenuFocus`]: the selected **top-level** item index and,
-//! when a submenu is open, a [`FlyoutFocus`] naming the open parent and the
-//! selected **child** item index. This mirrors the live macOS backend's single
-//! open-flyout state exactly (the same one the mouse hover-stack drives), so
-//! keyboard and mouse selection stay consistent. Descending into a *nested*
-//! submenu from within a flyout is intentionally a no-op here: the current macOS
-//! backend renders one flyout level, matching mouse behavior.
+//! Navigation state is a [`MenuFocus`]: the selected **top-level** item index and a
+//! **stack** of open flyout levels ([`FlyoutFocus`]), one frame per open submenu
+//! (decision #8, N-level nested submenus — spec 40 §5). Each frame names the
+//! `parent` row it opened from (an index into the menu one level up) and the
+//! selected `child` within that level. An empty stack means no flyout is open.
+//!
+//! This mirrors the live macOS backend's flyout **window** stack exactly (the same
+//! one the mouse hover-stack drives — [`crate::flyout::next_flyout`]), so keyboard
+//! and mouse selection stay consistent. `Right`/`Activate` on a submenu row —
+//! whether top-level or already inside a flyout — **pushes** a deeper level;
+//! `Left`/`Escape` **pops** one level, closing the whole stack once popped past the
+//! top.
 //!
 //! Selection wraps, and skips non-focusable items (separators, section headers,
 //! disabled rows, and inert info rows — everything [`Item::is_interactive`] marks
@@ -50,24 +55,28 @@ pub enum NavKey {
     Char(char),
 }
 
-/// The open-flyout portion of [`MenuFocus`]: which top-level submenu is open and
-/// which of its child items is selected.
+/// One open flyout level on the [`MenuFocus`] stack: the submenu `parent` row it
+/// opened from (an index into the menu **one level up** — [`Menu::items`] at the
+/// top level, or the enclosing submenu's items when nested) and the selected
+/// `child` within this level.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FlyoutFocus {
-    /// Top-level item index (into [`Menu::items`]) of the open submenu parent.
+    /// Item index (into the parent level's [`Menu::items`]) of the open submenu.
     pub parent: usize,
-    /// Selected child item index within the submenu, if any.
+    /// Selected child item index within this submenu level, if any.
     pub child: Option<usize>,
 }
 
-/// The current keyboard-navigation selection over the menu and its (optional)
-/// open flyout.
+/// The current keyboard-navigation selection over the menu and its open flyout
+/// **stack** (decision #8): the selected top-level item plus zero or more open
+/// flyout levels, deepest last.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MenuFocus {
     /// Selected top-level item index (into [`Menu::items`]), if any.
     pub top: Option<usize>,
-    /// The open flyout and its selected child, if a submenu is open.
-    pub flyout: Option<FlyoutFocus>,
+    /// The stack of open flyout levels, one frame per open submenu (empty when no
+    /// flyout is open); the last frame is the deepest, currently-navigated level.
+    pub flyout: Vec<FlyoutFocus>,
 }
 
 /// What the backend should do after a key press. The pure [`handle_key`] mutates
@@ -79,9 +88,10 @@ pub enum NavAction {
     None,
     /// Selection moved within the current level; repaint the affected window.
     Redraw,
-    /// Open (and focus into) the flyout for this top-level parent index.
+    /// Push a flyout level: open (and focus into) the submenu at this row index of
+    /// the currently deepest open level (the top level when the stack is empty).
     OpenFlyout(usize),
-    /// Close the open flyout, returning focus to its parent row.
+    /// Pop one flyout level, returning focus to the submenu row it opened from.
     CloseFlyout,
     /// Activate the row with this id: the backend dispatches it and closes the
     /// whole stack.
@@ -93,10 +103,29 @@ pub enum NavAction {
 /// Advance the navigation state for one key press, returning the action the
 /// backend should perform. Pure: no I/O, no platform calls.
 pub fn handle_key(menu: &Menu, focus: &mut MenuFocus, key: NavKey) -> NavAction {
-    match focus.flyout {
-        Some(fly) => handle_in_flyout(menu, focus, fly, key),
-        None => handle_in_top(menu, focus, key),
+    if focus.flyout.is_empty() {
+        handle_in_top(menu, focus, key)
+    } else {
+        handle_in_flyout(menu, focus, key)
     }
+}
+
+/// Resolve the [`Menu`] whose items the deepest open flyout level selects among,
+/// by descending `submenu_child` through every frame's `parent`. Returns `None`
+/// (with the length of the still-valid prefix) if some parent up the stack is no
+/// longer a submenu — e.g. the menu was swapped underneath an open flyout.
+fn deepest_level<'a>(
+    menu: &'a Menu,
+    stack: &[FlyoutFocus],
+) -> std::result::Result<&'a Menu, usize> {
+    let mut level = menu;
+    for (depth, frame) in stack.iter().enumerate() {
+        match submenu_child(level, frame.parent) {
+            Some(child) => level = child,
+            None => return Err(depth),
+        }
+    }
+    Ok(level)
 }
 
 fn handle_in_top(menu: &Menu, focus: &mut MenuFocus, key: NavKey) -> NavAction {
@@ -141,56 +170,67 @@ fn handle_in_top(menu: &Menu, focus: &mut MenuFocus, key: NavKey) -> NavAction {
     }
 }
 
-fn handle_in_flyout(
-    menu: &Menu,
-    focus: &mut MenuFocus,
-    fly: FlyoutFocus,
-    key: NavKey,
-) -> NavAction {
-    let Some(child) = submenu_child(menu, fly.parent) else {
-        // The parent is no longer a submenu (menu swapped underneath us): drop
-        // the stale flyout and return focus to the top level.
-        focus.flyout = None;
-        focus.top = Some(fly.parent);
-        return NavAction::CloseFlyout;
+fn handle_in_flyout(menu: &Menu, focus: &mut MenuFocus, key: NavKey) -> NavAction {
+    // The deepest open level's menu (the one whose items the top stack frame's
+    // `child` selects among).
+    let level = match deepest_level(menu, &focus.flyout) {
+        Ok(level) => level,
+        Err(valid) => {
+            // A parent up the stack is no longer a submenu (menu swapped
+            // underneath us): drop the stale sub-stack down to the deepest live
+            // level. If that empties the stack, restore top-level focus to the
+            // top-level row the stack originally opened from.
+            let top_parent = focus.flyout.first().map(|f| f.parent);
+            focus.flyout.truncate(valid);
+            if focus.flyout.is_empty() {
+                focus.top = top_parent;
+            }
+            return NavAction::CloseFlyout;
+        }
     };
+    let fly = *focus.flyout.last().expect("stack is non-empty here");
     let mut sel = fly.child;
     match key {
         NavKey::Down => {
-            move_selection(child, &mut sel, Dir::Next);
-            commit_child(focus, fly.parent, sel);
+            move_selection(level, &mut sel, Dir::Next);
+            commit_deepest(focus, sel);
             NavAction::Redraw
         }
         NavKey::Up => {
-            move_selection(child, &mut sel, Dir::Prev);
-            commit_child(focus, fly.parent, sel);
+            move_selection(level, &mut sel, Dir::Prev);
+            commit_deepest(focus, sel);
             NavAction::Redraw
         }
         NavKey::Home => {
-            commit_child(focus, fly.parent, first_focusable(child));
+            commit_deepest(focus, first_focusable(level));
             NavAction::Redraw
         }
         NavKey::End => {
-            commit_child(focus, fly.parent, last_focusable(child));
+            commit_deepest(focus, last_focusable(level));
             NavAction::Redraw
         }
-        NavKey::Char(c) => match type_ahead(child, sel, c) {
+        NavKey::Char(c) => match type_ahead(level, sel, c) {
             Some(i) => {
-                commit_child(focus, fly.parent, Some(i));
+                commit_deepest(focus, Some(i));
                 NavAction::Redraw
             }
             None => NavAction::None,
         },
         NavKey::Left | NavKey::Escape => {
-            focus.flyout = None;
-            focus.top = Some(fly.parent);
+            let popped = focus.flyout.pop();
+            if focus.flyout.is_empty() {
+                focus.top = popped.map(|f| f.parent);
+            }
             NavAction::CloseFlyout
         }
-        // Nested descent isn't rendered by the current single-level backend.
-        NavKey::Right => NavAction::None,
+        // Right / Activate on a submenu child descends into a nested flyout.
+        NavKey::Right => match sel {
+            Some(ci) if is_submenu_at(level, ci) => descend(level, focus, ci),
+            _ => NavAction::None,
+        },
         NavKey::Activate => match sel {
-            Some(ci) if is_submenu_at(child, ci) => NavAction::None,
-            Some(ci) => match interactive_id_at(child, ci) {
+            Some(ci) if is_submenu_at(level, ci) => descend(level, focus, ci),
+            Some(ci) => match interactive_id_at(level, ci) {
                 Some(id) => NavAction::Activate(id),
                 None => NavAction::None,
             },
@@ -199,16 +239,31 @@ fn handle_in_flyout(
     }
 }
 
-/// Set `focus` to a submenu of `parent` with its first focusable child selected.
+/// Push a flyout level for `parent` (an index into the top-level `menu`), its
+/// first focusable child selected. Used from the top level.
 fn open_flyout(menu: &Menu, focus: &mut MenuFocus, parent: usize) -> NavAction {
     let child = submenu_child(menu, parent).and_then(first_focusable);
     focus.top = Some(parent);
-    focus.flyout = Some(FlyoutFocus { parent, child });
+    focus.flyout = vec![FlyoutFocus { parent, child }];
     NavAction::OpenFlyout(parent)
 }
 
-fn commit_child(focus: &mut MenuFocus, parent: usize, child: Option<usize>) {
-    focus.flyout = Some(FlyoutFocus { parent, child });
+/// Push a deeper flyout level for submenu row `child_index` of `level` (the
+/// currently deepest open level), its first focusable grandchild selected.
+fn descend(level: &Menu, focus: &mut MenuFocus, child_index: usize) -> NavAction {
+    let grand = submenu_child(level, child_index).and_then(first_focusable);
+    focus.flyout.push(FlyoutFocus {
+        parent: child_index,
+        child: grand,
+    });
+    NavAction::OpenFlyout(child_index)
+}
+
+/// Set the deepest open level's selected child.
+fn commit_deepest(focus: &mut MenuFocus, child: Option<usize>) {
+    if let Some(frame) = focus.flyout.last_mut() {
+        frame.child = child;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -354,7 +409,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(1),
-            flyout: None,
+            flyout: Vec::new(),
         };
         press(&m, &mut f, NavKey::Down);
         assert_eq!(f.top, Some(2));
@@ -371,7 +426,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(1),
-            flyout: None,
+            flyout: Vec::new(),
         };
         press(&m, &mut f, NavKey::Up);
         assert_eq!(f.top, Some(5));
@@ -382,7 +437,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: None,
+            flyout: Vec::new(),
         };
         press(&m, &mut f, NavKey::Home);
         assert_eq!(f.top, Some(1));
@@ -395,15 +450,15 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: None,
+            flyout: Vec::new(),
         };
         assert_eq!(press(&m, &mut f, NavKey::Right), NavAction::OpenFlyout(4));
         assert_eq!(
             f.flyout,
-            Some(FlyoutFocus {
+            vec![FlyoutFocus {
                 parent: 4,
                 child: Some(0),
-            })
+            }]
         );
     }
 
@@ -412,10 +467,10 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(1),
-            flyout: None,
+            flyout: Vec::new(),
         };
         assert_eq!(press(&m, &mut f, NavKey::Right), NavAction::None);
-        assert!(f.flyout.is_none());
+        assert!(f.flyout.is_empty());
     }
 
     #[test]
@@ -423,7 +478,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(5),
-            flyout: None,
+            flyout: Vec::new(),
         };
         assert_eq!(
             press(&m, &mut f, NavKey::Activate),
@@ -436,7 +491,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: None,
+            flyout: Vec::new(),
         };
         assert_eq!(
             press(&m, &mut f, NavKey::Activate),
@@ -449,20 +504,20 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 4,
                 child: Some(0),
-            }),
+            }],
         };
         // Down moves within the child menu.
         assert_eq!(press(&m, &mut f, NavKey::Down), NavAction::Redraw);
-        assert_eq!(f.flyout.unwrap().child, Some(1));
+        assert_eq!(f.flyout.last().unwrap().child, Some(1));
         // Down wraps back to the first child.
         press(&m, &mut f, NavKey::Down);
-        assert_eq!(f.flyout.unwrap().child, Some(0));
+        assert_eq!(f.flyout.last().unwrap().child, Some(0));
         // Left closes the flyout, focus back on the parent.
         assert_eq!(press(&m, &mut f, NavKey::Left), NavAction::CloseFlyout);
-        assert!(f.flyout.is_none());
+        assert!(f.flyout.is_empty());
         assert_eq!(f.top, Some(4));
     }
 
@@ -471,10 +526,10 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 4,
                 child: Some(1),
-            }),
+            }],
         };
         assert_eq!(
             press(&m, &mut f, NavKey::Activate),
@@ -487,13 +542,14 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(4),
-            flyout: Some(FlyoutFocus {
+            flyout: vec![FlyoutFocus {
                 parent: 4,
                 child: Some(0),
-            }),
+            }],
         };
         assert_eq!(press(&m, &mut f, NavKey::Escape), NavAction::CloseFlyout);
-        assert!(f.flyout.is_none());
+        assert!(f.flyout.is_empty());
+        assert_eq!(f.top, Some(4));
         assert_eq!(press(&m, &mut f, NavKey::Escape), NavAction::CloseAll);
     }
 
@@ -502,7 +558,7 @@ mod tests {
         let m = menu();
         let mut f = MenuFocus {
             top: Some(1),
-            flyout: None,
+            flyout: Vec::new(),
         };
         // From "Apple" (1), 'q' jumps to "Quit" (5).
         assert_eq!(press(&m, &mut f, NavKey::Char('q')), NavAction::Redraw);
@@ -521,5 +577,165 @@ mod tests {
         let mut f = MenuFocus::default();
         press(&m, &mut f, NavKey::Down);
         assert_eq!(f.top, None);
+    }
+
+    // -- N-level nested submenus (decision #8) -------------------------------
+
+    // Top-level submenu "More" (index 0) whose child "Deep" (index 0) is itself
+    // a submenu of "Leaf1"/"Leaf2"; sibling leaf "End" at index 1.
+    fn nested_menu() -> Menu {
+        Menu::new()
+            .submenu(
+                Row::new("more").label("More"),
+                Menu::new()
+                    .submenu(
+                        Row::new("deep").label("Deep"),
+                        Menu::new()
+                            .row(Row::new("leaf1").label("Leaf1"))
+                            .row(Row::new("leaf2").label("Leaf2")),
+                    )
+                    .row(Row::new("end").label("End")),
+            )
+            .row(Row::new("quit").label("Quit"))
+    }
+
+    #[test]
+    fn right_within_flyout_descends_into_nested_submenu() {
+        let m = nested_menu();
+        let mut f = MenuFocus {
+            top: Some(0),
+            flyout: Vec::new(),
+        };
+        // Open the first-level flyout (child 0 = "Deep", a submenu).
+        assert_eq!(press(&m, &mut f, NavKey::Right), NavAction::OpenFlyout(0));
+        assert_eq!(
+            f.flyout,
+            vec![FlyoutFocus {
+                parent: 0,
+                child: Some(0)
+            }]
+        );
+        // Right on "Deep" descends into the nested flyout, focusing "Leaf1".
+        assert_eq!(press(&m, &mut f, NavKey::Right), NavAction::OpenFlyout(0));
+        assert_eq!(
+            f.flyout,
+            vec![
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0)
+                },
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0)
+                },
+            ]
+        );
+        // Down moves within the deepest level only.
+        assert_eq!(press(&m, &mut f, NavKey::Down), NavAction::Redraw);
+        assert_eq!(f.flyout.last().unwrap().child, Some(1)); // "Leaf2"
+        assert_eq!(f.flyout[0].child, Some(0)); // level-1 selection unchanged
+    }
+
+    #[test]
+    fn activate_deep_leaf_returns_its_id() {
+        let m = nested_menu();
+        let mut f = MenuFocus {
+            top: Some(0),
+            flyout: vec![
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0),
+                },
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(1),
+                },
+            ],
+        };
+        assert_eq!(
+            press(&m, &mut f, NavKey::Activate),
+            NavAction::Activate(MenuId::from("leaf2"))
+        );
+    }
+
+    #[test]
+    fn left_and_escape_pop_one_level_at_a_time() {
+        let m = nested_menu();
+        let mut f = MenuFocus {
+            top: Some(0),
+            flyout: vec![
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0),
+                },
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0),
+                },
+            ],
+        };
+        // Left pops only the deepest level.
+        assert_eq!(press(&m, &mut f, NavKey::Left), NavAction::CloseFlyout);
+        assert_eq!(
+            f.flyout,
+            vec![FlyoutFocus {
+                parent: 0,
+                child: Some(0)
+            }]
+        );
+        assert_eq!(f.top, Some(0));
+        // Escape pops the last level; focus returns to the top-level parent.
+        assert_eq!(press(&m, &mut f, NavKey::Escape), NavAction::CloseFlyout);
+        assert!(f.flyout.is_empty());
+        assert_eq!(f.top, Some(0));
+        // Escape at the top closes everything.
+        assert_eq!(press(&m, &mut f, NavKey::Escape), NavAction::CloseAll);
+    }
+
+    #[test]
+    fn activate_on_nested_submenu_child_descends() {
+        let m = nested_menu();
+        let mut f = MenuFocus {
+            top: Some(0),
+            flyout: vec![FlyoutFocus {
+                parent: 0,
+                child: Some(0),
+            }],
+        };
+        // "Deep" (child 0 of level 1) is a submenu: Activate descends.
+        assert_eq!(
+            press(&m, &mut f, NavKey::Activate),
+            NavAction::OpenFlyout(0)
+        );
+        assert_eq!(f.flyout.len(), 2);
+        assert_eq!(f.flyout.last().unwrap().child, Some(0));
+    }
+
+    #[test]
+    fn stale_nested_stack_collapses_to_live_parent() {
+        // A two-deep stack whose deepest parent no longer resolves (menu shape
+        // changed): the stale level is dropped and focus returns to the live one.
+        let m = menu(); // single-level submenu at index 4; no nesting
+        let mut f = MenuFocus {
+            top: Some(4),
+            flyout: vec![
+                FlyoutFocus {
+                    parent: 4,
+                    child: Some(0),
+                },
+                FlyoutFocus {
+                    parent: 0,
+                    child: Some(0),
+                }, // stale: child 0 isn't a submenu
+            ],
+        };
+        assert_eq!(press(&m, &mut f, NavKey::Down), NavAction::CloseFlyout);
+        assert_eq!(
+            f.flyout,
+            vec![FlyoutFocus {
+                parent: 4,
+                child: Some(0)
+            }]
+        );
     }
 }

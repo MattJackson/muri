@@ -14,7 +14,7 @@
 //!   a different, non-submenu row closes it; moving into the flyout — or across
 //!   the gap between the two panels — keeps it open.
 //!
-//! The live backends ([`crate::tray`]) drive their second popup window from these
+//! The live backends ([`crate::platform`]) drive their second popup window from these
 //! two functions; the snapshot test composits a parent + child using
 //! [`place_flyout`] directly.
 
@@ -88,35 +88,66 @@ pub fn place_flyout(
     }
 }
 
-/// Where the pointer currently is, relative to an open menu with (at most) one
-/// flyout, for the hover-stack decision in [`next_flyout`].
+/// Where the pointer currently is, relative to an open menu with a **stack** of
+/// flyout panels (decision #8), for the hover-stack decision in [`next_flyout`].
+///
+/// `panel` is the depth of the panel the pointer is over: `0` is the top-level
+/// popup, `1` its first flyout, `2` the flyout of that flyout, and so on. Hovering
+/// a row in a shallower panel closes every flyout deeper than it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HoverTarget {
-    /// Over a top-level row that is a submenu parent (with its item index).
-    ParentRow(usize),
-    /// Over a top-level row that is *not* a submenu parent.
-    OtherRow,
-    /// Over the currently open flyout panel (or the gap the pointer crosses to
-    /// reach it).
+    /// Over a submenu parent row (its item index) in the panel at depth `panel`.
+    ParentRow {
+        /// Depth of the panel the row lives in (`0` = top-level popup).
+        panel: usize,
+        /// Item index of the hovered submenu row within that panel's menu.
+        index: usize,
+    },
+    /// Over a row that is *not* a submenu parent in the panel at depth `panel`.
+    OtherRow {
+        /// Depth of the panel the row lives in (`0` = top-level popup).
+        panel: usize,
+    },
+    /// Over an open flyout panel body away from any row, or the gap the pointer
+    /// crosses between adjacent panels — keeps the whole stack open.
     Flyout,
-    /// Not over the menu or its flyout at all.
+    /// Not over the menu or any of its flyouts at all.
     Outside,
 }
 
-/// Decide which parent row's flyout should be open after the pointer moves to
-/// `target`, given the currently open parent index (`current`).
+/// Decide the open-flyout **stack** after the pointer moves to `target`, given the
+/// currently open stack (`current`): `current[k]` is the submenu-row index, within
+/// panel `k`'s menu, whose flyout is open as panel `k + 1`. The returned stack has
+/// the same shape.
 ///
-/// Rules (matching native menu behavior):
-/// - hovering a submenu parent opens its flyout, switching away from any other;
-/// - hovering a non-submenu row closes the open flyout;
-/// - hovering the flyout itself (or crossing the gap to it) keeps it open;
-/// - drifting outside the menu leaves the current flyout as-is (dismissal of the
-///   whole stack is a click-outside / Esc concern, handled by the caller).
-pub fn next_flyout(current: Option<usize>, target: HoverTarget) -> Option<usize> {
+/// Rules (matching native menu behavior, generalized across the stack):
+/// - hovering a submenu parent in panel `p` opens/switches its flyout and closes
+///   everything deeper (`current[..p]` then the newly hovered index) — but
+///   re-hovering the *already-open* parent keeps its deeper levels intact so
+///   grandchildren don't collapse;
+/// - hovering a non-submenu row in panel `p` closes panel `p`'s flyout and deeper;
+/// - hovering a flyout body or crossing an inter-panel gap keeps the stack;
+/// - drifting outside leaves the stack as-is (dismissal is a click-outside / Esc
+///   concern handled by the caller).
+pub fn next_flyout(current: &[usize], target: HoverTarget) -> Vec<usize> {
     match target {
-        HoverTarget::ParentRow(i) => Some(i),
-        HoverTarget::OtherRow => None,
-        HoverTarget::Flyout | HoverTarget::Outside => current,
+        HoverTarget::ParentRow { panel, index } => {
+            if current.get(panel) == Some(&index) {
+                // Already open here: keep the whole stack (don't collapse deeper
+                // levels the pointer just travelled back up through).
+                current.to_vec()
+            } else {
+                let keep = panel.min(current.len());
+                let mut next = current[..keep].to_vec();
+                next.push(index);
+                next
+            }
+        }
+        HoverTarget::OtherRow { panel } => {
+            let keep = panel.min(current.len());
+            current[..keep].to_vec()
+        }
+        HoverTarget::Flyout | HoverTarget::Outside => current.to_vec(),
     }
 }
 
@@ -189,25 +220,127 @@ mod tests {
 
     #[test]
     fn hover_parent_opens_and_switches() {
-        assert_eq!(next_flyout(None, HoverTarget::ParentRow(2)), Some(2));
-        // Switch directly from one parent's flyout to another's.
-        assert_eq!(next_flyout(Some(2), HoverTarget::ParentRow(5)), Some(5));
+        assert_eq!(
+            next_flyout(&[], HoverTarget::ParentRow { panel: 0, index: 2 }),
+            vec![2]
+        );
+        // Switch directly from one top-level parent's flyout to another's.
+        assert_eq!(
+            next_flyout(&[2], HoverTarget::ParentRow { panel: 0, index: 5 }),
+            vec![5]
+        );
     }
 
     #[test]
     fn hover_other_row_closes_the_flyout() {
-        assert_eq!(next_flyout(Some(2), HoverTarget::OtherRow), None);
-        assert_eq!(next_flyout(None, HoverTarget::OtherRow), None);
+        assert_eq!(
+            next_flyout(&[2], HoverTarget::OtherRow { panel: 0 }),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            next_flyout(&[], HoverTarget::OtherRow { panel: 0 }),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
     fn moving_into_flyout_keeps_it_open() {
-        assert_eq!(next_flyout(Some(2), HoverTarget::Flyout), Some(2));
+        assert_eq!(next_flyout(&[2], HoverTarget::Flyout), vec![2]);
     }
 
     #[test]
     fn drifting_outside_keeps_current() {
-        assert_eq!(next_flyout(Some(2), HoverTarget::Outside), Some(2));
-        assert_eq!(next_flyout(None, HoverTarget::Outside), None);
+        assert_eq!(next_flyout(&[2], HoverTarget::Outside), vec![2]);
+        assert_eq!(next_flyout(&[], HoverTarget::Outside), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn hover_submenu_row_in_flyout_opens_deeper_level() {
+        // Panel 1 (the first flyout) is open via top-level parent 2; hovering a
+        // submenu row (index 4) inside it opens a second flyout level.
+        assert_eq!(
+            next_flyout(&[2], HoverTarget::ParentRow { panel: 1, index: 4 }),
+            vec![2, 4]
+        );
+    }
+
+    #[test]
+    fn rehovering_open_parent_keeps_deeper_levels() {
+        // A 3-deep stack; moving back onto the already-open panel-1 parent (index
+        // 4) must not collapse the grandchild flyout.
+        assert_eq!(
+            next_flyout(&[2, 4, 1], HoverTarget::ParentRow { panel: 1, index: 4 }),
+            vec![2, 4, 1]
+        );
+    }
+
+    #[test]
+    fn hover_shallower_panel_closes_deeper_flyouts() {
+        // With flyouts open at panels 1 and 2, hovering a non-submenu row back in
+        // the top-level popup closes both.
+        assert_eq!(
+            next_flyout(&[2, 4], HoverTarget::OtherRow { panel: 0 }),
+            Vec::<usize>::new()
+        );
+        // Switching to a different submenu row in panel 1 truncates level 2.
+        assert_eq!(
+            next_flyout(&[2, 4], HoverTarget::ParentRow { panel: 1, index: 6 }),
+            vec![2, 6]
+        );
+    }
+
+    #[test]
+    fn place_flyout_chains_relative_to_the_previous_panel() {
+        // Level-2 placement uses the level-1 panel as its `parent` rect: the same
+        // right-flush, row-aligned rule applies at every depth.
+        let popup = rect(100.0, 100.0, 200.0, 300.0);
+        let row1 = rect(0.0, 40.0, 200.0, 22.0);
+        let l1 = place_flyout(popup, row1, LogicalSize::new(180.0, 150.0), screen());
+        assert_eq!(l1.side, FlyoutSide::Right);
+        let l1_rect = LogicalRect::new(l1.origin, LogicalSize::new(180.0, 150.0));
+        let row2 = rect(0.0, 20.0, 180.0, 22.0);
+        let l2 = place_flyout(l1_rect, row2, LogicalSize::new(160.0, 120.0), screen());
+        assert_eq!(l2.side, FlyoutSide::Right);
+        assert_eq!(l2.origin.x, l1_rect.max_x());
+        assert_eq!(l2.origin.y, l1.origin.y + 20.0);
+    }
+
+    #[test]
+    fn keyboard_and_mouse_drive_the_same_open_flyout_state() {
+        // Cross-module: prove keynav::handle_key and flyout::next_flyout — the
+        // two independent drivers of "which parent's flyout is open" — converge
+        // on the same parent index for the same submenu row.
+        use crate::keynav::{handle_key, MenuFocus, NavKey};
+        use crate::menu::{Menu, Row};
+
+        let menu = Menu::new()
+            .row(Row::new("a").label("Apple"))
+            .submenu(
+                Row::new("settings").label("Settings"),
+                Menu::new().row(Row::new("s1").label("One")),
+            )
+            .row(Row::new("quit").label("Quit"));
+        let submenu_index = 1;
+
+        // Keyboard: select the submenu row, then Right opens its flyout.
+        let mut focus = MenuFocus {
+            top: Some(submenu_index),
+            flyout: Vec::new(),
+        };
+        handle_key(&menu, &mut focus, NavKey::Right);
+        let keyboard_open: Vec<usize> = focus.flyout.iter().map(|fly| fly.parent).collect();
+
+        // Mouse: hover the same submenu row.
+        let mouse_open = next_flyout(
+            &[],
+            HoverTarget::ParentRow {
+                panel: 0,
+                index: submenu_index,
+            },
+        );
+
+        assert_eq!(keyboard_open, vec![submenu_index]);
+        assert_eq!(mouse_open, vec![submenu_index]);
+        assert_eq!(keyboard_open, mouse_open);
     }
 }
