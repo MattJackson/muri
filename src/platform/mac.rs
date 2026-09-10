@@ -819,8 +819,11 @@ impl PopupSession<'_> {
         let scale = geom.scale.max(1.0);
 
         // Measure offscreen to size the panel before it exists (no resize flash).
-        let mut probe = RasterDrawer::new_native(scale);
-        let laid = render_menu(&mut probe, &self.menu, &theme, &self.options, None);
+        // This same drawer becomes the panel's drawer (below) so its warm
+        // shaping/glyph caches carry into the first paint — the menu is not shaped
+        // a second time with a cold drawer (#23).
+        let mut drawer = RasterDrawer::new_native(scale);
+        let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
             geom.anchor_rect_local(),
@@ -857,7 +860,7 @@ impl PopupSession<'_> {
             panel: native.panel,
             view: native.view,
             delegate: native.delegate,
-            drawer: RasterDrawer::new_native(scale),
+            drawer,
             laid: Some(laid),
             cursor: LogicalPoint::default(),
             hovered: None,
@@ -925,8 +928,9 @@ impl PopupSession<'_> {
         let Some(geom) = self.anchor.geometry() else {
             return;
         };
-        let mut probe = RasterDrawer::new_native(scale);
-        let child_laid = render_menu(&mut probe, &child, &theme, &self.options, None);
+        // Reuse this measuring drawer as the flyout's drawer (#23).
+        let mut drawer = RasterDrawer::new_native(scale);
+        let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
         let placement = place_flyout(
@@ -961,7 +965,7 @@ impl PopupSession<'_> {
                 panel: native.panel,
                 view: native.view,
                 delegate: native.delegate,
-                drawer: RasterDrawer::new_native(scale),
+                drawer,
                 laid: None,
                 cursor: LogicalPoint::default(),
                 hovered: None,
@@ -973,11 +977,11 @@ impl PopupSession<'_> {
                 snapshot,
             },
         });
-        // DEVICE-VERIFY(0.9.0): pre-insert the new flyout's focus id so opening a
-        // deeper panel never momentarily empties the focus set and self-dismisses
-        // (spec 20 §2, 40 §5). A real become-key would insert it too.
-        self.focused.insert(kind);
-
+        // The focus set tracks only REAL key windows — i.e. the popup (which
+        // becomes key, #17). Flyouts are `orderFrontRegardless` and never take
+        // key, so they must NOT be added here: a synthetic entry would never be
+        // cleared by a resign and would keep `focused` non-empty after the popup
+        // resigns, defeating focus-loss dismissal while a submenu is open (#37).
         self.redraw(kind);
         // Order in front but do NOT take key from the popup: keyboard nav keeps
         // running through the key panel and the stack does not self-dismiss.
@@ -994,7 +998,7 @@ impl PopupSession<'_> {
             if let Some(f) = self.flyouts.pop() {
                 f.panel.order_out();
             }
-            self.focused.remove(&WindowKind::Flyout(depth));
+            let _ = depth;
         }
     }
 

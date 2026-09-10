@@ -260,8 +260,11 @@ impl RasterDrawer {
     /// system font (its face registered into the database). `None` — or a face
     /// that fails to register — falls back to installed-font discovery.
     pub fn with_system_font(scale: f32, system: Option<SystemFont>) -> Self {
-        let mut db = Database::new();
-        db.load_system_fonts();
+        // `load_system_fonts` walks every system font directory and parses each
+        // face — tens-to-hundreds of ms, and it ran on *every* popup open. Cache
+        // the scanned database once per thread and clone it (fontdb `Arc`s the
+        // font data, so a clone is a cheap metadata copy, no disk I/O) (#22).
+        let mut db = cached_system_fonts_db();
         let ui_family = system
             .and_then(|sf| register_system_font(&mut db, sf.source))
             .or_else(|| resolve_ui_family(&db));
@@ -733,6 +736,23 @@ fn query_face(db: &Database, family: DbFamily, ot_weight: u16) -> Option<FaceId>
 /// returns the concrete family to pin. Unlike [`resolve_ui_family`] it does not
 /// require regular/bold to be two distinct faces — the OS menu font is
 /// authoritative even when it is a single variable face (macOS SF Pro).
+/// A clone of the process's system-font database, scanned **once** per thread and
+/// cached (the scan — `load_system_fonts` — is the dominant popup-open cost; a
+/// clone is a cheap metadata copy since fontdb `Arc`s the actual font data) (#22).
+fn cached_system_fonts_db() -> Database {
+    thread_local! {
+        static SYSTEM_FONTS_DB: std::cell::OnceCell<Database> = const { std::cell::OnceCell::new() };
+    }
+    SYSTEM_FONTS_DB.with(|cell| {
+        cell.get_or_init(|| {
+            let mut db = Database::new();
+            db.load_system_fonts();
+            db
+        })
+        .clone()
+    })
+}
+
 fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<String> {
     let loaded: Option<FaceId> = match source {
         SystemFontSource::Family(name) => {

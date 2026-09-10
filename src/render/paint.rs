@@ -136,6 +136,29 @@ fn row_leading_width(row: &Row, gap: f32) -> f32 {
     }
 }
 
+/// Whether the menu reserves a shared leading gutter: true when any row is
+/// **checkable** (carries a checkmark), so checked *and* unchecked rows align
+/// their text past the gutter — the native `NSMenu` look. A menu with only a
+/// section-header icon and no checkmarks reserves nothing and stays per-row
+/// inline (#16). This reconciles #16's shared-left-x with native alignment.
+fn menu_reserves_gutter(menu: &Menu) -> bool {
+    menu.items.iter().any(|it| {
+        item_row(it)
+            .is_some_and(|r| r.checked == Some(true) || matches!(r.leading, Some(Icon::Checkmark)))
+    })
+}
+
+/// The leading advance a row consumes: the shared gutter width when the menu
+/// reserves one (every row, so text aligns), else the row's own inline icon
+/// advance (0 for icon-less rows).
+fn row_lead(row: &Row, gap: f32, reserve_gutter: bool) -> f32 {
+    if reserve_gutter {
+        ICON_SIZE + gap
+    } else {
+        row_leading_width(row, gap)
+    }
+}
+
 fn row_font(row: &Row, seg: &Segment, base: &Font) -> Font {
     if let Some(f) = &seg.font {
         f.clone()
@@ -294,6 +317,9 @@ pub fn render_menu<D: SceneDrawer>(
     let pad = theme.padding;
     let gap = theme.column_gap;
     let base_font = theme.row_font.clone();
+    // Reserve a shared leading gutter when the menu has checkmarks, so checked
+    // and unchecked rows align their text (native look, #16 reconciliation).
+    let reserve_gutter = menu_reserves_gutter(menu);
 
     let trailing_w = if menu.items.iter().any(is_submenu) {
         TRAILING_COLUMN
@@ -321,9 +347,9 @@ pub fn render_menu<D: SceneDrawer>(
             } else {
                 theme.resolve(theme.label)
             };
-            // The row's own content width is its inline leading (icon/check, or
-            // 0) plus its segments — never a globally reserved gutter (#16).
-            let content = row_leading_width(row, gap)
+            // The row's content width: its leading advance (the shared gutter
+            // when reserved, else its own inline icon) plus its segments.
+            let content = row_lead(row, gap, reserve_gutter)
                 + row_intrinsic(
                     drawer,
                     &mut measure_cache,
@@ -338,7 +364,9 @@ pub fn render_menu<D: SceneDrawer>(
     }
 
     let min_w = opts.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
-    let max_w = opts.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
+    // `f32::clamp` panics if `min > max`; a consumer can set `min_width >
+    // max_width`, so normalize by letting the floor win (#36).
+    let max_w = opts.max_width.unwrap_or(DEFAULT_MAX_WIDTH).max(min_w);
     let desired = pad.left + max_content + trailing_w + pad.right;
     let width = desired.clamp(min_w, max_w);
 
@@ -393,6 +421,7 @@ pub fn render_menu<D: SceneDrawer>(
                     &theme.header_font,
                     content_left,
                     band_right,
+                    reserve_gutter,
                     ry,
                     rh,
                     false,
@@ -432,6 +461,7 @@ pub fn render_menu<D: SceneDrawer>(
                     &base_font,
                     content_left,
                     band_right,
+                    reserve_gutter,
                     ry,
                     rh,
                     submenu,
@@ -460,16 +490,17 @@ fn draw_row_content<D: SceneDrawer>(
     base_font: &Font,
     content_left: f32,
     band_right: f32,
+    reserve_gutter: bool,
     ry: f32,
     rh: f32,
     submenu: bool,
     highlighted: bool,
     base_color: Rgba,
 ) {
-    // Per-row inline leading: an icon/checkmark draws at the shared left x and
-    // offsets only this row's own segments (#16). Rows without one start their
-    // text at `content_left` — no globally reserved gutter.
-    let lead = row_leading_width(row, theme.column_gap);
+    // Leading advance: the shared gutter width when the menu reserves one (so
+    // checked + unchecked rows align, native look), else this row's own inline
+    // icon advance (#16). The icon/checkmark still draws at `content_left`.
+    let lead = row_lead(row, theme.column_gap, reserve_gutter);
     let band_x = content_left + lead;
     let band_w = (band_right - band_x).max(1.0);
     if lead > 0.0 {
@@ -937,6 +968,44 @@ mod tests {
             hdr_x > icon_x + 8.0,
             "the icon row's text follows its icon inline: icon={icon_x} hdr={hdr_x}"
         );
+    }
+
+    /// OEM alignment: when a menu has a checked row, it reserves a shared gutter
+    /// so the checked row's text aligns with the *unchecked* rows' text (native
+    /// `NSMenu` look), instead of the checkmark pushing only its own row right.
+    #[test]
+    fn checkable_menu_reserves_gutter_so_rows_align() {
+        let menu = Menu::new()
+            .row(Row::new("a").checked(true).segments(vec![
+                Segment::new("me@example.com").flex(Flex::Grow),
+                Segment::new("47%").align(Align::Right),
+            ]))
+            .row(Row::new("b").segments(vec![
+                Segment::new("you@example.com").flex(Flex::Grow),
+                Segment::new("20%").align(Align::Right),
+            ]));
+
+        let mut d = RecordingDrawer::default();
+        let _ = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        let x = |needle: &str| {
+            d.texts
+                .iter()
+                .find(|(t, ..)| t == needle)
+                .map(|(_, x, _)| *x)
+                .unwrap_or_else(|| panic!("no text {needle:?}"))
+        };
+        // Checked row's email aligns with the unchecked row's email (shared
+        // gutter), not indented by the checkmark.
+        assert!(
+            (x("me@example.com") - x("you@example.com")).abs() < 0.5,
+            "checked and unchecked rows must share a text left x: {} vs {}",
+            x("me@example.com"),
+            x("you@example.com")
+        );
+        // And that text starts past the gutter (a checkmark glyph was drawn at
+        // the left).
+        assert!(x("you@example.com") > 6.0);
     }
 
     /// Regression for #15: a menu mixing icon-bearing section headers with
