@@ -231,8 +231,7 @@ impl RasterDrawer {
     }
 
     /// Like [`RasterDrawer::new`], but pins [`FontFamily::System`] to the host's
-    /// **native menu font** from the per-OS
-    /// [`Platform::system_menu_font`](crate::platform::Platform::system_menu_font)
+    /// **native menu font** from the per-OS [`Platform::system_menu_font`]
     /// — SF Pro on macOS, Segoe UI on Windows, the GNOME UI family on Linux (#10).
     /// The live popup panels use this so the menu renders in the true OS UI face,
     /// which `fontdb`'s generic discovery can't reach on macOS. Falls back to
