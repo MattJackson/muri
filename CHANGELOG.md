@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-09
+
+Patch release in the 0.9.x testing cycle: a **text-title status item** so apps
+that show live menu-bar text (e.g. usagio's "45%") can migrate macOS off
+`tray-icon` — the remaining part of #8 (its parts 1 and 2 shipped in 0.9.2). The
+macOS menu-bar render is `DEVICE-VERIFY(0.9.3)`.
+
+### Added
+
+- **`Tray` text title** — `Tray::title()` (builder), `Tray::set_title()` /
+  `Tray::title_text()`, plus `TrayHandle::set_title()` (and a `TrayCommand::SetTitle`)
+  for live updates. On macOS it is drawn on the `NSStatusItem` button as menu-bar
+  text; on Windows/Linux the notification area has no free-text label, so it is
+  retained but not drawn.
+
+### Fixed
+
+- **macOS status item now renders icon + title coherently (#8)** — the button
+  rendering is unified (`set_status`): a valid PNG/SVG is the image, a non-empty
+  title is the button text (composing with the image), and the bullet placeholder
+  shows only when there is neither — so a **text-only** status item (a live "45%"
+  with no icon) is no longer overwritten by the placeholder `●`.
+- **`muda-compat`: `with_title` / `set_title` reach the drawn tray** — previously
+  the facade only stored the title string; it now flows to the live tray via the
+  handle.
+
 ## [0.9.2] - 2026-09-09
 
 Patch release in the 0.9.x testing cycle: the `muda-compat` tray facade now
