@@ -38,12 +38,14 @@ impl MuriSni {
     }
 }
 
-/// Decode a PNG into a `ksni::Icon` (ARGB32, network byte order — i.e. `[A,R,G,B]`
-/// per pixel, straight alpha). Returns `None` if the bytes are not a decodable
-/// raster PNG. SVG/symbol/checkmark icons have no PNG bytes and yield `None`
-/// here; the host falls back to a themed/blank icon (spec 22 §2, best-effort).
-fn png_to_argb32(bytes: &[u8]) -> Option<ksni::Icon> {
-    let (rgba, width, height) = crate::render::decode_png(bytes)?;
+/// Decode icon bytes into a `ksni::Icon` (ARGB32, network byte order — i.e.
+/// `[A,R,G,B]` per pixel, straight alpha). Tries the PNG codec first, then the
+/// SVG rasterizer, so both `Icon::Png` and `Icon::Svg` tray icons render.
+/// Returns `None` if the bytes decode as neither; symbol/checkmark icons have no
+/// bytes and yield `None` here, so the host falls back to a themed/blank icon
+/// (spec 22 §2, best-effort).
+fn icon_to_argb32(bytes: &[u8]) -> Option<ksni::Icon> {
+    let (rgba, width, height) = crate::render::decode_icon_bytes(bytes)?;
     let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
     // `decode_png` yields straight-alpha RGBA; SNI wants straight ARGB32.
     for px in rgba.chunks_exact(4) {
@@ -151,13 +153,11 @@ impl ksni::Tray for MuriSni {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         match &self.tray.icon {
-            Icon::Png(bytes) => png_to_argb32(bytes).into_iter().collect(),
-            // `Icon::Svg` is not rasterized anywhere in muri yet (no SVG
-            // rasterizer dependency — see `Icon`'s note), and Checkmark/Symbol
-            // have no raster bytes here either; all yield an empty pixmap and the
-            // host shows its default/blank icon. SVG rasterization + themed-name
-            // mapping are future work.
-            Icon::Svg(_) | Icon::Checkmark | Icon::Symbol(_) => Vec::new(),
+            // PNG and SVG both rasterize to an ARGB32 pixmap; Checkmark/Symbol
+            // have no raster bytes (the host shows its default/blank icon —
+            // themed-name mapping is future work).
+            Icon::Png(bytes) | Icon::Svg(bytes) => icon_to_argb32(bytes).into_iter().collect(),
+            Icon::Checkmark | Icon::Symbol(_) => Vec::new(),
         }
     }
 
