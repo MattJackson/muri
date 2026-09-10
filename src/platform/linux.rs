@@ -125,6 +125,22 @@ impl LinuxPlatform {
     }
 }
 
+impl Drop for LinuxPlatform {
+    /// Tear down a standalone [`Platform::install_tray`] SNI service on the
+    /// platform's final drop. `ksni`'s blocking `Handle` has no unregistering
+    /// `Drop` of its own (the same reason the re-install path in `install_tray`
+    /// shuts the prior handle down explicitly, #35), so without this the D-Bus
+    /// service + its thread + the tray icon would leak until process exit — this
+    /// mirrors `MacosAnchor`/`WindowsAnchor` tearing their OS registration down on
+    /// `Drop`. The managed `run_tray` path owns its own service and never
+    /// populates `self.service`, so this only fires for the standalone API.
+    fn drop(&mut self) {
+        if let Some(service) = self.service.take() {
+            service.shutdown().wait();
+        }
+    }
+}
+
 impl Platform for LinuxPlatform {
     fn install_tray(&mut self, icon: &Icon, tooltip: Option<&str>) -> Result<()> {
         // Register a bare SNI item (icon + tooltip, empty menu). The full menu

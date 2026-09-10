@@ -90,7 +90,7 @@ impl Rgba {
 
 /// A font family selector. `System`/`SystemMono` resolve to the platform UI
 /// font so menus match the OS; `Named` looks up an installed family.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub enum FontFamily {
     /// The platform UI font (San Francisco, Segoe UI, system default).
     #[default]

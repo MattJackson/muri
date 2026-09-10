@@ -306,6 +306,20 @@ impl RasterDrawer {
         Self::from_parts(scale, db, ui_family)
     }
 
+    /// The live drawer for a menu about to be painted, selected from its
+    /// [`MenuOptions`](crate::MenuOptions): a forced-OS theme
+    /// (`ThemeSource::MacOs`/`Windows`/`Gnome`) renders the **target** OS font via
+    /// [`with_forced_theme`](Self::with_forced_theme); `System`/`Preset`/`Custom`
+    /// use the host-native [`new_native`](Self::new_native). Shared by every
+    /// backend's popup/flyout construction so the forced-vs-native choice can't
+    /// drift between macOS, Windows, and X11 (#54).
+    pub fn for_menu_options(scale: f32, options: &crate::theme::MenuOptions) -> Self {
+        match options.theme.forced_family() {
+            Some(family) => Self::with_forced_theme(scale, family),
+            None => Self::new_native(scale),
+        }
+    }
+
     /// Create a raster drawer whose text is shaped **only** against a
     /// repo-vendored font (`tests/fonts/DejaVuSans{,-Bold}.ttf`), with system
     /// font discovery disabled entirely — no
@@ -465,6 +479,11 @@ struct FontStore {
     /// dominant cost of a laggy menu with symbol/emoji/logo glyphs. The result is
     /// stable for a given char+weight, so it is cached across frames.
     fallback_cache: RefCell<HashMap<(char, u16), Option<FaceId>>>,
+    /// Memoized primary-face resolution per `(family, ot_weight)`. `resolve_face`
+    /// otherwise runs a `fontdb::Database::query` scan on every measure_text /
+    /// draw_text call (once per segment per row, every repaint); the result is
+    /// stable for the drawer's lifetime, so it is cached like the others.
+    face_cache: RefCell<HashMap<(FontFamily, u16), Option<FaceId>>>,
     /// Memoized shaped runs per `(text, primary face, ot_weight, px-bits)`.
     /// `shape` is called several times per run per render (measure pass + draw
     /// pass), and a hover-highlight repaints unchanged text — so caching the
@@ -493,6 +512,7 @@ impl FontStore {
             shaper_data: RefCell::new(HashMap::new()),
             coverage: RefCell::new(HashMap::new()),
             fallback_cache: RefCell::new(HashMap::new()),
+            face_cache: RefCell::new(HashMap::new()),
             shaped: RefCell::new(HashMap::new()),
             #[cfg(test)]
             shape_misses: std::cell::Cell::new(0),
@@ -530,7 +550,19 @@ impl FontStore {
 
     /// Resolve a muri font + weight to a concrete face in the db.
     fn resolve_face(&self, family: &FontFamily, ot_weight: u16) -> Option<FaceId> {
-        query_face(&self.db, self.db_family(family), ot_weight)
+        // Memoize the fontdb query: a given (family, ot_weight) always resolves to
+        // the same FaceId for the drawer's lifetime (the db and pinned UI family
+        // never change after construction), so caching avoids re-scanning the
+        // system-font database on every measure_text/draw_text call — i.e. once per
+        // segment per row per repaint, undermining the "shaped once per open" work
+        // (#22/#23) one layer earlier than shaping.
+        let key = (family.clone(), ot_weight);
+        if let Some(&cached) = self.face_cache.borrow().get(&key) {
+            return cached;
+        }
+        let result = query_face(&self.db, self.db_family(family), ot_weight);
+        self.face_cache.borrow_mut().insert(key, result);
+        result
     }
 
     /// Whether `id` has a glyph for `ch` in its cmap.

@@ -311,12 +311,8 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
     // -- placement / open ----------------------------------------------------
 
     fn open_popup(&mut self, anchor: LogicalRect) -> Result<()> {
-        // Forced-OS themes render the TARGET OS font, not the host's (#54); the
-        // native drawer is kept for `System`/`Preset`/`Custom`.
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(SCALE, family),
-            None => RasterDrawer::new_native(SCALE),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(SCALE, &self.options);
         let laid = render_menu(&mut drawer, &self.menu, &self.theme, &self.options, None);
         let origin =
             crate::anchor::place_popup(anchor, laid.size, self.env.work_area, self.edge, POPUP_GAP);
@@ -607,12 +603,8 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             (pp.origin, pp.laid.size, rect)
         };
 
-        // Forced-OS themes render the TARGET OS font, not the host's (#54); the
-        // native drawer is kept for `System`/`Preset`/`Custom`.
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(SCALE, family),
-            None => RasterDrawer::new_native(SCALE),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(SCALE, &self.options);
         let child_laid = render_menu(&mut drawer, &child, &self.theme, &self.options, None);
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
         let placement = place_flyout(parent_rect, row_rect, child_laid.size, self.env.work_area);

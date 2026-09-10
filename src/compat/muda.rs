@@ -1360,6 +1360,18 @@ impl Menu {
         self.set_mode(SurfaceMode::Custom);
         crate::ContextMenu::new(self.to_muri_menu())
     }
+
+    /// The custom surface with a caller-supplied [`MenuOptions`] applied (#45).
+    /// Factored out of [`open_custom_with_options`](Self::open_custom_with_options)
+    /// so a test can observe that the options actually reach the surface (via
+    /// [`crate::ContextMenu::menu_options`]) rather than only after the popup
+    /// opens and consumes it.
+    pub(crate) fn custom_surface_with_options(
+        &self,
+        options: crate::MenuOptions,
+    ) -> crate::ContextMenu {
+        self.build_custom_surface().options(options)
+    }
 }
 
 /// muda's `ContextMenu` helper trait: `init_for_*` (native menu bar) and
@@ -1388,7 +1400,7 @@ pub trait ContextMenu {
     /// muri and is best-effort (divergence D3/D4).
     fn init_for_gtk_window(&self) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or the cursor) on macOS.
+    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on macOS.
     ///
     /// # Safety
     /// `nsview` must be a valid `NSView` pointer. (Signature parity with muda.)
@@ -1398,7 +1410,7 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or the cursor) on Windows.
+    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on Windows.
     ///
     /// # Safety
     /// `hwnd` must be a valid window handle. (Signature parity with muda.)
@@ -1408,7 +1420,7 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or the cursor) on Linux.
+    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on Linux.
     /// muri takes an **opaque** `*mut c_void` GTK window handle (muda takes an
     /// `&impl IsA<gtk::Widget>`) so the facade needs no GTK dependency yet keeps
     /// muda's call arity — a migrating GTK consumer's positional argument still
@@ -1457,7 +1469,7 @@ impl Menu {
         position: Option<Position>,
         options: crate::MenuOptions,
     ) -> Result<()> {
-        let surface = self.build_custom_surface().options(options);
+        let surface = self.custom_surface_with_options(options);
         let point = position
             .map(|p| crate::LogicalPoint::new(p.x as f32, p.y as f32))
             .unwrap_or_default();
@@ -2217,23 +2229,26 @@ mod tests {
     }
 
     /// #45: `open_custom_with_options` must thread the given `MenuOptions`
-    /// through to the opened surface rather than the default. There's no live
-    /// platform popup loop in a headless unit test, so this only asserts the
-    /// call compiles and executes the options-aware path through to
-    /// `ContextMenu::open_at` (which itself returns a platform `Error` here,
-    /// not a panic) — the option is *applied* to the surface before the call
-    /// fails, exercising the code path issue #45 asks for.
+    /// through to the opened surface. Observe the surface's `menu_options()`
+    /// directly (via the same `custom_surface_with_options` seam `build()` uses)
+    /// — this fails if the options are dropped, unlike asserting only
+    /// `mode() == Custom`, which `build_custom_surface` sets regardless of options.
     #[test]
-    fn open_custom_with_options_compiles_and_executes_the_options_path() {
+    fn open_custom_with_options_threads_the_options_into_the_surface() {
         let menu = Menu::new();
         menu.append(&MenuItem::with_id("open", "Open", true, None))
             .unwrap();
         let options = crate::MenuOptions::default().min_width(123.0);
-        let position = Some(Position { x: 10.0, y: 20.0 });
-        // Headless: no platform popup loop is installed, so this returns some
-        // `Result` (typically `Err(Error::Platform(_))`) rather than panicking;
-        // either outcome proves the options-aware call path executed.
-        let _ = menu.open_custom_with_options(position, options);
-        assert_eq!(menu.mode(), SurfaceMode::Custom, "the surface was routed custom even though the platform call itself may not be implemented headlessly");
+        let surface = menu.custom_surface_with_options(options.clone());
+        assert_eq!(
+            surface.menu_options().min_width,
+            Some(123.0),
+            "with_options width must reach the custom surface"
+        );
+        assert_eq!(menu.mode(), SurfaceMode::Custom);
+
+        // And the public entry point still executes the options-aware path (it
+        // returns a platform Error headlessly rather than panicking).
+        let _ = menu.open_custom_with_options(Some(Position { x: 10.0, y: 20.0 }), options);
     }
 }

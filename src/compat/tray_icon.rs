@@ -112,8 +112,19 @@ pub enum MouseButtonState {
     Down,
 }
 
-/// A tray icon event, mirroring `tray-icon`'s `TrayIconEvent`. Emitted on
-/// macOS/Windows and **not on Linux** (spec `02` §8).
+/// A tray icon event, mirroring `tray-icon`'s `TrayIconEvent`.
+///
+/// **Not yet emitted by the backend.** The type, the process-global
+/// [`receiver`](TrayIconEvent::receiver), and [`set_event_handler`] exist for
+/// source/API parity with `tray-icon`, but muri's tray backends do not yet
+/// surface icon-level pointer events (click/enter/leave/move) into this channel —
+/// so a handler installed here currently never fires. Row *activations* inside
+/// the popup are delivered through the muda [`MenuEvent`](crate::MenuEvent)
+/// channel instead. When wired, events will (per spec `02` §8) fire on
+/// macOS/Windows and **not on Linux** (the SNI host never reports icon clicks).
+/// Tracked as a follow-up; do not rely on this channel for click handling yet.
+///
+/// [`set_event_handler`]: TrayIconEvent::set_event_handler
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum TrayIconEvent {
@@ -226,7 +237,10 @@ impl TrayIconEvent {
 
     /// Project a tray-icon event onto the global channel + handler. Called by the
     /// platform backend on macOS/Windows (never on Linux).
-    #[allow(dead_code)] // wired by the backend; unused until the popup loop lands.
+    // Not yet called by any backend — the tray backends don't surface icon-level
+    // pointer events into this channel yet (see the type-level doc). Kept + tested
+    // so the channel plumbing is ready to wire; `allow(dead_code)` until then.
+    #[allow(dead_code)]
     pub(crate) fn emit(event: TrayIconEvent) {
         let _ = tray_channel().sender.send(event.clone());
         // Clone the `Arc` handler out under the lock, then release the lock
@@ -362,6 +376,15 @@ impl TrayIconBuilder {
     /// background UI thread (macOS: on the host's main-thread run loop), so the
     /// icon actually appears (issues #6, #7). The returned handle mutates it
     /// (`set_icon` / `set_menu` / `set_tooltip`) via the same cross-thread path.
+    ///
+    /// **Infallible-degrade:** matching `tray-icon`'s practically-infallible
+    /// `build()`, this returns `Ok` even when the underlying `Tray::spawn` fails —
+    /// a headless/off-main-thread environment, but also a *real* failure such as an
+    /// unavailable Linux session D-Bus. In that case the tray is not live: the
+    /// returned `TrayIcon` records state but its post-construction setters are
+    /// no-ops. A consumer that must detect install failure should drive the native
+    /// [`crate::Tray::spawn`] directly (which surfaces the `Result`) instead of the
+    /// facade.
     pub fn build(self) -> super::muda::Result<TrayIcon> {
         let tray = self.configured_tray();
 

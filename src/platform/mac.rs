@@ -46,8 +46,9 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidResignActiveNotification,
-    NSColor, NSColorSpace, NSEvent, NSEventMask, NSImage, NSMenuDidBeginTrackingNotification,
-    NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSColor, NSColorSpace, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSImage,
+    NSMenuDidBeginTrackingNotification, NSScreen, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{
     NSData, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString,
@@ -822,14 +823,8 @@ impl PopupSession<'_> {
         // This same drawer becomes the panel's drawer (below) so its warm
         // shaping/glyph caches carry into the first paint — the menu is not shaped
         // a second time with a cold drawer (#23).
-        // A forced-OS theme (`ThemeSource::MacOs/Windows/Gnome`) must render the
-        // TARGET OS's UI font, not this host's — so it gets a drawer that resolves
-        // the target family (with a free metric-compatible fallback), never the
-        // host system font. `System`/`Preset`/`Custom` keep the native drawer (#54).
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(scale, family),
-            None => RasterDrawer::new_native(scale),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(scale, &self.options);
         let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -936,14 +931,8 @@ impl PopupSession<'_> {
             return;
         };
         // Reuse this measuring drawer as the flyout's drawer (#23).
-        // A forced-OS theme (`ThemeSource::MacOs/Windows/Gnome`) must render the
-        // TARGET OS's UI font, not this host's — so it gets a drawer that resolves
-        // the target family (with a free metric-compatible fallback), never the
-        // host system font. `System`/`Preset`/`Custom` keep the native drawer (#54).
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(scale, family),
-            None => RasterDrawer::new_native(scale),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(scale, &self.options);
         let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
@@ -1478,6 +1467,12 @@ impl PopupSession<'_> {
 struct AppState {
     session: PopupSession<'static>,
     tray: Tray,
+    /// True only when muri owns the blocking `NSApplication::run` loop (the
+    /// [`Tray::run`] path). A spawned tray installs on the host's main-thread run
+    /// loop, which muri must never stop, so this stays false there — it gates the
+    /// `Shutdown` arm's `app.stop()` so `run()` returns on shutdown without
+    /// tearing down a host-owned loop (#47).
+    owns_run_loop: bool,
 }
 
 impl AppState {
@@ -1536,6 +1531,15 @@ impl AppState {
                 self.session.close_popup();
                 if let Anchor::Tray(a) = &mut self.session.anchor {
                     a.remove();
+                }
+                if self.owns_run_loop {
+                    // muri owns the blocking `NSApplication::run` (the `Tray::run`
+                    // path): stop it so `run()` returns on shutdown — the #47
+                    // contract, which the Windows (WM_QUIT) and Linux (run_sni_loop)
+                    // backends already honor. A spawned tray runs on the host's
+                    // loop (owns_run_loop == false) and is left untouched.
+                    // DEVICE-VERIFY(0.10.6): live run-loop teardown on a real NSApp.
+                    stop_run_loop(self.session.mtm);
                 }
             }
             TrayCommand::SetTheme(theme) => {
@@ -1691,7 +1695,9 @@ impl Platform for MacPlatform {
         // there is nothing safe to do, so the main-thread requirement is
         // surfaced as an error.
         let mtm = self.require_mtm()?;
-        install_tray_session(tray, mtm)
+        // Host owns the run loop here, so `owns_run_loop = false` — Shutdown must
+        // not stop the host's `NSApplication`.
+        install_tray_session(tray, mtm, false)
     }
 
     fn open_popup_session(
@@ -1707,6 +1713,33 @@ impl Platform for MacPlatform {
     }
 }
 
+/// Stop muri's *owned* `NSApplication::run` loop (the [`Tray::run`] path) so it
+/// returns on `Shutdown`. `stop()` only takes effect after the next event is
+/// dequeued, so an application-defined no-op event is posted to wake
+/// `app.run()`'s internal `nextEventMatchingMask` immediately. Only ever called
+/// when muri owns the loop — never for a spawned tray on the host's loop (#47).
+fn stop_run_loop(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+    app.stop(None);
+    // An application-defined no-op event, posted to the front of the main thread's
+    // queue so `app.run()`'s `nextEventMatchingMask` wakes and re-checks the stop
+    // flag (we are on the main thread — `mtm`).
+    let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+        NSEventType::ApplicationDefined,
+        NSPoint::new(0.0, 0.0),
+        NSEventModifierFlags::empty(),
+        0.0,
+        0,
+        None,
+        0,
+        0,
+        0,
+    );
+    if let Some(event) = event {
+        app.postEvent_atStart(&event, true);
+    }
+}
+
 /// Install the tray icon and run the native `NSApplication` loop, opening the
 /// styled popup on click and dispatching row clicks to the tray's handler.
 /// Consumes the [`Tray`]; returns when the loop exits.
@@ -1719,7 +1752,7 @@ fn run_event_loop(tray: Tray) -> Result<()> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    install_tray_session(tray, mtm)?;
+    install_tray_session(tray, mtm, true)?;
 
     app.run();
     Ok(())
@@ -1735,7 +1768,7 @@ fn run_event_loop(tray: Tray) -> Result<()> {
 /// `tray-icon` facade contract), while [`run_event_loop`] keeps driving the loop
 /// itself. The retained `AppState` lives in the `MAIN_APP` thread-local (the main
 /// thread lives for the process), so the status item persists after this returns.
-fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
+fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker, owns_run_loop: bool) -> Result<()> {
     let mut anchor = MacosAnchor::new(mtm);
     anchor.install(tray.tooltip.as_deref())?;
     anchor.set_status(&tray.icon, tray.title.as_deref(), tray.tooltip.as_deref());
@@ -1773,7 +1806,11 @@ fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
         watchers: None,
     };
 
-    let state = Rc::new(RefCell::new(AppState { session, tray }));
+    let state = Rc::new(RefCell::new(AppState {
+        session,
+        tray,
+        owns_run_loop,
+    }));
     MAIN_APP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&state)));
 
     // Apply any commands a handle posted before the loop came up.

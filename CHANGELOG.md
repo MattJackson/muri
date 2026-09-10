@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-09-10
+
+Hardening from a second full-codebase audit (10 lenses, fresh eyes). The audit
+found **no** correctness, panic, or security defects in 0.10.5; these are the
+robustness, performance, and honesty items it surfaced.
+
+### Fixed
+
+- **Linux tray leak on platform drop.** `LinuxPlatform` now implements `Drop`,
+  shutting down a standalone `install_tray` SNI service on teardown. `ksni`'s
+  blocking `Handle` has no unregistering `Drop`, so without this the D-Bus service,
+  its thread, and the tray icon leaked until process exit (the re-install path
+  already guarded this; the final drop did not).
+- **macOS `Tray::run` now returns on shutdown.** When muri owns the blocking
+  `NSApplication::run` loop, `TrayCommand::Shutdown` now stops it (gated so a
+  spawned tray on the host's loop is never stopped) — matching the Windows
+  (`WM_QUIT`) and Linux backends, so dropping the last `TrayHandle` ends `run()` as
+  documented (#47). (Device-verify pending, like the rest of the macOS backend.)
+
+### Performance
+
+- **Primary-face resolution is memoized.** `resolve_face` ran a `fontdb` database
+  query on every `measure_text`/`draw_text` call (once per segment per row, every
+  repaint); it now caches per `(family, weight)` like the shaping/coverage caches,
+  so a hover repaint no longer re-scans the system-font database.
+
+### Docs / tests
+
+- Corrected the compat context-menu trait docs (a `None` position falls back to the
+  **screen origin**, not the cursor — muri has no cursor-query helper yet), the
+  `TrayIconEvent` docs (icon-level pointer events are **not yet emitted** by the
+  backend), `TrayIconBuilder::build`'s infallible-degrade behavior, the
+  raster-module blend doc (gamma-correct, not the old sRGB `over`), and a wrong
+  `png` type reference in `decode_png`.
+- Strengthened the `open_custom_with_options` compat test to observe the options
+  actually reaching the surface (it previously only checked the surface was routed
+  Custom, which held regardless of the options).
+- De-duplicated the forced-vs-native drawer construction across the macOS/Windows/
+  X11 backends behind `RasterDrawer::for_menu_options` (drift guard).
+
 ## [0.10.5] - 2026-09-10
 
 A large correctness + API-ergonomics wave: gamma-correct text rendering, genuine

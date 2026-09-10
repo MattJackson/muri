@@ -1335,12 +1335,8 @@ impl PopupSession<'_> {
 
         // Reuse the measuring drawer as the panel drawer so shaping/glyph caches
         // carry into the first paint (menu not shaped twice per open) (#23).
-        // Forced-OS themes render the TARGET OS font, not this host's (#54); the
-        // native drawer is kept for `System`/`Preset`/`Custom`.
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(scale, family),
-            None => RasterDrawer::new_native(scale),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(scale, &self.options);
         let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -1444,12 +1440,8 @@ impl PopupSession<'_> {
             return;
         };
         // Reuse the measuring drawer as the flyout drawer (#23).
-        // Forced-OS themes render the TARGET OS font, not this host's (#54); the
-        // native drawer is kept for `System`/`Preset`/`Custom`.
-        let mut drawer = match self.options.theme.forced_family() {
-            Some(family) => RasterDrawer::with_forced_theme(scale, family),
-            None => RasterDrawer::new_native(scale),
-        };
+        // Forced-OS theme -> target OS font; else host-native (#54).
+        let mut drawer = RasterDrawer::for_menu_options(scale, &self.options);
         let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);

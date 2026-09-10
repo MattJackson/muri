@@ -18,9 +18,11 @@
 //! Anti-aliasing uses an analytic rounded-box **signed distance field**: a
 //! pixel's coverage is `clamp(0.5 - sdf, 0, 1)`, giving a ~1px edge band and
 //! pixel-crisp axis-aligned edges (a pixel center exactly on an edge lands at
-//! full/zero coverage). Glyph and image blits reuse the exact premultiplied
-//! `over` arithmetic the previous `tiny-skia` path used, so only the AA fills
-//! (panel body, row highlight) differ at all from the old backend.
+//! full/zero coverage). Every blit — AA fills, glyph masks, and image/icon blits
+//! — funnels through [`blend_pixel`], which composites the `over` operator in
+//! **linear light** (gamma-correct), so anti-aliased edges match a native
+//! CoreText/Quartz menu's weight rather than the heavier look naive sRGB-space
+//! blending produced (#42).
 
 use crate::geometry::LogicalRect;
 use crate::style::Rgba;
@@ -409,9 +411,9 @@ const MAX_ICON_PIXELS: u64 = 2048 * 2048;
 /// grayscale, and 16-bit inputs are normalized to 8-bit RGBA.
 ///
 /// Dimensions are validated against internal per-dimension and total-pixel
-/// caps (4096px per side; 2048×2048 pixels total) straight from the
-/// IHDR-derived [`png::OutputInfo`] *before* any pixel buffer is allocated,
-/// so oversized/malicious inputs are rejected cheaply.
+/// caps (4096px per side; 2048×2048 pixels total) straight from the IHDR-derived
+/// [`png::Info`] (`reader.info()`) *before* any pixel buffer is allocated, so
+/// oversized/malicious inputs are rejected cheaply.
 pub fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = png::Decoder::new(bytes);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
