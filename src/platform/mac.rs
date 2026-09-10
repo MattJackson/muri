@@ -322,29 +322,42 @@ impl MacosAnchor {
         }
     }
 
-    /// Set the status-item button's image from a muri [`Icon`]. PNG/SVG icons
-    /// are decoded by AppKit; other kinds fall back to a text title.
-    fn set_icon(&self, icon: &Icon, tooltip: Option<&str>) {
+    /// Render the status-item button from the current [`Icon`] plus an optional
+    /// menu-bar text `title`. A valid PNG/SVG becomes the button image; a
+    /// non-empty `title` is drawn as the button's text (the macOS menu-bar text,
+    /// e.g. a live "45%"), composing with the image when both are present. When
+    /// neither a drawable image nor a title is available, a bullet placeholder
+    /// keeps the item visible and clickable (an empty status item is invisible).
+    fn set_status(&self, icon: &Icon, title: Option<&str>, tooltip: Option<&str>) {
         let Some(item) = &self.status_item else {
             return;
         };
         let Some(button) = item.button(self.mtm) else {
             return;
         };
-        match icon {
-            Icon::Png(bytes) | Icon::Svg(bytes) => {
-                let data = NSData::with_bytes(bytes);
-                if let Some(image) =
-                    NSImage::initWithData(NSImage::alloc(), &data).filter(|i| i.isValid())
-                {
-                    image.setSize(NSSize::new(18.0, 18.0));
-                    button.setImage(Some(&image));
-                } else {
-                    button.setTitle(&NSString::from_str("●"));
-                }
+        let mut has_image = false;
+        if let Icon::Png(bytes) | Icon::Svg(bytes) = icon {
+            let data = NSData::with_bytes(bytes);
+            if let Some(image) =
+                NSImage::initWithData(NSImage::alloc(), &data).filter(|i| i.isValid())
+            {
+                image.setSize(NSSize::new(18.0, 18.0));
+                button.setImage(Some(&image));
+                has_image = true;
             }
-            _ => button.setTitle(&NSString::from_str("●")),
         }
+        if !has_image {
+            button.setImage(None);
+        }
+        // A non-empty title wins as the visible text; else show the image alone
+        // (empty title), else the bullet placeholder so the item stays visible.
+        let title = title.filter(|t| !t.is_empty());
+        let text = match title {
+            Some(t) => t,
+            None if has_image => "",
+            None => "●",
+        };
+        button.setTitle(&NSString::from_str(text));
         if let Some(tip) = tooltip {
             button.setToolTip(Some(&NSString::from_str(tip)));
         }
@@ -1160,15 +1173,25 @@ impl AppState {
             TrayCommand::SetIcon(icon) => {
                 self.tray.icon = icon;
                 let icon = self.tray.icon.clone();
+                let title = self.tray.title.clone();
                 let tooltip = self.tray.tooltip.clone();
                 if let Anchor::Tray(a) = &self.session.anchor {
-                    a.set_icon(&icon, tooltip.as_deref());
+                    a.set_status(&icon, title.as_deref(), tooltip.as_deref());
                 }
             }
             TrayCommand::SetTooltip(tooltip) => {
                 self.tray.tooltip = tooltip;
                 if let Anchor::Tray(a) = &self.session.anchor {
                     a.set_tooltip(self.tray.tooltip.as_deref());
+                }
+            }
+            TrayCommand::SetTitle(title) => {
+                self.tray.title = title;
+                let icon = self.tray.icon.clone();
+                let title = self.tray.title.clone();
+                let tooltip = self.tray.tooltip.clone();
+                if let Anchor::Tray(a) = &self.session.anchor {
+                    a.set_status(&icon, title.as_deref(), tooltip.as_deref());
                 }
             }
             TrayCommand::SetVisible(visible) => {
@@ -1254,7 +1277,7 @@ impl Platform for MacPlatform {
         let mtm = self.require_mtm()?;
         let mut anchor = MacosAnchor::new(mtm);
         anchor.install(tooltip)?;
-        anchor.set_icon(icon, tooltip);
+        anchor.set_status(icon, None, tooltip);
         self.anchor = Some(anchor);
         Ok(())
     }
@@ -1345,7 +1368,7 @@ fn run_event_loop(tray: Tray) -> Result<()> {
 fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
     let mut anchor = MacosAnchor::new(mtm);
     anchor.install(tray.tooltip.as_deref())?;
-    anchor.set_icon(&tray.icon, tray.tooltip.as_deref());
+    anchor.set_status(&tray.icon, tray.title.as_deref(), tray.tooltip.as_deref());
 
     // Install the TrayHandle waker so posts from any thread schedule a drain.
     if let Ok(mut waker) = tray.waker.lock() {

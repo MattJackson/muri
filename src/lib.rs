@@ -183,6 +183,11 @@ pub struct Tray {
     icon: Icon,
     menu: Menu,
     tooltip: Option<String>,
+    /// Optional text shown *beside/instead of* the icon in the status item —
+    /// the macOS menu-bar title (e.g. a live "45%"). Rendered on the
+    /// `NSStatusItem` button; on Windows/Linux the notification area has no text
+    /// label, so it is retained but not drawn.
+    title: Option<String>,
     options: MenuOptions,
     on_click: Option<ClickHandler>,
     /// Commands posted by a [`TrayHandle`] from any thread, drained on the
@@ -213,6 +218,8 @@ pub(crate) enum TrayCommand {
     SetIcon(Icon),
     /// Replace the tooltip / accessible name.
     SetTooltip(Option<String>),
+    /// Replace the status-item text title (macOS menu-bar text).
+    SetTitle(Option<String>),
     /// Show or hide the tray status item.
     SetVisible(bool),
     /// Programmatically open the popup anchored to the tray icon.
@@ -271,6 +278,12 @@ impl TrayHandle {
         self.post(TrayCommand::SetTooltip(tooltip.map(Into::into)));
     }
 
+    /// Replace the status-item text title (macOS menu-bar text, e.g. a live
+    /// "45%"). A no-op on the drawn item on Windows/Linux.
+    pub fn set_title(&self, title: Option<impl Into<String>>) {
+        self.post(TrayCommand::SetTitle(title.map(Into::into)));
+    }
+
     /// Show or hide the tray status item.
     pub fn set_visible(&self, visible: bool) {
         self.post(TrayCommand::SetVisible(visible));
@@ -294,6 +307,7 @@ impl Tray {
             icon,
             menu: Menu::new(),
             tooltip: None,
+            title: None,
             options: MenuOptions::default(),
             on_click: None,
             commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -320,6 +334,15 @@ impl Tray {
     /// Set the tray icon tooltip / accessible name.
     pub fn tooltip(mut self, text: impl Into<String>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Set the status-item text title — the macOS menu-bar text shown beside (or
+    /// instead of) the icon, e.g. a live "45%". Rendered on the `NSStatusItem`
+    /// button; on Windows/Linux the notification area has no text label, so this
+    /// is retained but not drawn.
+    pub fn title(mut self, text: impl Into<String>) -> Self {
+        self.title = Some(text.into());
         self
     }
 
@@ -350,6 +373,16 @@ impl Tray {
     /// update; on Linux this re-registers the SNI `icon_pixmap`).
     pub fn set_icon(&mut self, icon: Icon) {
         self.icon = icon;
+    }
+
+    /// Replace the status-item text title at runtime (macOS menu-bar text).
+    pub fn set_title(&mut self, title: Option<String>) {
+        self.title = title;
+    }
+
+    /// The status-item text title, if set.
+    pub fn title_text(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 
     /// The tooltip, if set.
@@ -612,11 +645,25 @@ mod tests {
     fn tray_builder_stores_configuration() {
         let tray = Tray::new(Icon::Checkmark)
             .tooltip("usagio")
+            .title("45%")
             .menu(Menu::new().row(Row::new("quit").label("Quit")))
             .theme(ThemeSource::Dark);
         assert_eq!(tray.tooltip_text(), Some("usagio"));
+        assert_eq!(tray.title_text(), Some("45%"));
         assert_eq!(tray.current_menu().len(), 1);
         assert!(matches!(tray.menu_options().theme, ThemeSource::Dark));
+    }
+
+    #[test]
+    fn tray_title_defaults_none_and_set_title_replaces_it() {
+        // A tray with no title (the macOS menu-bar text) reports None; the
+        // runtime setter replaces and clears it (issue #8 part 3).
+        let mut tray = Tray::new(Icon::Checkmark);
+        assert_eq!(tray.title_text(), None);
+        tray.set_title(Some("12%".to_owned()));
+        assert_eq!(tray.title_text(), Some("12%"));
+        tray.set_title(None);
+        assert_eq!(tray.title_text(), None);
     }
 
     #[test]

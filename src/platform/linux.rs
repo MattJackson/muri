@@ -294,6 +294,11 @@ fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
         TrayCommand::SetTooltip(tooltip) => {
             handle.update(move |s| s.tray.tooltip = tooltip);
         }
+        TrayCommand::SetTitle(title) => {
+            // The SNI panel has no free-text menu-bar label (that is a macOS
+            // concept); retain it on the tray, with no host-visible effect.
+            handle.update(move |s| s.tray.title = title);
+        }
         TrayCommand::SetVisible(visible) => {
             handle.update(move |s| s.visible = visible);
         }
