@@ -32,6 +32,14 @@ Release-gate code-audit fixes (10-lens audit of the 0.9.x tray/facade work).
 - **Windows: the tray waker is cleared when the pump exits** — a `TrayHandle`
   outliving `run_event_loop` could `PostMessageW` a destroyed owner window.
 
+### Documentation
+
+- **`Icon::Svg` is documented as not-yet-rendered.** muri ships no SVG rasterizer
+  (minimal-deps ADR), so `Icon::Svg` silently drew nothing on every backend while
+  the README/API advertised "SVG rasterized per-DPI." The docs (README,
+  `Icon`/`from_svg_bytes`) now say SVG isn't wired up yet — supply PNG — and the
+  backends treat `Icon::Svg` uniformly as "no image."
+
 ### Internal
 
 - `render::encode_rgba_png` is now `pub(crate)` (was accidentally public).

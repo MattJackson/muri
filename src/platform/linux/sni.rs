@@ -151,10 +151,13 @@ impl ksni::Tray for MuriSni {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         match &self.tray.icon {
-            Icon::Png(bytes) | Icon::Svg(bytes) => png_to_argb32(bytes).into_iter().collect(),
-            // Checkmark/Symbol have no raster bytes here; the host shows its
-            // default/blank icon. Themed-name mapping is future work.
-            Icon::Checkmark | Icon::Symbol(_) => Vec::new(),
+            Icon::Png(bytes) => png_to_argb32(bytes).into_iter().collect(),
+            // `Icon::Svg` is not rasterized anywhere in muri yet (no SVG
+            // rasterizer dependency — see `Icon`'s note), and Checkmark/Symbol
+            // have no raster bytes here either; all yield an empty pixmap and the
+            // host shows its default/blank icon. SVG rasterization + themed-name
+            // mapping are future work.
+            Icon::Svg(_) | Icon::Checkmark | Icon::Symbol(_) => Vec::new(),
         }
     }
 
