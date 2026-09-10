@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-10
+
+### Added (muda-compat)
+
+- **#18 — active-row marking.** `MenuItem`, `IconMenuItem`, and `Submenu` gain a
+  muri-only `set_active(bool)`: an active row renders **bold** with a leading
+  **checkmark** (the 0.5.x active-account look). muda's `Submenu` has no checked
+  state, so this is the compat channel for expressing it. Bold is applied as a
+  whole-segment `StyleRun` weight, preserving the OS point size.
+- **#19 — per-span value color.** The same three types gain `set_value_color(
+  Option<Color>)`, which tints the trailing `\t` value segment (severity coloring,
+  e.g. `Color::SystemRed`/`SystemOrange` for high usage). `Color` is re-exported
+  from `muri::compat::muda`. Combined with `set_active`, the value renders bold +
+  colored.
+
+Both map onto muri's native painter (checkmark + bold + per-segment color); they
+are additive muri extensions, not part of muda's API, so existing callers are
+unaffected.
+
 ## [0.10.2] - 2026-09-10
 
 ### Fixed

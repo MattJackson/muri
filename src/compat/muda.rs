@@ -43,10 +43,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::menu::{
     Align, Flex, Item as MuriItem, Menu as MuriMenu, Row as MuriRow, Segment as MuriSegment,
+    StyleRun,
 };
+use crate::style::Weight;
 
 pub use crate::event::MenuEventReceiver;
 pub use crate::menu::{Icon as MuriIcon, MenuEvent, MenuId};
+// Re-exported so callers can pass a value color to `set_value_color` (#19)
+// without reaching outside the compat module.
+pub use crate::style::Color;
 
 pub mod about_metadata;
 pub mod accelerator;
@@ -278,9 +283,11 @@ impl MenuItemKind {
         match self {
             MenuItemKind::MenuItem(i) => {
                 let s = i.inner.borrow();
-                MuriItem::Row(apply_label(
+                MuriItem::Row(apply_styled_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
+                    s.active,
+                    s.value_color,
                 ))
             }
             MenuItemKind::Check(i) => {
@@ -297,7 +304,12 @@ impl MenuItemKind {
             }
             MenuItemKind::Icon(i) => {
                 let s = i.inner.borrow();
-                let mut row = apply_label(MuriRow::new(s.id.clone()).enabled(s.enabled), &s.text);
+                let mut row = apply_styled_label(
+                    MuriRow::new(s.id.clone()).enabled(s.enabled),
+                    &s.text,
+                    s.active,
+                    s.value_color,
+                );
                 match &s.icon {
                     // A raw-RGBA icon is encoded to PNG and rendered as the row's
                     // leading image — the same bridge the tray icon uses
@@ -324,7 +336,12 @@ impl MenuItemKind {
             }
             MenuItemKind::Submenu(i) => {
                 let s = i.inner.borrow();
-                let label = apply_label(MuriRow::new(s.id.clone()).enabled(s.enabled), &s.text);
+                let label = apply_styled_label(
+                    MuriRow::new(s.id.clone()).enabled(s.enabled),
+                    &s.text,
+                    s.active,
+                    s.value_color,
+                );
                 MuriItem::Submenu {
                     label,
                     menu: kinds_to_muri_menu(&s.items),
@@ -362,12 +379,55 @@ fn kinds_to_muri_menu(items: &[MenuItemKind]) -> MuriMenu {
 /// the first TAB grows to fill the row and the trailing text is flush-right,
 /// matching muda's NSMenu tab-stop column. Text without a TAB is a single label.
 fn apply_label(row: MuriRow, text: &str) -> MuriRow {
+    apply_styled_label(row, text, false, None)
+}
+
+/// [`apply_label`] plus the muri-compat styling extensions: an **active** row
+/// gets a leading checkmark and **bold** text (the 0.5.x active-account look,
+/// #18), and `value_color` tints the trailing `\t` value segment (severity
+/// coloring, #19). Bold is applied as a whole-segment [`StyleRun`] weight so the
+/// OS point size is preserved (no fixed-size font override).
+fn apply_styled_label(
+    row: MuriRow,
+    text: &str,
+    active: bool,
+    value_color: Option<Color>,
+) -> MuriRow {
+    let row = if active {
+        row.checked(true).leading(MuriIcon::Checkmark)
+    } else {
+        row
+    };
+    // Bold a segment across its whole text without changing size/family.
+    let bold = |seg: MuriSegment, s: &str, color: Color| {
+        let len = s.encode_utf16().count();
+        seg.runs(vec![StyleRun::new(0, len, color).weight(Weight::Bold)])
+    };
     match text.split_once('\t') {
-        Some((lead, tail)) => row.segments(vec![
-            MuriSegment::new(lead.trim_end()).flex(Flex::Grow),
-            MuriSegment::new(tail.trim_start()).align(Align::Right),
-        ]),
-        None => row.label(text.to_owned()),
+        Some((lead, tail)) => {
+            let lead = lead.trim_end();
+            let tail = tail.trim_start();
+            let mut lead_seg = MuriSegment::new(lead).flex(Flex::Grow);
+            if active {
+                lead_seg = bold(lead_seg, lead, Color::Label);
+            }
+            let mut tail_seg = MuriSegment::new(tail).align(Align::Right);
+            match (active, value_color) {
+                (true, c) => tail_seg = bold(tail_seg, tail, c.unwrap_or(Color::Label)),
+                (false, Some(c)) => tail_seg = tail_seg.color(c),
+                (false, None) => {}
+            }
+            row.segments(vec![lead_seg, tail_seg])
+        }
+        None => {
+            let mut seg = MuriSegment::new(text.to_owned());
+            match (active, value_color) {
+                (true, c) => seg = bold(seg, text, c.unwrap_or(Color::Label)),
+                (false, Some(c)) => seg = seg.color(c),
+                (false, None) => {}
+            }
+            row.segments(vec![seg])
+        }
     }
 }
 
@@ -381,6 +441,10 @@ struct MenuItemState {
     enabled: bool,
     #[allow(dead_code)] // displayed by the backend (D5); stored for parity.
     accelerator: Option<Accelerator>,
+    /// muri extension (#18): render the row bold with a leading checkmark.
+    active: bool,
+    /// muri extension (#19): color the trailing `\t` value segment.
+    value_color: Option<Color>,
 }
 
 /// A plain text menu item (muda's `MenuItem`). Cloning shares the same item (like
@@ -419,8 +483,22 @@ impl MenuItem {
                 text: text.as_ref().to_owned(),
                 enabled,
                 accelerator,
+                active: false,
+                value_color: None,
             })),
         }
+    }
+
+    /// **muri extension (#18):** mark this row *active* — rendered bold with a
+    /// leading checkmark (the 0.5.x active-account look). Not part of muda's API.
+    pub fn set_active(&self, active: bool) {
+        self.inner.borrow_mut().active = active;
+    }
+
+    /// **muri extension (#19):** color the trailing `\t` value segment (severity
+    /// coloring, e.g. [`Color::SystemRed`]). Pass `None` to clear. Not muda's API.
+    pub fn set_value_color(&self, color: Option<Color>) {
+        self.inner.borrow_mut().value_color = color;
     }
 
     /// This item's id.
@@ -592,6 +670,11 @@ struct IconMenuItemState {
     icon: Option<IconSource>,
     #[allow(dead_code)]
     accelerator: Option<Accelerator>,
+    /// muri extension (#18): bold text (the leading slot is taken by the icon,
+    /// so an active icon row does not also draw a checkmark).
+    active: bool,
+    /// muri extension (#19): color the trailing `\t` value segment.
+    value_color: Option<Color>,
 }
 
 /// A menu item with a leading icon (muda's `IconMenuItem`). Maps to a muri
@@ -661,8 +744,21 @@ impl IconMenuItem {
                 enabled,
                 icon,
                 accelerator,
+                active: false,
+                value_color: None,
             })),
         }
+    }
+
+    /// **muri extension (#18):** render this row bold. (The leading slot is used
+    /// by the icon, so no checkmark is added.) Not part of muda's API.
+    pub fn set_active(&self, active: bool) {
+        self.inner.borrow_mut().active = active;
+    }
+
+    /// **muri extension (#19):** color the trailing `\t` value segment. Not muda's.
+    pub fn set_value_color(&self, color: Option<Color>) {
+        self.inner.borrow_mut().value_color = color;
     }
 
     /// This item's id.
@@ -1150,6 +1246,11 @@ struct SubmenuState {
     text: String,
     enabled: bool,
     items: Vec<MenuItemKind>,
+    /// muri extension (#18): render the submenu's own row bold with a leading
+    /// checkmark — the active-account marker muda's `Submenu` can't express.
+    active: bool,
+    /// muri extension (#19): color the submenu row's trailing `\t` value segment.
+    value_color: Option<Color>,
 }
 
 /// A nested submenu (muda's `Submenu`). Maps to
@@ -1178,8 +1279,23 @@ impl Submenu {
                 text: text.as_ref().to_owned(),
                 enabled,
                 items: Vec::new(),
+                active: false,
+                value_color: None,
             })),
         }
+    }
+
+    /// **muri extension (#18):** mark this submenu's row *active* — bold with a
+    /// leading checkmark (the 0.5.x active-account look; muda's `Submenu` has no
+    /// checked state). Not part of muda's API.
+    pub fn set_active(&self, active: bool) {
+        self.inner.borrow_mut().active = active;
+    }
+
+    /// **muri extension (#19):** color the submenu row's trailing `\t` value
+    /// segment (severity coloring). Pass `None` to clear. Not muda's API.
+    pub fn set_value_color(&self, color: Option<Color>) {
+        self.inner.borrow_mut().value_color = color;
     }
 
     /// This submenu's id.
@@ -1404,6 +1520,69 @@ mod tests {
             label.segments[1].align,
             Align::Right,
             "value segment is right-aligned"
+        );
+    }
+
+    /// #18 + #19: an active submenu row converts to a bold, checkmarked muri row
+    /// whose trailing `\t` value carries the severity color.
+    #[test]
+    fn active_submenu_is_bold_checked_and_value_colored() {
+        use crate::menu::{Icon as MuriIcon, Item};
+        use crate::style::{Color, Weight};
+
+        let menu = Menu::new();
+        let acct = Submenu::with_id("acct:me", "me@example.com\t47% / 52%", true);
+        acct.set_active(true);
+        acct.set_value_color(Some(Color::SystemRed));
+        menu.append(&acct).unwrap();
+
+        let muri = menu.to_muri_menu();
+        let Item::Submenu { label, .. } = &muri.items[0] else {
+            panic!("expected a submenu");
+        };
+
+        // Active → checked + leading checkmark.
+        assert_eq!(label.checked, Some(true));
+        assert!(matches!(label.leading, Some(MuriIcon::Checkmark)));
+
+        // Bold lead, and a bold + red trailing value.
+        assert_eq!(label.segments.len(), 2);
+        assert!(
+            label.segments[0]
+                .runs
+                .iter()
+                .any(|r| r.weight == Some(Weight::Bold)),
+            "active lead segment is bold"
+        );
+        assert!(
+            label.segments[1]
+                .runs
+                .iter()
+                .any(|r| r.color == Color::SystemRed && r.weight == Some(Weight::Bold)),
+            "active value segment is bold + severity-colored"
+        );
+    }
+
+    /// #19: a value color without `active` colors the trailing segment (no bold).
+    #[test]
+    fn value_color_without_active_colors_trailing_segment() {
+        use crate::menu::Item;
+        use crate::style::Color;
+
+        let menu = Menu::new();
+        let item = MenuItem::with_id("x", "Label\t99%", true, None);
+        item.set_value_color(Some(Color::SystemOrange));
+        menu.append(&item).unwrap();
+
+        let muri = menu.to_muri_menu();
+        let Item::Row(row) = &muri.items[0] else {
+            panic!("expected a row");
+        };
+        assert_eq!(row.segments.len(), 2);
+        assert_eq!(row.segments[1].color, Some(Color::SystemOrange));
+        assert!(
+            row.segments[1].runs.is_empty(),
+            "no bold runs when not active"
         );
     }
 
