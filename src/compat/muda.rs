@@ -157,6 +157,15 @@ impl Icon {
     /// Build an icon from raw RGBA bytes, erroring if the length does not match
     /// `width * height * 4` (mirrors muda's `Icon::from_rgba`).
     pub fn from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> std::result::Result<Self, BadIcon> {
+        // Reject zero-area icons up front: `0x0` would otherwise validate (its
+        // expected length is 0), then be silently dropped downstream because the
+        // encoder (`render::encode_rgba_png`) rejects a zero dimension — a
+        // degenerate icon that reports success at every step yet never draws.
+        if width == 0 || height == 0 {
+            return Err(BadIcon(format!(
+                "icon dimensions must be non-zero, got {width}x{height}"
+            )));
+        }
         // Checked arithmetic: `width`/`height` may come from untrusted image
         // metadata, and `w * h * 4` overflows `usize` for pathological dimensions
         // (e.g. u32::MAX x u32::MAX) — which panics under the default debug
@@ -293,10 +302,14 @@ impl MenuItemKind {
                     // (`render::encode_rgba_png` → `Icon::Png`), extended to menu
                     // items so a provider logo on a header row draws (issue #9).
                     Some(IconSource::Rgba(icon)) => {
+                        // Cached encode: `to_muri` re-runs on every `set_menu`, so
+                        // encoding an unchanged logo each tick would waste CPU and
+                        // defeat the render decode cache (issue: fresh Arc per
+                        // frame). The cache returns a stable Arc for identical RGBA.
                         if let Some(png) =
-                            crate::render::encode_rgba_png(&icon.rgba, icon.width, icon.height)
+                            super::encode_rgba_cached(&icon.rgba, icon.width, icon.height)
                         {
-                            row = row.leading(MuriIcon::Png(png.into()));
+                            row = row.leading(MuriIcon::Png(png));
                         }
                     }
                     // A stock NativeIcon maps to a named symbol.
@@ -568,8 +581,9 @@ struct IconMenuItemState {
 }
 
 /// A menu item with a leading icon (muda's `IconMenuItem`). Maps to a muri
-/// [`Row`](crate::menu::Row) with a leading icon (spec `02` §4.5); see the
-/// module-level D6 note for the raw-RGBA caveat.
+/// [`Row`](crate::menu::Row) with a leading icon (spec `02` §4.5); a raw-RGBA
+/// icon is encoded to PNG and rendered as the row's leading image (see the
+/// module-level `IconMenuItem` note).
 #[derive(Clone)]
 pub struct IconMenuItem {
     inner: Rc<RefCell<IconMenuItemState>>,
@@ -1315,6 +1329,13 @@ mod tests {
         // still errors (the guard the function exists for is intact).
         assert!(Icon::from_rgba(vec![0; 4], 1, 1).is_ok());
         assert!(Icon::from_rgba(vec![0; 3], 1, 1).is_err());
+
+        // A zero dimension is rejected up front rather than accepted (its length
+        // guard passes: 0 bytes) and then silently dropped by the encoder, which
+        // rejects a zero dimension — a "success" that never draws.
+        assert!(Icon::from_rgba(Vec::new(), 0, 0).is_err());
+        assert!(Icon::from_rgba(Vec::new(), 0, 8).is_err());
+        assert!(Icon::from_rgba(Vec::new(), 8, 0).is_err());
     }
 
     #[test]

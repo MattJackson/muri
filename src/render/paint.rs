@@ -213,7 +213,10 @@ fn style_pieces(
         let mut color = base_color;
         let mut weight = base_weight;
         for run in &seg.runs {
-            if u16_idx >= run.start && u16_idx < run.start + run.len {
+            // `start`/`len` are public `StyleRun` fields set by the caller;
+            // saturating add so a pathological `start + len` can't overflow
+            // `usize` and panic under debug overflow checks.
+            if u16_idx >= run.start && u16_idx < run.start.saturating_add(run.len) {
                 if !highlighted {
                     color = theme.resolve(run.color);
                 }

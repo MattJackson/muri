@@ -326,8 +326,8 @@ impl TrayIconBuilder {
 /// RGBA cannot be encoded, so the tray is never left with an empty pixmap.
 fn icon_to_muri(icon: &Option<Icon>) -> MuriIcon {
     icon.as_ref()
-        .and_then(|i| crate::render::encode_rgba_png(&i.rgba, i.width, i.height))
-        .map(|png| MuriIcon::Png(png.into()))
+        .and_then(|i| super::encode_rgba_cached(&i.rgba, i.width, i.height))
+        .map(MuriIcon::Png)
         .unwrap_or(MuriIcon::Symbol("tray"))
 }
 
