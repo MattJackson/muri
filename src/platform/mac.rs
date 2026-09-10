@@ -480,12 +480,16 @@ impl MacosAnchor {
             return;
         };
         let mut has_image = false;
-        // Only PNG is decodable here. `Icon::Svg` is not rasterized anywhere in
-        // muri yet (no SVG rasterizer dependency — see `Icon`'s note), so it is
-        // treated as "no image" like Checkmark/Symbol, consistent with the other
-        // backends.
-        if let Icon::Png(bytes) = icon {
-            let data = NSData::with_bytes(bytes);
+        // PNG bytes go straight to AppKit; SVG bytes are rasterized (via the
+        // zeno-backed subset rasterizer) and re-encoded to PNG first, since
+        // NSImage decodes PNG but not muri's SVG subset.
+        let png_bytes: Option<std::borrow::Cow<'_, [u8]>> = match icon {
+            Icon::Png(bytes) => Some(std::borrow::Cow::Borrowed(&bytes[..])),
+            Icon::Svg(bytes) => svg_to_png(&bytes[..]).map(std::borrow::Cow::Owned),
+            _ => None,
+        };
+        if let Some(bytes) = png_bytes {
+            let data = NSData::with_bytes(&bytes);
             if let Some(image) =
                 NSImage::initWithData(NSImage::alloc(), &data).filter(|i| i.isValid())
             {
@@ -1734,6 +1738,15 @@ fn run_popup_session(
 // =============================================================================
 
 /// Query whether the system (menu-bar) appearance is currently dark.
+/// Rasterize an `Icon::Svg` (muri's restricted SVG subset, via the zeno-backed
+/// rasterizer) and re-encode it as PNG so AppKit's `NSImage` — which decodes PNG
+/// but not the SVG subset — can consume it. `None` for non-SVG / unparseable
+/// bytes.
+fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (rgba, w, h) = crate::render::rasterize_svg(bytes)?;
+    crate::render::encode_rgba_png(&rgba, w, h)
+}
+
 fn system_is_dark() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;

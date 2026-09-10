@@ -402,10 +402,11 @@ unsafe extern "system" fn kbd_hook_proc(code: i32, wparam: WPARAM, lparam: LPARA
 /// # Safety
 /// Calls raw GDI; the returned handle (if any) must be freed with `DestroyIcon`.
 unsafe fn decode_hicon(icon: &Icon, size: i32) -> Option<HICON> {
-    let Icon::Png(bytes) = icon else {
-        return None;
+    let bytes = match icon {
+        Icon::Png(bytes) | Icon::Svg(bytes) => bytes,
+        _ => return None,
     };
-    let (rgba, src_w, src_h) = crate::render::decode_png(bytes)?;
+    let (rgba, src_w, src_h) = crate::render::decode_icon_bytes(bytes)?;
     let (sw, sh) = (src_w as i32, src_h as i32);
     if sw == 0 || sh == 0 || size <= 0 {
         return None;
@@ -740,6 +741,8 @@ impl WindowsAnchor {
         let new = match icon {
             Icon::Png(_) => decode_hicon(icon, 16)
                 .ok_or_else(|| Error::BadIcon("could not decode PNG tray icon bytes".into()))?,
+            Icon::Svg(_) => decode_hicon(icon, 16)
+                .ok_or_else(|| Error::BadIcon("could not rasterize SVG tray icon bytes".into()))?,
             _ => null_mut(),
         };
         if !self.hicon.is_null() {

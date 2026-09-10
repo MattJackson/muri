@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-10
+
+### Added
+
+- **`Icon::Svg` now renders** — a minimal, dependency-light SVG rasterizer for a
+  restricted subset (paths `M/L/H/V/C/S/Q/T/A/Z`, `rect`/`circle`/`ellipse`/
+  `line`/`polygon`/`polyline`, `fill`/`stroke`/`fill-rule`/`opacity`/`transform`,
+  named + hex + `rgb()` colors), built on **`zeno`** — the pure-Rust AA path
+  rasterizer already in the tree via `swash`, so **zero net-new crates** (no
+  `tiny-skia`, no `resvg`, no second PNG codec). Wired into the shared icon path
+  (`decode_icon_bytes` = PNG-then-SVG) so SVG works for menu-row leading icons and
+  the tray icon on all three backends (Linux SNI ARGB32, Windows `HICON`, macOS
+  `NSImage` via a PNG re-encode). Filters, `<text>`, gradients, clips/masks are
+  out of the subset — ship those as PNG. MSRV stays 1.87; MIT.
+
 ## [0.9.7] - 2026-09-10
 
 ### Fixed

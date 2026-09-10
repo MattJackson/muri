@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.9.7"
+version = "0.10.0"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -60,6 +60,10 @@ fontdb = { version = "0.24", default-features = false, features = [
 ] }
 harfrust = "0.13"
 swash = "0.2"
+# Pure-Rust AA path-fill rasterizer (already in the tree via `swash`), used by
+# `src/render/svg.rs` to rasterize the restricted `Icon::Svg` subset — no
+# `tiny-skia`/`resvg` and no second PNG codec (0 net-new crates).
+zeno = "0.3"
 
 # The process-global `MenuEvent` channel (spec 03 §3) — the same crate muda uses,
 # for behavioral parity. Kept a NON-optional dependency (not `dep:`-gated behind

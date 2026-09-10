@@ -43,6 +43,13 @@ pub mod paint;
 // stay reachable via the `pub use` re-export just below regardless of this
 // module's own visibility.
 pub(crate) mod raster;
+// The `Icon::Svg` rasterizer (a restricted SVG subset → straight-alpha RGBA,
+// built on `zeno`, already in the tree via `swash`). Same output shape as
+// `raster::decode_png`, so it slots into the shared icon path; `rasterize_svg` is
+// re-exported for the platform backends (Windows HICON / Linux SNI / macOS
+// NSImage) to reuse.
+pub(crate) mod svg;
+pub use svg::rasterize_svg;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -139,8 +146,16 @@ pub trait SceneDrawer {
     /// The default implementation just decodes uncached (correct, only
     /// non-caching); [`RasterDrawer`] overrides it with a real cache.
     fn decode_icon(&self, bytes: &Arc<[u8]>) -> Option<DecodedIcon> {
-        raster::decode_png(bytes).map(Rc::new)
+        decode_icon_bytes(bytes).map(Rc::new)
     }
+}
+
+/// Decode icon bytes to straight-alpha RGBA `(rgba, width, height)`, trying the
+/// PNG codec first and falling back to the [`svg`] rasterizer — the one place
+/// `Icon::Png` and `Icon::Svg` bytes converge onto the shared decoded-icon shape
+/// the drawer's `draw_image` blit consumes.
+pub(crate) fn decode_icon_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    raster::decode_png(bytes).or_else(|| svg::rasterize_svg(bytes))
 }
 
 /// The line-height multiple applied to a font's point size, matching the metric
@@ -932,7 +947,7 @@ impl SceneDrawer for RasterDrawer {
         if let Some(hit) = icon_cache_hit(self.icons.borrow().get(&key), bytes) {
             return Some(hit);
         }
-        let decoded = Rc::new(raster::decode_png(bytes)?);
+        let decoded = Rc::new(decode_icon_bytes(bytes)?);
         let mut cache = self.icons.borrow_mut();
         if cache.len() >= ICON_CACHE_CAP && !cache.contains_key(&key) {
             cache.clear();
