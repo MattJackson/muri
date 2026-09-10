@@ -62,7 +62,8 @@ platform. That single owned surface is what makes these possible:
 
 - **True left / center / right alignment** and multi-column `label … value` rows.
 - **Flush right-aligned values with no reserved chevron column.**
-- **Arbitrary colors, fonts, and embedded logos** (PNG or SVG bytes).
+- **Arbitrary colors, fonts, and embedded logos** (PNG bytes; an `Icon::Svg`
+  variant exists but SVG rasterization is not wired up yet — supply PNG for now).
 - **Styled nested submenus** (flyout panels beside the row).
 - **One consistent look** that still **follows OS dark/light + accent** by
   default, and is fully overridable via a theme API.

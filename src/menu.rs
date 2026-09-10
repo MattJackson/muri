@@ -69,13 +69,19 @@ pub type ClickHandler = Box<dyn Fn(&MenuId) + Send + 'static>;
 // Icons
 // =============================================================================
 
-/// A leading/trailing icon or logo. Raster formats are decoded at load; SVGs
-/// are rasterized per-DPI at draw time so they stay crisp on HiDPI.
+/// A leading/trailing icon or logo. Raster (PNG) bytes are decoded at load.
+///
+/// **Note:** muri does not yet ship an SVG rasterizer (it keeps a minimal
+/// dependency set — see the ADR), so [`Icon::Svg`] is currently **not rendered**
+/// on any backend and is treated as "no drawable image"; supply a PNG for now.
+/// The variant exists so the API is forward-compatible once SVG rasterization
+/// lands.
 #[derive(Clone, Debug)]
 pub enum Icon {
     /// A PNG (or other auto-detected raster format) from raw bytes.
     Png(Arc<[u8]>),
-    /// An SVG from raw bytes, rasterized per-DPI.
+    /// An SVG from raw bytes. **Not yet rasterized** — see the [`Icon`] note; a
+    /// future release will render these per-DPI. Today it draws nothing.
     Svg(Arc<[u8]>),
     /// The themed checkmark glyph, drawn in the leading column.
     Checkmark,
@@ -89,7 +95,8 @@ impl Icon {
         Icon::Png(bytes.into())
     }
 
-    /// Build an [`Icon::Svg`] from raw SVG bytes.
+    /// Build an [`Icon::Svg`] from raw SVG bytes. **Not yet rasterized** (see the
+    /// [`Icon`] note) — it currently draws nothing; supply a PNG for now.
     pub fn from_svg_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
         Icon::Svg(bytes.into())
     }

@@ -336,7 +336,11 @@ impl MacosAnchor {
             return;
         };
         let mut has_image = false;
-        if let Icon::Png(bytes) | Icon::Svg(bytes) = icon {
+        // Only PNG is decodable here. `Icon::Svg` is not rasterized anywhere in
+        // muri yet (no SVG rasterizer dependency — see `Icon`'s note), so it is
+        // treated as "no image" like Checkmark/Symbol, consistent with the other
+        // backends.
+        if let Icon::Png(bytes) = icon {
             let data = NSData::with_bytes(bytes);
             if let Some(image) =
                 NSImage::initWithData(NSImage::alloc(), &data).filter(|i| i.isValid())
