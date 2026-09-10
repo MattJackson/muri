@@ -89,7 +89,8 @@ use crate::menu::{Icon, Item, Menu, MenuId};
 use crate::platform::{Appearance, Platform};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
-use crate::theme::{MenuOptions, Theme};
+use crate::style::Color;
+use crate::theme::{MenuOptions, Theme, ThemeSource};
 use crate::{Tray, TrayCommand};
 
 /// The private window message the tray icon posts back to its owner window.
@@ -1083,7 +1084,15 @@ impl PopupSession<'_> {
     /// The resolved theme for the current appearance.
     fn theme(&self) -> Theme {
         let dark = self.options.theme.wants_dark(system_is_dark);
-        self.options.theme.resolve_theme(dark)
+        let mut theme = self.options.theme.resolve_theme(dark);
+        // Inject the live OS accent so `Color::Accent` (selection/checkmarks)
+        // follows the Windows accent, matching the macOS path (#14).
+        if matches!(self.options.theme, ThemeSource::FollowSystem) {
+            if let Some((r, g, b, a)) = system_accent() {
+                theme.accent = Color::Rgba(r, g, b, a);
+            }
+        }
+        theme
     }
 
     /// The menu shown at the given level: `0` is the top-level menu, `k` the
@@ -1925,6 +1934,27 @@ fn register_popup_class(hinstance: windows_sys::Win32::Foundation::HINSTANCE, cl
 
 /// Query whether the system uses a dark app theme (`AppsUseLightTheme == 0` under
 /// `HKCU`), defaulting to light if the value can't be read.
+/// The live Windows accent color via `DwmGetColorizationColor` (the DWM
+/// colorization/accent color, `0xAARRGGBB`), or `None` if DWM composition is
+/// off. Injected into `Color::Accent` so the selection/checkmark follows the
+/// user's Windows accent (#14).
+fn system_accent() -> Option<(u8, u8, u8, u8)> {
+    use windows_sys::Win32::Graphics::Dwm::DwmGetColorizationColor;
+    unsafe {
+        let mut color: u32 = 0;
+        let mut opaque: i32 = 0;
+        // Returns S_OK (0) on success; anything else means unavailable.
+        if DwmGetColorizationColor(&mut color, &mut opaque) != 0 {
+            return None;
+        }
+        let a = ((color >> 24) & 0xff) as u8;
+        let r = ((color >> 16) & 0xff) as u8;
+        let g = ((color >> 8) & 0xff) as u8;
+        let b = (color & 0xff) as u8;
+        Some((r, g, b, if a == 0 { 255 } else { a }))
+    }
+}
+
 fn system_is_dark() -> bool {
     unsafe {
         let subkey = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");

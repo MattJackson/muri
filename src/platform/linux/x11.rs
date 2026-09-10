@@ -44,8 +44,8 @@ use crate::keynav::{handle_key, FlyoutFocus, MenuFocus, NavAction, NavKey};
 use crate::menu::{Item, Menu, MenuId};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
-use crate::style::Rgba;
-use crate::theme::{MenuOptions, Theme};
+use crate::style::{Color, Rgba};
+use crate::theme::{MenuOptions, Theme, ThemeSource};
 
 /// Device-scale factor the X11 popup rasterizes at.
 ///
@@ -949,7 +949,14 @@ fn present(
 /// backends' resolution; the Linux styled panel is opaque per spec 22 §6).
 fn resolve_theme(options: &MenuOptions, dark: bool) -> Theme {
     let wants_dark = options.theme.wants_dark(|| dark);
-    options.theme.resolve_theme(wants_dark)
+    let mut theme = options.theme.resolve_theme(wants_dark);
+    // Inject the live GNOME accent so `Color::Accent` follows the desktop (#14).
+    if matches!(options.theme, ThemeSource::FollowSystem) {
+        if let Some((r, g, b, a)) = super::system_accent() {
+            theme.accent = Color::Rgba(r, g, b, a);
+        }
+    }
+    theme
 }
 
 /// Whether an X11 popup is possible right now: an X server (incl. XWayland) is
