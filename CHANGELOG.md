@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Release-gate code-audit fixes (10-lens audit of the 0.9.x tray/facade work).
+## [0.9.4] - 2026-09-09
+
+The last menu-parity fix for the first adopter, plus release-gate code-audit
+fixes (a 10-lens audit of the 0.9.x tray/facade work).
 
 ### Added
 
@@ -16,6 +19,13 @@ Release-gate code-audit fixes (10-lens audit of the 0.9.x tray/facade work).
   loop (and the spawned `muri-tray` thread).
 
 ### Fixed
+
+- **`muda-compat`: `IconMenuItem` raw-RGBA leading icons now render (#9)** — a
+  provider logo on a menu row (supplied via `Icon::from_rgba`, the only compat
+  icon constructor) was dropped in the custom-surface translation, so header rows
+  showed text only. The RGBA is now encoded to PNG (`render::encode_rgba_png`) and
+  carried as an `Icon::Png` leading image — the same bridge the tray icon uses,
+  extended to menu items. (`NativeIcon` still maps to `Icon::Symbol`.)
 
 - **`muda-compat`: dropping a `TrayIcon` now removes the OS tray icon** — the
   facade spawned a background tray thread and discarded it with no `Drop`, so
