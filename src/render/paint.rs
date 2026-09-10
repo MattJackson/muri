@@ -9,13 +9,67 @@
 //! popup (cheap — menus are small); it returns a [`LaidMenu`] describing the
 //! popup size and the clickable rows for hit-testing.
 
+use std::collections::HashMap;
+
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
 use crate::layout::{resolve_segments, SegmentMetrics};
 use crate::menu::{Icon, Item, MenuId, Row, Segment};
 use crate::render::{SceneDrawer, TextRun};
-use crate::style::{Font, Rgba, Weight};
+use crate::style::{Font, FontFamily, Rgba, Weight};
 use crate::theme::{MenuOptions, Theme};
 use crate::Menu;
+
+/// A scratch memo of `(text, font)` -> measured width, cleared at the start of
+/// every [`render_menu`] call. A row's segments are measured once for the width
+/// pass (`row_intrinsic`) and again while laying out the draw pass
+/// (`draw_row_content`'s `SegmentMetrics` + per-styled-piece widths); without
+/// this cache the same `(text, font)` gets re-shaped through the drawer's text
+/// engine up to 3× per frame for no behavioral difference.
+type MeasureCache = HashMap<MeasureKey, f32>;
+
+#[derive(PartialEq, Eq, Hash)]
+struct MeasureKey {
+    text: String,
+    family_tag: u8,
+    family_name: String,
+    size_bits: u32,
+    weight: u16,
+}
+
+impl MeasureKey {
+    fn new(text: &str, font: &Font) -> Self {
+        let (family_tag, family_name) = match &font.family {
+            FontFamily::System => (0u8, String::new()),
+            FontFamily::SystemMono => (1u8, String::new()),
+            FontFamily::Named(name) => (2u8, name.clone()),
+        };
+        MeasureKey {
+            text: text.to_string(),
+            family_tag,
+            family_name,
+            size_bits: font.size.to_bits(),
+            weight: font.weight.ot_weight(),
+        }
+    }
+}
+
+/// Measure `text` in `font` through `drawer`, memoizing in `cache` so an
+/// identical `(text, font)` pair within the same frame is only shaped once.
+/// Output is identical to calling `drawer.measure_text` directly every time.
+fn measure_cached<D: SceneDrawer>(
+    drawer: &D,
+    cache: &mut MeasureCache,
+    text: &str,
+    font: &Font,
+) -> f32 {
+    let key = MeasureKey::new(text, font);
+    if let Some(&w) = cache.get(&key) {
+        return w;
+    }
+    let w = drawer.measure_text(text, font);
+    cache.insert(key, w);
+    w
+}
 
 /// A resolved, clickable row in a painted menu (window-relative logical coords).
 #[derive(Clone, Debug)]
@@ -92,15 +146,29 @@ fn row_font(row: &Row, seg: &Segment, base: &Font) -> Font {
 }
 
 /// Measure the intrinsic width a row's segments want (sum of segment widths plus
-/// inter-segment gaps), using the drawer's text metrics.
-fn row_intrinsic<D: SceneDrawer>(d: &D, row: &Row, base: &Font, gap: f32) -> f32 {
+/// inter-segment gaps), using the drawer's text metrics. Weight-aware and split
+/// exactly as the (un-highlighted) draw pass will render the row, so a segment
+/// carrying a bolder `StyleRun` is sized at the bold advance — the popup width
+/// then never under-fits the text. `base_color` is the row's resolved base color
+/// (the highlight overlay is a hover-time repaint that must not resize the
+/// popup, so the width pass always measures the un-highlighted split).
+fn row_intrinsic<D: SceneDrawer>(
+    d: &D,
+    cache: &mut MeasureCache,
+    row: &Row,
+    base: &Font,
+    base_color: Rgba,
+    theme: &Theme,
+    gap: f32,
+) -> f32 {
     if row.segments.is_empty() {
         return 0.0;
     }
     let mut w = 0.0;
     for (i, seg) in row.segments.iter().enumerate() {
         let font = row_font(row, seg, base);
-        w += d.measure_text(&seg.text, &font);
+        let seg_base = seg_base_color(seg, theme, base_color, false);
+        w += measure_segment(d, cache, seg, &font, theme, seg_base, false);
         if i + 1 < row.segments.len() {
             w += gap;
         }
@@ -118,16 +186,27 @@ fn item_row(item: &Item) -> Option<&Row> {
 
 /// Split a segment's text into consecutive styled pieces by its UTF-16
 /// [`StyleRun`](crate::StyleRun) spans, falling back to `base_color`/`base_weight`.
+///
+/// `StyleRun` colors resolve against the **live** `theme` so a semantic run color
+/// (`Label`/`SecondaryLabel`/`Accent`/`Separator`) is correct in dark mode, not
+/// baked against a hard-coded light palette (spec §7.3).
+///
+/// When `highlighted` (the row is filled with the accent and every other glyph —
+/// label, checkmark, chevron — is forced to `base_color`, i.e. white), a run's
+/// semantic color is **suppressed** so styled runs invert with the rest of the
+/// row instead of rendering, say, saturated red on accent blue. Per-run *weight*
+/// overrides still apply in both states.
 fn style_pieces(
     seg: &Segment,
     base_color: Rgba,
     base_weight: Weight,
+    theme: &Theme,
+    highlighted: bool,
 ) -> Vec<(String, Rgba, Weight)> {
     if seg.runs.is_empty() {
         return vec![(seg.text.clone(), base_color, base_weight)];
     }
     // Map each char to (color, weight) by walking UTF-16 offsets.
-    let theme = Theme::light(); // literal/system colors resolve theme-independently
     let mut pieces: Vec<(String, Rgba, Weight)> = Vec::new();
     let mut u16_idx = 0usize;
     for ch in seg.text.chars() {
@@ -135,7 +214,9 @@ fn style_pieces(
         let mut weight = base_weight;
         for run in &seg.runs {
             if u16_idx >= run.start && u16_idx < run.start + run.len {
-                color = theme.resolve(run.color);
+                if !highlighted {
+                    color = theme.resolve(run.color);
+                }
                 if let Some(w) = run.weight {
                     weight = w;
                 }
@@ -151,28 +232,46 @@ fn style_pieces(
     pieces
 }
 
-fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let pm = tiny_skia::Pixmap::decode_png(bytes).ok()?;
-    let (w, h) = (pm.width(), pm.height());
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    for (i, px) in pm.pixels().iter().enumerate() {
-        let a = px.alpha();
-        let (r, g, b) = if a == 0 {
-            (0, 0, 0)
-        } else {
-            let a32 = a as u32;
-            (
-                (px.red() as u32 * 255 / a32).min(255) as u8,
-                (px.green() as u32 * 255 / a32).min(255) as u8,
-                (px.blue() as u32 * 255 / a32).min(255) as u8,
-            )
-        };
-        out[i * 4] = r;
-        out[i * 4 + 1] = g;
-        out[i * 4 + 2] = b;
-        out[i * 4 + 3] = a;
+/// The effective base color for a segment's un-styled chars, matching what the
+/// draw pass uses: the highlight override (white) wins; otherwise an explicit
+/// per-segment color; else the row's base color. Shared by the width pass, the
+/// draw-pass metrics, and the draw loop so all three split into *identical*
+/// pieces (piece boundaries depend on this color, and a different split changes
+/// the summed width via cross-piece kerning).
+fn seg_base_color(seg: &Segment, theme: &Theme, base_color: Rgba, highlighted: bool) -> Rgba {
+    if highlighted {
+        Rgba::WHITE
+    } else if let Some(c) = seg.color {
+        theme.resolve(c)
+    } else {
+        base_color
     }
-    Some((out, w, h))
+}
+
+/// The rendered width of a segment, measured the *same way it is drawn*: each
+/// `StyleRun` weight override changes glyph advances, so the width is the sum of
+/// the per-piece advances at each piece's weight — not the whole string measured
+/// once at the base weight (which under-sizes a segment containing a bolder run
+/// and lets a right-aligned / flex run overflow its box). `base_color` and
+/// `highlighted` must be the same values the draw pass will use for this segment
+/// so the piece split — and hence the summed width — is identical to the drawn
+/// advance.
+fn measure_segment<D: SceneDrawer>(
+    drawer: &D,
+    cache: &mut MeasureCache,
+    seg: &Segment,
+    font: &Font,
+    theme: &Theme,
+    base_color: Rgba,
+    highlighted: bool,
+) -> f32 {
+    style_pieces(seg, base_color, font.weight, theme, highlighted)
+        .iter()
+        .map(|(text, _color, weight)| {
+            let pf = font.clone().with_weight(*weight);
+            measure_cached(drawer, cache, text, &pf)
+        })
+        .sum()
 }
 
 /// Lay out and paint `menu` through `drawer`, highlighting the top-level item at
@@ -200,16 +299,35 @@ pub fn render_menu<D: SceneDrawer>(
         0.0
     };
 
+    // Scratch text-measurement memo, cleared every call (see `MeasureCache`).
+    let mut measure_cache: MeasureCache = HashMap::new();
+
     // ---- Pass 1: width & height ----
     let mut max_content = 0.0_f32;
     for item in &menu.items {
         if let Some(row) = item_row(item) {
-            let font = if matches!(item, Item::SectionHeader(_)) {
+            let is_header = matches!(item, Item::SectionHeader(_));
+            let font = if is_header {
                 &theme.header_font
             } else {
                 &base_font
             };
-            max_content = max_content.max(row_intrinsic(drawer, row, font, gap));
+            // The row's un-highlighted base color, matching draw_row_content so
+            // the width pass splits into the same pieces the draw pass advances.
+            let base_color = if is_header || !row.enabled {
+                theme.resolve(theme.secondary_label)
+            } else {
+                theme.resolve(theme.label)
+            };
+            max_content = max_content.max(row_intrinsic(
+                drawer,
+                &mut measure_cache,
+                row,
+                font,
+                base_color,
+                theme,
+                gap,
+            ));
         }
     }
 
@@ -260,6 +378,7 @@ pub fn render_menu<D: SceneDrawer>(
             Item::SectionHeader(row) => {
                 draw_row_content(
                     drawer,
+                    &mut measure_cache,
                     row,
                     theme,
                     &theme.header_font,
@@ -299,6 +418,7 @@ pub fn render_menu<D: SceneDrawer>(
                 };
                 draw_row_content(
                     drawer,
+                    &mut measure_cache,
                     row,
                     theme,
                     &base_font,
@@ -327,6 +447,7 @@ pub fn render_menu<D: SceneDrawer>(
 #[allow(clippy::too_many_arguments)]
 fn draw_row_content<D: SceneDrawer>(
     drawer: &mut D,
+    cache: &mut MeasureCache,
     row: &Row,
     theme: &Theme,
     base_font: &Font,
@@ -350,12 +471,14 @@ fn draw_row_content<D: SceneDrawer>(
         );
         match &row.leading {
             Some(Icon::Png(bytes)) => {
-                if let Some((rgba, w, h)) = decode_png(bytes) {
-                    drawer.draw_image(&rgba, w, h, icon_rect);
+                if let Some(decoded) = drawer.decode_icon(bytes) {
+                    let (rgba, w, h) = &*decoded;
+                    drawer.draw_image(rgba, *w, *h, icon_rect);
                 }
             }
             Some(Icon::Checkmark) => draw_glyph_centered(
                 drawer,
+                cache,
                 "\u{2713}",
                 base_font,
                 Weight::Bold,
@@ -371,6 +494,7 @@ fn draw_row_content<D: SceneDrawer>(
                 if row.checked == Some(true) {
                     draw_glyph_centered(
                         drawer,
+                        cache,
                         "\u{2713}",
                         base_font,
                         Weight::Bold,
@@ -393,7 +517,12 @@ fn draw_row_content<D: SceneDrawer>(
             .iter()
             .map(|seg| {
                 let font = row_font(row, seg, base_font);
-                SegmentMetrics::new(drawer.measure_text(&seg.text, &font), seg.flex, seg.align)
+                let seg_base = seg_base_color(seg, theme, base_color, highlighted);
+                SegmentMetrics::new(
+                    measure_segment(drawer, cache, seg, &font, theme, seg_base, highlighted),
+                    seg.flex,
+                    seg.align,
+                )
             })
             .collect();
         let boxes = resolve_segments(&metrics, band_w);
@@ -401,18 +530,12 @@ fn draw_row_content<D: SceneDrawer>(
             let font = row_font(row, seg, base_font);
             let lh = drawer.line_height(&font);
             let text_top = ry + (rh - lh) / 2.0;
-            let seg_base = if highlighted {
-                Rgba::WHITE
-            } else if let Some(c) = seg.color {
-                theme.resolve(c)
-            } else {
-                base_color
-            };
-            let pieces = style_pieces(seg, seg_base, font.weight);
+            let seg_base = seg_base_color(seg, theme, base_color, highlighted);
+            let pieces = style_pieces(seg, seg_base, font.weight, theme, highlighted);
             let mut px = band_x + bx.text_x;
             for (text, color, weight) in pieces {
                 let pf = font.clone().with_weight(weight);
-                let w = drawer.measure_text(&text, &pf);
+                let w = measure_cached(drawer, cache, &text, &pf);
                 drawer.draw_text(&TextRun {
                     text: &text,
                     origin: LogicalPoint::new(px, text_top),
@@ -433,6 +556,7 @@ fn draw_row_content<D: SceneDrawer>(
         );
         draw_glyph_centered(
             drawer,
+            cache,
             "\u{203A}", // ›
             base_font,
             Weight::Regular,
@@ -446,8 +570,10 @@ fn draw_row_content<D: SceneDrawer>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_glyph_centered<D: SceneDrawer>(
     drawer: &mut D,
+    cache: &mut MeasureCache,
     glyph: &str,
     base_font: &Font,
     weight: Weight,
@@ -455,7 +581,7 @@ fn draw_glyph_centered<D: SceneDrawer>(
     rect: LogicalRect,
 ) {
     let font = base_font.clone().with_weight(weight);
-    let w = drawer.measure_text(glyph, &font);
+    let w = measure_cached(drawer, cache, glyph, &font);
     let lh = drawer.line_height(&font);
     let origin = LogicalPoint::new(
         rect.origin.x + (rect.size.width - w) / 2.0,
@@ -519,11 +645,87 @@ mod tests {
         let (dw, dh) = d.device_size();
         assert_eq!(dw, (laid.size.width * 2.0).round() as u32);
         assert_eq!(dh, (laid.size.height * 2.0).round() as u32);
-        let any_opaque = d.pixmap().pixels().iter().any(|p| p.alpha() > 0);
+        let any_opaque = d.framebuffer().pixels().chunks_exact(4).any(|p| p[3] > 0);
         assert!(
             any_opaque,
             "rendered pixmap should not be fully transparent"
         );
+    }
+
+    /// Regression for spec §7.3: a `StyleRun` carrying a **semantic** color must
+    /// resolve against the *active* theme, not a hard-coded `Theme::light()`, so
+    /// a themed run reads correctly in dark mode. `Color::Label` is white on dark
+    /// and black on light; the old seam returned black in both.
+    #[test]
+    fn style_run_semantic_color_follows_active_theme() {
+        // A two-char segment whose second char is a `Color::Label` style run.
+        let seg = Segment::new("ab").runs(vec![StyleRun::new(1, 1, Color::Label)]);
+        let base = Rgba::opaque(1, 2, 3);
+
+        let dark = style_pieces(&seg, base, Weight::Regular, &Theme::dark(), false);
+        let light = style_pieces(&seg, base, Weight::Regular, &Theme::light(), false);
+
+        // The styled piece ("b") resolves Label against each theme.
+        let dark_b = dark.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        let light_b = light.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        assert_eq!(dark_b.1, Theme::dark().resolve(Color::Label));
+        assert_eq!(light_b.1, Theme::light().resolve(Color::Label));
+        // And they actually differ (white vs black), proving the theme is live.
+        assert_ne!(dark_b.1, light_b.1);
+    }
+
+    /// On a highlighted (accent-filled) row every glyph inverts to the base
+    /// color; a `StyleRun`'s semantic color must be suppressed so it doesn't
+    /// render, e.g., saturated red on accent blue — but weight overrides stay.
+    #[test]
+    fn style_run_color_is_suppressed_when_highlighted_but_weight_is_kept() {
+        let seg = Segment::new("ab").runs(vec![
+            StyleRun::new(1, 1, Color::SystemRed).weight(Weight::Bold)
+        ]);
+        let white = Rgba::WHITE;
+
+        let hot = style_pieces(&seg, white, Weight::Regular, &Theme::light(), true);
+        for (_s, c, _w) in &hot {
+            assert_eq!(
+                *c, white,
+                "highlighted row keeps every piece at the base color"
+            );
+        }
+        let hot_b = hot.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        assert_eq!(hot_b.2, Weight::Bold, "weight override survives highlight");
+
+        // Un-highlighted, the semantic color resolves as before.
+        let cold = style_pieces(&seg, white, Weight::Regular, &Theme::light(), false);
+        let cold_b = cold.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        assert_eq!(cold_b.1, Theme::light().resolve(Color::SystemRed));
+    }
+
+    /// A segment carrying a bolder `StyleRun` must be measured at the run's
+    /// weight, not the base weight, so its box matches what `draw_row_content`
+    /// actually advances (else a right-aligned run overflows). The measured
+    /// width equals the sum of the per-piece advances the draw path uses.
+    #[test]
+    fn measure_segment_accounts_for_per_run_weight() {
+        let d = crate::render::RasterDrawer::new_headless(1.0);
+        let mut cache = MeasureCache::new();
+        let font = Font::default();
+        let theme = Theme::light();
+
+        let seg =
+            Segment::new("Quit").runs(vec![StyleRun::new(0, 4, Color::Label).weight(Weight::Bold)]);
+        let measured = measure_segment(&d, &mut cache, &seg, &font, &theme, Rgba::WHITE, false);
+
+        // Same computation the draw loop performs, piece by piece.
+        let drawn: f32 = style_pieces(&seg, Rgba::WHITE, font.weight, &theme, false)
+            .iter()
+            .map(|(t, _c, w)| measure_cached(&d, &mut cache, t, &font.clone().with_weight(*w)))
+            .sum();
+        assert_eq!(measured, drawn);
+
+        // And it is never narrower than the naive base-weight measure the old
+        // code used (bold advances are >= regular for the vendored face).
+        let naive = measure_cached(&d, &mut cache, &seg.text, &font);
+        assert!(measured >= naive);
     }
 
     #[test]
@@ -543,5 +745,59 @@ mod tests {
         );
         assert_eq!(laid.hit(center), Some(account.index));
         assert_eq!(laid.id_at(center).unwrap().as_str(), "switch:claude:me");
+    }
+
+    /// `measure_cached`'s doc promise ("output is identical to calling
+    /// `drawer.measure_text` directly every time") is what makes the
+    /// per-frame memo safe: prove both the cold path (first call, a miss)
+    /// and the warm path (second call, a hit) return exactly what a direct,
+    /// uncached `measure_text` call would — i.e. the memoization can't drift
+    /// from the ground truth it's short-circuiting.
+    #[test]
+    fn measure_cached_matches_a_direct_measure_text_call() {
+        let d = crate::render::RasterDrawer::new_headless(1.0);
+        let font = Font::system(13.0, Weight::Regular);
+        let text = "Settings";
+
+        let direct = d.measure_text(text, &font);
+
+        let mut cache: MeasureCache = HashMap::new();
+        let cold = measure_cached(&d, &mut cache, text, &font);
+        assert_eq!(
+            cold, direct,
+            "first (cache-miss) call must match measure_text"
+        );
+        assert_eq!(cache.len(), 1);
+
+        let warm = measure_cached(&d, &mut cache, text, &font);
+        assert_eq!(
+            warm, direct,
+            "second (cache-hit) call must still match measure_text"
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "a repeat (text, font) must not grow the cache"
+        );
+    }
+
+    /// Distinct `(text, font)` keys must not collide in the cache — a
+    /// different font size for the same text is a different measurement and
+    /// must get its own entry and its own (independently correct) value.
+    #[test]
+    fn measure_cached_distinguishes_different_fonts_for_the_same_text() {
+        let d = crate::render::RasterDrawer::new_headless(1.0);
+        let text = "Settings";
+        let small = Font::system(11.0, Weight::Regular);
+        let large = Font::system(22.0, Weight::Regular);
+
+        let mut cache: MeasureCache = HashMap::new();
+        let w_small = measure_cached(&d, &mut cache, text, &small);
+        let w_large = measure_cached(&d, &mut cache, text, &large);
+
+        assert_eq!(w_small, d.measure_text(text, &small));
+        assert_eq!(w_large, d.measure_text(text, &large));
+        assert!(w_large > w_small, "a larger font must measure wider");
+        assert_eq!(cache.len(), 2);
     }
 }
