@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-09
+
+Patch release in the 0.9.x testing cycle: the `muda-compat` tray facade now
+installs a **live** OS tray, so the icon actually appears — the root cause behind
+the first adopter's Linux (#6) and Windows (#7) "tray icon does not appear"
+reports. The on-device appearance is `DEVICE-VERIFY(0.9.2)` (verified on real
+Windows and GNOME desktops as part of the 0.9.x cycle).
+
+### Fixed
+
+- **`muda-compat`: the facade never drove a platform tray (#6, #7)** —
+  `TrayIconBuilder::build()` built a muri `Tray` but never ran any backend, so no
+  OS tray icon was ever registered on any platform. `build()` now installs a live
+  tray without blocking, via a new non-blocking `Tray::spawn()` (a
+  `Platform::spawn_tray` seam): Windows and Linux run the native pump on a
+  dedicated background thread; macOS installs the status item on the main thread
+  and relies on the host's `NSApplication` run loop (best-effort). The facade
+  drives it through a `TrayHandle` (`set_icon`/`set_menu`/`set_tooltip`/
+  `set_visible` post to the running tray).
+- **`muda-compat`: the tray icon's RGBA never reached the drawn tray (D6)** — the
+  facade carried the icon as raw RGBA but built the tray with a placeholder
+  symbol, so the Linux SNI `icon_pixmap` / Windows `HICON` were empty and hosts
+  dropped the item. The RGBA is now encoded to PNG (`render::encode_rgba_png`) and
+  handed to the tray as `Icon::Png`, closing divergence D6 for the facade.
+
+### Added
+
+- **`Tray::spawn()`** — a non-blocking counterpart to `Tray::run()` that installs
+  the tray and returns a `TrayHandle`, for hosts that own their own event loop.
+- **`render::encode_rgba_png()`** — encode straight-alpha RGBA8 pixels to PNG
+  bytes (the bridge from a raw-RGBA icon to muri's encoded-bytes `Icon`).
+
 ## [0.9.1] - 2026-09-09
 
 Patch release in the 0.9.x testing cycle: `muda-compat` drop-in parity fixes found
