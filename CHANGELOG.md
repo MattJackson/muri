@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-10
+
+### Documentation
+
+- **Linux SNI/AppIndicator native-menu layout boundary (#15)** — documented that
+  the Linux tray menu is the `com.canonical.dbusmenu` menu **rendered by the host
+  (GNOME Shell / KDE)**, not muri's painter: it has no right-aligned tab-stop
+  column (a `label\tvalue` row is flattened via `Row::accessible_name`) and the
+  host decides which side a leading icon draws on. muda/tray-icon share this host
+  menu on Linux and the same limitation. Callers needing muri's exact OEM row
+  layout on Linux should use `ContextMenu::open_at`, which renders through muri's
+  X11 styled popup and honors every `Segment`/`Flex`/`Align` — identical to the
+  macOS/Windows tray popup.
+
+### Tests
+
+- Regression tests locking the #15 cases at the layers muri actually renders: the
+  muda→muri conversion produces a **leading** `Icon::Png` for a disabled
+  `IconMenuItem` and `[Grow, Right]` segments for a `label\tvalue` `Submenu`, and
+  the painter draws the icon in the left gutter and right-aligns both `\t` values
+  to one shared column. No runtime behavior change.
+
 ## [0.10.0] - 2026-09-10
 
 ### Added
