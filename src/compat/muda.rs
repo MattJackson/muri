@@ -18,9 +18,11 @@
 //! - `Position` is a small facade type, not the real `dpi::Position`; only the
 //!   `None` (current-cursor) form is exercised by the worked migration (spec
 //!   `02` §6). This is best-effort until muri pins muda's `dpi` version.
-//! - `IconMenuItem` built from raw RGBA drops its leading icon in the muri
-//!   translation (muri [`Icon`](crate::menu::Icon) carries encoded bytes, not raw
-//!   RGBA — spec `02` §4.5; divergence D6); a `NativeIcon` maps to
+//! - `IconMenuItem` built from raw RGBA renders its leading icon in the muri
+//!   custom surface: the RGBA is encoded to PNG
+//!   ([`render::encode_rgba_png`](crate::render)) and carried as an
+//!   [`Icon::Png`](crate::menu::Icon::Png) — the same bridge the tray icon uses
+//!   (issue #9). A `NativeIcon` maps to
 //!   [`Icon::Symbol`](crate::menu::Icon::Symbol).
 //! - `Accelerator` is displayed only (spec `02` §5, divergence D5); the facade
 //!   parses a useful subset of muda's `Code`/`Modifiers`.
@@ -138,9 +140,9 @@ fn resolve_id(id: Option<MenuId>) -> MenuId {
 
 /// A menu/tray icon built from **raw RGBA** bytes, mirroring muda/`tray-icon`'s
 /// `Icon::from_rgba`. muri's own [`Icon`](crate::menu::Icon) carries *encoded*
-/// bytes, so the raw RGBA is retained here and fed to the drawer's image path by
-/// the backend; in the pure translation it currently yields no leading glyph
-/// (divergence D6, spec `02` §4.5).
+/// bytes, so the raw RGBA is encoded to PNG
+/// ([`render::encode_rgba_png`](crate::render)) and handed to the tray icon and
+/// to menu-item leading icons as an [`Icon::Png`](crate::menu::Icon::Png).
 #[derive(Clone, Debug)]
 pub struct Icon {
     /// Straight-alpha RGBA pixels, row-major, 4 bytes per pixel.
@@ -285,10 +287,23 @@ impl MenuItemKind {
                 let mut row = MuriRow::new(s.id.clone())
                     .label(s.text.clone())
                     .enabled(s.enabled);
-                // NativeIcon → Icon::Symbol (D6); raw-RGBA icons drop the glyph
-                // in translation (spec 02 §4.5).
-                if let Some(IconSource::Native(native)) = &s.icon {
-                    row = row.leading(MuriIcon::Symbol(native.symbol_name()));
+                match &s.icon {
+                    // A raw-RGBA icon is encoded to PNG and rendered as the row's
+                    // leading image — the same bridge the tray icon uses
+                    // (`render::encode_rgba_png` → `Icon::Png`), extended to menu
+                    // items so a provider logo on a header row draws (issue #9).
+                    Some(IconSource::Rgba(icon)) => {
+                        if let Some(png) =
+                            crate::render::encode_rgba_png(&icon.rgba, icon.width, icon.height)
+                        {
+                            row = row.leading(MuriIcon::Png(png.into()));
+                        }
+                    }
+                    // A stock NativeIcon maps to a named symbol.
+                    Some(IconSource::Native(native)) => {
+                        row = row.leading(MuriIcon::Symbol(native.symbol_name()));
+                    }
+                    None => {}
                 }
                 MuriItem::Row(row)
             }
@@ -536,8 +551,10 @@ impl IsMenuItem for CheckMenuItem {
 // =============================================================================
 
 enum IconSource {
-    #[allow(dead_code)] // consumed by the backend's image path (D6).
+    /// A raw-RGBA icon ([`Icon::from_rgba`]); encoded to PNG and rendered as the
+    /// row's leading image in the custom surface (issue #9).
     Rgba(Icon),
+    /// A stock icon mapped to a named muri [`Symbol`](MuriIcon::Symbol).
     Native(NativeIcon),
 }
 
@@ -1380,6 +1397,35 @@ mod tests {
                 assert_eq!(menu.items.len(), 1);
             }
             _ => panic!("expected a Submenu"),
+        }
+    }
+
+    #[test]
+    fn icon_menu_item_raw_rgba_renders_as_a_leading_png() {
+        // A raw-RGBA IconMenuItem (the only compat Icon constructor) must reach
+        // the custom surface as a leading Icon::Png, not be dropped (issue #9 —
+        // the menu-item counterpart of the 0.9.2 tray D6 fix).
+        let rgba = vec![9, 8, 7, 255];
+        let icon = Icon::from_rgba(rgba.clone(), 1, 1).expect("valid RGBA");
+        let menu = Menu::new();
+        menu.append(&IconMenuItem::new("Claude", true, Some(icon), None))
+            .unwrap();
+
+        let muri = menu.to_muri_menu();
+        match &muri.items[0] {
+            Item::Row(r) => match &r.leading {
+                Some(MuriIcon::Png(bytes)) => {
+                    let (decoded, w, h) =
+                        crate::render::decode_png(bytes).expect("leading icon PNG decodes");
+                    assert_eq!((w, h), (1, 1));
+                    assert_eq!(
+                        decoded, rgba,
+                        "the RGBA round-trips onto the row's leading icon"
+                    );
+                }
+                other => panic!("expected a leading PNG icon, got {other:?}"),
+            },
+            _ => panic!("expected an icon Row"),
         }
     }
 
