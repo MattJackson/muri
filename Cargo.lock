@@ -682,6 +682,7 @@ dependencies = [
  "accesskit",
  "accesskit_macos",
  "accesskit_windows",
+ "block2 0.6.2",
  "crossbeam-channel",
  "fontdb",
  "harfrust",

@@ -37,16 +37,21 @@ mod a11y;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSColor, NSColorSpace, NSEventMask, NSImage,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDidResignActiveNotification,
+    NSColor, NSColorSpace, NSEvent, NSEventMask, NSImage, NSMenuDidBeginTrackingNotification,
     NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSData, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString,
+};
 
 use crate::anchor::place_popup;
 use crate::error::{Error, Result};
@@ -179,6 +184,19 @@ pub(super) enum UiEvent {
         /// `true` on become-key, `false` on resign-key.
         key: bool,
     },
+    /// A global/local `NSEvent` monitor saw a mouse-down at a global screen point
+    /// (AppKit bottom-left coordinates). The drain dismisses the whole stack when
+    /// the point falls outside every open panel — the click-away path a
+    /// non-activating panel's `resignKey` never delivers (#11).
+    OutsideClick {
+        /// Global screen x (AppKit bottom-left origin).
+        x: f64,
+        /// Global screen y (AppKit bottom-left origin).
+        y: f64,
+    },
+    /// Another menu began tracking, or the app resigned active — dismiss the whole
+    /// stack so at most one menu is ever open (OS menu-tracking parity, #11).
+    Dismiss,
     /// An AccessKit action request (VoiceOver focus/activate) for a panel.
     #[cfg(feature = "a11y")]
     A11yAction {
@@ -211,6 +229,132 @@ impl TrayTarget {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![super(mtm.alloc::<Self>().set_ivars(())), init] }
     }
+}
+
+// =============================================================================
+// Native-menu-parity dismissal (#11)
+// =============================================================================
+
+define_class!(
+    // Notification sink for the two "some other menu is taking over" signals:
+    // `NSMenuDidBeginTrackingNotification` (any other menu-bar / context menu
+    // began tracking) and `NSApplicationDidResignActiveNotification` (focus went
+    // to another app). Either one enqueues a `Dismiss`, mirroring how AppKit's
+    // menu-tracking guarantees exactly one open menu at a time.
+    #[unsafe(super(NSObject))]
+    #[name = "MuriDismissObserver"]
+    #[thread_kind = MainThreadOnly]
+    struct DismissObserver;
+
+    impl DismissObserver {
+        #[unsafe(method(muriDismiss:))]
+        fn muri_dismiss(&self, _n: &NSNotification) {
+            push_event(UiEvent::Dismiss);
+        }
+    }
+);
+
+impl DismissObserver {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![super(mtm.alloc::<Self>().set_ivars(())), init] }
+    }
+}
+
+/// The AppKit-level dismissal watchers armed while a popup is open: the two
+/// `NSEvent` monitors that catch click-away (which a non-activating panel's
+/// `resignKey` misses) and the notification observer for mutual exclusion. Owned
+/// by the [`PopupSession`] for the popup's lifetime and dropped on close, which
+/// unregisters everything exactly once — no monitors/observers leak across
+/// open/close cycles (#11).
+struct DismissWatchers {
+    global_monitor: Option<Retained<AnyObject>>,
+    local_monitor: Option<Retained<AnyObject>>,
+    observer: Retained<DismissObserver>,
+}
+
+impl DismissWatchers {
+    /// Install the monitors + observer. Each callback only enqueues a `UiEvent` +
+    /// asks for a drain (no `AppState` borrow), exactly like every other AppKit
+    /// callback here.
+    fn install(mtm: MainThreadMarker) -> Self {
+        let mask = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown;
+
+        // Global monitor: fires for mouse-downs delivered to OTHER apps / the
+        // desktop — the clicks `resignKey` never reports. Cannot consume the
+        // event (nor should it); it just reports the point.
+        let global_block = RcBlock::new(|_event: NonNull<NSEvent>| {
+            let p = NSEvent::mouseLocation();
+            push_event(UiEvent::OutsideClick { x: p.x, y: p.y });
+        });
+        let global_monitor =
+            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_block);
+
+        // Local monitor: fires for mouse-downs headed into our own process. A
+        // click on a panel is hit-tested away by the drain; a click elsewhere
+        // in-app dismisses. The event is returned unchanged so normal delivery
+        // still happens.
+        let local_block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            let p = NSEvent::mouseLocation();
+            push_event(UiEvent::OutsideClick { x: p.x, y: p.y });
+            event.as_ptr()
+        });
+        // SAFETY: the block returns the `NSEvent*` it was handed, satisfying
+        // `addLocalMonitor...`'s contract.
+        let local_monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_block) };
+
+        let observer = DismissObserver::new(mtm);
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: `observer` responds to `muriDismiss:`; both names are valid
+        // `&'static NSNotificationName`s.
+        unsafe {
+            center.addObserver_selector_name_object(
+                &observer,
+                sel!(muriDismiss:),
+                Some(NSMenuDidBeginTrackingNotification),
+                None,
+            );
+            center.addObserver_selector_name_object(
+                &observer,
+                sel!(muriDismiss:),
+                Some(NSApplicationDidResignActiveNotification),
+                None,
+            );
+        }
+
+        DismissWatchers {
+            global_monitor,
+            local_monitor,
+            observer,
+        }
+    }
+}
+
+impl Drop for DismissWatchers {
+    fn drop(&mut self) {
+        // SAFETY: each token came from an `NSEvent` monitor add and is removed at
+        // most once (taken out of its `Option`); the observer is the one we added.
+        unsafe {
+            if let Some(m) = self.global_monitor.take() {
+                NSEvent::removeMonitor(&m);
+            }
+            if let Some(m) = self.local_monitor.take() {
+                NSEvent::removeMonitor(&m);
+            }
+            NSNotificationCenter::defaultCenter().removeObserver(&self.observer);
+        }
+    }
+}
+
+/// Whether `(x, y)` lies outside every rectangle in `frames`, each given as
+/// `(min_x, min_y, max_x, max_y)`. The click-away decision: a mouse-down outside
+/// all open panels (and the tray button) dismisses the stack. Pure + testable so
+/// the hit-test is covered without a real display (the monitors are
+/// DEVICE-VERIFY).
+fn point_outside_all(frames: &[(f64, f64, f64, f64)], x: f64, y: f64) -> bool {
+    !frames
+        .iter()
+        .any(|&(min_x, min_y, max_x, max_y)| x >= min_x && x <= max_x && y >= min_y && y <= max_y)
 }
 
 // =============================================================================
@@ -544,6 +688,10 @@ struct PopupSession<'a> {
     /// Set when a resign-key left [`PopupSession::focused`] empty; checked after
     /// the drain so a paired become-key (a within-stack transfer) cancels it.
     dismiss_armed: bool,
+    /// AppKit click-away + mutual-exclusion watchers, armed while a popup is open
+    /// and dropped (unregistered) on close. `None` when no popup is showing so no
+    /// monitors/observers ever leak across open/close cycles (#11).
+    watchers: Option<DismissWatchers>,
 }
 
 impl PopupSession<'_> {
@@ -673,6 +821,8 @@ impl PopupSession<'_> {
         if let Some(popup) = self.popup.as_ref() {
             popup.panel.makeKeyAndOrderFront(None);
         }
+        // Arm the click-away + mutual-exclusion watchers now that a panel is up.
+        self.watchers = Some(DismissWatchers::install(self.mtm));
         self.sync_a11y();
     }
 
@@ -801,6 +951,9 @@ impl PopupSession<'_> {
         }
         self.focused.clear();
         self.dismiss_armed = false;
+        // Dropping unregisters both `NSEvent` monitors and the observer exactly
+        // once; a no-op when already `None` (idempotent close).
+        self.watchers = None;
     }
 
     /// Reconcile the open flyout window stack to `target` (per-level parent
@@ -1143,8 +1296,63 @@ impl PopupSession<'_> {
                     }
                 }
             }
+            UiEvent::OutsideClick { x, y } => self.on_outside_click(x, y),
+            UiEvent::Dismiss => {
+                if self.popup.is_some() {
+                    self.close_popup();
+                }
+            }
             #[cfg(feature = "a11y")]
             UiEvent::A11yAction { kind, request } => self.on_a11y_action(kind, request),
+        }
+    }
+
+    /// Every open panel's on-screen frame as `(min_x, min_y, max_x, max_y)` in
+    /// AppKit global (bottom-left) screen coordinates — the hit-test set for a
+    /// click-away decision.
+    fn panel_screen_frames(&self) -> Vec<(f64, f64, f64, f64)> {
+        let mut frames = Vec::with_capacity(1 + self.flyouts.len());
+        let mut push = |panel: &Panel| {
+            let f = panel.panel.frame();
+            frames.push((
+                f.origin.x,
+                f.origin.y,
+                f.origin.x + f.size.width,
+                f.origin.y + f.size.height,
+            ));
+        };
+        if let Some(p) = self.popup.as_ref() {
+            push(p);
+        }
+        for fl in &self.flyouts {
+            push(&fl.panel);
+        }
+        frames
+    }
+
+    /// A monitored mouse-down at a global screen point: dismiss the whole stack
+    /// unless it landed inside an open panel (handled as a row/flyout click) or on
+    /// the tray button (whose own toggle owns that click — dismissing here would
+    /// close-then-reopen). The non-activating panel never gets `resignKey` for
+    /// these clicks, so this monitor-driven path is what actually closes it (#11).
+    fn on_outside_click(&mut self, x: f64, y: f64) {
+        if self.popup.is_none() {
+            return;
+        }
+        let mut frames = self.panel_screen_frames();
+        if let Anchor::Tray(a) = &self.anchor {
+            if let Some(g) = a.geometry() {
+                let bf = g.button_frame;
+                frames.push((
+                    bf.origin.x,
+                    bf.origin.y,
+                    bf.origin.x + bf.size.width,
+                    bf.origin.y + bf.size.height,
+                ));
+            }
+        }
+        if point_outside_all(&frames, x, y) {
+            self.close_popup();
         }
     }
 
@@ -1443,6 +1651,7 @@ fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
         flyouts: Vec::new(),
         focused: HashSet::new(),
         dismiss_armed: false,
+        watchers: None,
     };
 
     let state = Rc::new(RefCell::new(AppState { session, tray }));
@@ -1486,6 +1695,7 @@ fn run_popup_session(
         flyouts: Vec::new(),
         focused: HashSet::new(),
         dismiss_armed: false,
+        watchers: None,
     };
     session.open_popup();
     if session.popup.is_none() {
@@ -1546,6 +1756,29 @@ fn system_accent(_mtm: MainThreadMarker) -> Option<(u8, u8, u8, u8)> {
         to_u8(srgb.blueComponent()),
         to_u8(srgb.alphaComponent()),
     ))
+}
+
+#[cfg(test)]
+mod dismiss_tests {
+    use super::point_outside_all;
+
+    /// The click-away hit-test: a mouse-down inside any open panel (or the tray
+    /// button) keeps the menu open; anywhere else dismisses it (#11).
+    #[test]
+    fn point_outside_all_matches_panel_frames() {
+        // A popup frame and a flyout frame to its right, in AppKit screen coords.
+        let frames = [(100.0, 100.0, 300.0, 400.0), (300.0, 200.0, 480.0, 380.0)];
+        // Inside the popup / the flyout → not outside → keep open.
+        assert!(!point_outside_all(&frames, 150.0, 250.0));
+        assert!(!point_outside_all(&frames, 400.0, 300.0));
+        // A shared edge counts as inside (inclusive bounds).
+        assert!(!point_outside_all(&frames, 300.0, 300.0));
+        // In the desktop gap above / beside both → dismiss.
+        assert!(point_outside_all(&frames, 150.0, 50.0));
+        assert!(point_outside_all(&frames, 600.0, 300.0));
+        // No open panels → every click is outside.
+        assert!(point_outside_all(&[], 150.0, 250.0));
+    }
 }
 
 #[cfg(test)]
