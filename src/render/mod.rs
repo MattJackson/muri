@@ -76,7 +76,9 @@ type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;
 
 /// Cache key for a shaped run: the text, the resolved primary face, the OpenType
 /// weight, and the device pixel size (as raw `f32` bits for exact equality).
-type ShapeKey = (String, Option<FaceId>, u16, u32);
+// (text, primary face, ot_weight, px-bits, tracking-bits). Tracking is part of
+// the key so a tracked and untracked shaping of the same text don't collide (#42).
+type ShapeKey = (String, Option<FaceId>, u16, u32, u32);
 
 /// A [`RasterDrawer::icons`] cache entry: the decoded icon plus a strong
 /// clone of the source `Arc<[u8]>` it was decoded from (see the field doc for
@@ -641,8 +643,18 @@ impl FontStore {
         primary: Option<FaceId>,
         ot_weight: u16,
         px: f32,
+        // Extra tracking added to every glyph advance, in the SAME units as `px`
+        // (logical points when measuring, device px when drawing) so measure and
+        // draw stay proportional (#42). `0.0` is the metrics-only default.
+        tracking: f32,
     ) -> Rc<ShapedLine> {
-        let key = (text.to_owned(), primary, ot_weight, px.to_bits());
+        let key = (
+            text.to_owned(),
+            primary,
+            ot_weight,
+            px.to_bits(),
+            tracking.to_bits(),
+        );
         if let Some(cached) = self.shaped.borrow().get(&key) {
             return Rc::clone(cached);
         }
@@ -690,7 +702,9 @@ impl FontStore {
                     x: pen + pos.x_offset as f32 * s,
                     y: pos.y_offset as f32 * s,
                 });
-                pen += pos.x_advance as f32 * s;
+                // Advance + tracking (native UI engines add size-dependent tracking
+                // a bare shaper doesn't — the macOS System theme sets it, #42).
+                pen += pos.x_advance as f32 * s + tracking;
             }
         }
         let line = Rc::new(ShapedLine { glyphs, width: pen });
@@ -985,7 +999,10 @@ impl SceneDrawer for RasterDrawer {
         let primary = self.fonts.resolve_face(&font.family, ot_weight);
         // Logical width: shape at the font's point size (device-scale is applied
         // by `draw_text`; advances scale linearly, so widths stay consistent).
-        self.fonts.shape(text, primary, ot_weight, font.size).width
+        // Tracking is in logical points here, matching the logical `font.size`.
+        self.fonts
+            .shape(text, primary, ot_weight, font.size, font.letter_spacing)
+            .width
     }
 
     fn line_height(&self, font: &Font) -> f32 {
@@ -1003,7 +1020,10 @@ impl SceneDrawer for RasterDrawer {
         let ot_weight = run.weight.ot_weight();
 
         let primary = self.fonts.resolve_face(&run.font.family, ot_weight);
-        let shaped = self.fonts.shape(run.text, primary, ot_weight, px);
+        // Tracking in device px, matching the device `px` size (measure uses the
+        // logical equivalent, so the two stay proportional).
+        let tracking = run.font.letter_spacing * scale;
+        let shaped = self.fonts.shape(run.text, primary, ot_weight, px, tracking);
         let (ascent, descent) = self.fonts.v_metrics(primary, px);
         // Baseline that vertically centers the line within its box, matching the
         // previous path's `line_y` placement within `Metrics::line_height`.
@@ -1161,6 +1181,31 @@ fn blit_glyph(
 mod tests {
     use super::*;
     use crate::style::FontFamily;
+
+    #[test]
+    fn letter_spacing_widens_measured_text_proportionally() {
+        // #42: a non-zero `letter_spacing` adds tracking to every glyph advance, so
+        // the text measures wider; zero is the metrics-only default (goldens rely
+        // on it). "Quit" is 4 glyphs → ~4 * spacing wider (tracking added per glyph).
+        let drawer = RasterDrawer::new_headless(1.0);
+        let base = Font::system(13.0, crate::style::Weight::Regular);
+        let tracked = base.clone().with_letter_spacing(3.0);
+        let w0 = drawer.measure_text("Quit", &base);
+        let w1 = drawer.measure_text("Quit", &tracked);
+        assert!(w0 > 0.0);
+        let delta = w1 - w0;
+        // 4 glyphs * 3.0 pt of tracking = ~12pt wider (allow slack for shaping).
+        assert!(
+            (delta - 12.0).abs() < 2.0,
+            "expected ~12pt wider with 3pt tracking over 4 glyphs, got {delta}"
+        );
+        // A negative tracking (the macOS System theme's direction) tightens it.
+        let tight = drawer.measure_text("Quit", &base.clone().with_letter_spacing(-1.0));
+        assert!(
+            tight < w0,
+            "negative tracking must tighten: {tight} !< {w0}"
+        );
+    }
 
     #[test]
     fn register_system_font_pins_present_family_data_and_falls_back() {

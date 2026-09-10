@@ -977,6 +977,21 @@ pub(super) fn is_available() -> bool {
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
 }
 
+/// The mouse-pointer position in logical screen coordinates (top-left origin), via
+/// an X11 `QueryPointer` on the root window; `None` if X isn't reachable. The
+/// styled X11 popup uses `SCALE == 1.0`, so logical equals device pixels here.
+///
+/// DEVICE-VERIFY(0.10.7): live X-server pointer read.
+pub(super) fn cursor_position() -> Option<LogicalPoint> {
+    let (conn, screen_num) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let ptr = conn.query_pointer(root).ok()?.reply().ok()?;
+    Some(LogicalPoint::new(
+        ptr.root_x as f32 / SCALE,
+        ptr.root_y as f32 / SCALE,
+    ))
+}
+
 /// The honest Wayland answer when no X11 display is reachable (spec 22 §2, §3): a
 /// Wayland client cannot self-position a popup without a parent surface + input
 /// serial, which this API does not carry.

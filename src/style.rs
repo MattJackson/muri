@@ -128,7 +128,7 @@ impl Weight {
     }
 }
 
-/// A resolved font: family, size (in logical points), and weight.
+/// A resolved font: family, size (in logical points), weight, and tracking.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Font {
     /// The font family.
@@ -137,6 +137,13 @@ pub struct Font {
     pub size: f32,
     /// Weight.
     pub weight: Weight,
+    /// Extra inter-glyph spacing (**tracking**) in logical points, added to every
+    /// glyph advance. `0.0` is the metrics-only default. Native UI text engines
+    /// (CoreText for San Francisco) apply a small size-dependent tracking that a
+    /// bare shaper does not, which reads slightly looser than a real menu; the
+    /// macOS `System` theme sets this so menu text matches native tracking (#42).
+    /// Negative tightens, positive loosens.
+    pub letter_spacing: f32,
 }
 
 impl Default for Font {
@@ -145,6 +152,7 @@ impl Default for Font {
             family: FontFamily::System,
             size: 13.0,
             weight: Weight::Regular,
+            letter_spacing: 0.0,
         }
     }
 }
@@ -156,6 +164,7 @@ impl Font {
             family: FontFamily::System,
             size,
             weight,
+            letter_spacing: 0.0,
         }
     }
 
@@ -165,12 +174,21 @@ impl Font {
             family: FontFamily::SystemMono,
             size,
             weight,
+            letter_spacing: 0.0,
         }
     }
 
     /// Return a copy of this font with a different weight.
     pub fn with_weight(mut self, weight: Weight) -> Self {
         self.weight = weight;
+        self
+    }
+
+    /// Return a copy of this font with the given tracking (extra inter-glyph
+    /// spacing, logical points). See the [`letter_spacing`](Self::letter_spacing)
+    /// field.
+    pub fn with_letter_spacing(mut self, points: f32) -> Self {
+        self.letter_spacing = points;
         self
     }
 }

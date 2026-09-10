@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-09-10
+
+OEM fidelity + ergonomics. Native-parity tracking, cursor-anchored context menus,
+and a way to detect a failed tray install.
+
+### Added
+
+- **Font tracking (`Font::letter_spacing`).** Per-glyph tracking (letter-spacing)
+  in logical points, threaded through shaping and metrics. The macOS `System`
+  theme now applies a small **negative** tracking to San Francisco (a single tuned
+  constant, `sf_ui_tracking`) so menu text matches native `NSMenu` tightness
+  instead of reading slightly looser (#42). Default `0.0` — existing rendering is
+  byte-identical. (Exact factor is device-verify.)
+- **Cursor-anchored context menus (#1).** `Platform::cursor_position()` on all
+  backends (macOS `NSEvent::mouseLocation`, Windows `GetCursorPos` + per-monitor
+  DPI, X11 `QueryPointer`; `None` on Wayland). The muda-compat context-menu facade
+  now opens a `None`-position menu **at the cursor** like muda, falling back to the
+  screen origin only where the platform can't report the pointer.
+- **Tray-install failure detection (#3).** `TrayIcon::is_live()` and
+  `TrayIconBuilder::build_result()` — `build()` stays infallible (tray-icon
+  parity), but a consumer can now detect (or get the error for) a tray that failed
+  to install instead of a silent passive facade.
+
+### Changed / documented
+
+- **OEM menu mutual-exclusion.** Confirmed the *forward* direction (muri's popup
+  dismisses when any native/OEM menu opens) is wired via the existing
+  `NSMenuDidBeginTracking` observer. Documented that the *reverse* (force-closing an
+  already-open foreign-app native menu when muri opens) is an inherent macOS
+  limitation — muri's non-activating panel can't cancel another process's menu
+  tracking without stealing focus, which would defeat its design.
+- Named the Windows DPI/points magic numbers (`BASE_DPI` = 96, `POINTS_PER_INCH`
+  = 72).
+- `MeasureKey`/shaped-run cache keys include `letter_spacing` so tracked and
+  untracked measurements of the same text can't collide.
+
 ## [0.10.6] - 2026-09-10
 
 Hardening from a second full-codebase audit (10 lenses, fresh eyes). The audit

@@ -279,6 +279,16 @@ define_class!(
     // began tracking) and `NSApplicationDidResignActiveNotification` (focus went
     // to another app). Either one enqueues a `Dismiss`, mirroring how AppKit's
     // menu-tracking guarantees exactly one open menu at a time.
+    //
+    // This gives the FORWARD half of OEM mutual-exclusion: when a native (OEM)
+    // menu opens, muri's popup dismisses — so the two are never both up because a
+    // native one appeared. The REVERSE (muri force-closing an *already-open,
+    // foreign-app* native menu when muri's popup opens) is an inherent macOS
+    // limitation, NOT a muri bug: a foreign app's `NSMenu` tracking session can
+    // only be ended by clicking outside it or by that app deactivating, and muri's
+    // popup is a **non-activating** `NSPanel` by design (it must not steal the
+    // user's keyboard focus), so it does neither. There is no public API to cancel
+    // another process's menu tracking. Documented as a known limitation.
     #[unsafe(super(NSObject))]
     #[name = "MuriDismissObserver"]
     #[thread_kind = MainThreadOnly]
@@ -756,6 +766,13 @@ impl PopupSession<'_> {
             if let Some(font) = read_system_menu_font() {
                 font.apply_size_to(&mut theme);
             }
+            // Native SF tracking (#42): CoreText applies a small size-dependent
+            // tracking to San Francisco that a bare shaper does not, so muri's menu
+            // text otherwise reads slightly *looser* than a real NSMenu. Tighten the
+            // injected System-theme fonts to match. Only System themes get this —
+            // forced/preset/custom faces aren't SF.
+            theme.row_font.letter_spacing = sf_ui_tracking(theme.row_font.size);
+            theme.header_font.letter_spacing = sf_ui_tracking(theme.header_font.size);
             if !transparency_enabled() {
                 theme.make_opaque();
             }
@@ -1655,6 +1672,22 @@ impl Platform for MacPlatform {
         true
     }
 
+    fn cursor_position(&self) -> Option<LogicalPoint> {
+        // `NSEvent::mouseLocation` is global screen coords, **bottom-left** origin;
+        // invert the exact top-left→bottom-left mapping `AnchorGeometry::for_rect`
+        // uses (relative to the main screen) so the result is in the same top-left
+        // logical space `ContextMenu::open_at` consumes.
+        // DEVICE-VERIFY(0.10.7): main-screen resolution; a pointer on a secondary
+        // display shares the tray anchor's multi-monitor flip fragility.
+        let mtm = self.require_mtm().ok()?;
+        let p = NSEvent::mouseLocation();
+        let sf = NSScreen::screens(mtm).firstObject()?.frame();
+        Some(LogicalPoint::new(
+            (p.x - sf.origin.x) as f32,
+            (sf.origin.y + sf.size.height - p.y) as f32,
+        ))
+    }
+
     fn appearance(&self) -> Appearance {
         Appearance::from_is_dark(system_is_dark())
     }
@@ -1897,6 +1930,25 @@ fn run_popup_session(
 fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     let (rgba, w, h) = crate::render::rasterize_svg(bytes)?;
     crate::render::encode_rgba_png(&rgba, w, h)
+}
+
+/// Extra tracking (letter-spacing) in **logical points** for the macOS System
+/// theme's UI font at `size_pt`, approximating the small size-dependent tracking
+/// CoreText applies to San Francisco that a bare shaper does not (#42). muri's
+/// menu text otherwise reads slightly *looser* than a native `NSMenu`, so this is
+/// a slight **tightening** (negative). Applied only to `System` themes (real SF) —
+/// never to forced/preset/custom themes, whose faces aren't SF.
+///
+/// DEVICE-VERIFY(0.10.7): the exact factor needs a side-by-side capture against a
+/// real `NSMenu`. It is deliberately a single, conservative, easily-tuned constant
+/// over the narrow menu-size range (11–14pt) rather than a full optical-size table
+/// — tune [`SF_TRACKING_FRACTION`] once measured on device.
+fn sf_ui_tracking(size_pt: f32) -> f32 {
+    /// Tracking as a fraction of the point size. At the 13pt native menu size this
+    /// is ~-0.16pt of tightening. Direction is from the reported "reads looser"
+    /// symptom; magnitude is conservative and device-verify.
+    const SF_TRACKING_FRACTION: f32 = -0.012;
+    size_pt * SF_TRACKING_FRACTION
 }
 
 /// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],

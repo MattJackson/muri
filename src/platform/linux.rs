@@ -177,6 +177,19 @@ impl Platform for LinuxPlatform {
         self.anchor.supports_tray_anchor()
     }
 
+    fn cursor_position(&self) -> Option<LogicalPoint> {
+        // X11 (incl. XWayland) can report the global pointer; a pure-Wayland
+        // session cannot (no client pointer query) — `None` there is honest. Also
+        // `None` in a tray-only build that compiled out the X11 path (#1).
+        #[cfg(feature = "x11-popup")]
+        {
+            if x11::is_available() {
+                return x11::cursor_position();
+            }
+        }
+        None
+    }
+
     fn appearance(&self) -> Appearance {
         system_appearance()
     }

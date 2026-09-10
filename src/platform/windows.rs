@@ -58,9 +58,9 @@ use std::sync::Once;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, S_OK, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, GetMonitorInfoW, MonitorFromRect,
-    ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, GetMonitorInfoW, MonitorFromPoint,
+    MonitorFromRect, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
@@ -73,11 +73,11 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyWindow, DispatchMessageW, GetMessageW, GetWindowLongPtrW, GetWindowRect, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, GWLP_USERDATA, HC_ACTION, HHOOK, HICON, HWND_MESSAGE, ICONINFO,
-    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_ACTIVATEAPP, WM_APP,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WNDCLASSW,
+    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, GWLP_USERDATA, HC_ACTION, HHOOK, HICON, HWND_MESSAGE,
+    ICONINFO, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_ACTIVATEAPP,
+    WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WNDCLASSW,
 };
 
 use crate::anchor::place_popup;
@@ -92,6 +92,14 @@ use crate::render::RasterDrawer;
 use crate::style::Color;
 use crate::theme::{MenuOptions, OsFamily, Theme};
 use crate::{Tray, TrayCommand};
+
+/// Windows baseline screen DPI: 96 DPI is 100% scale (Win32
+/// `USER_DEFAULT_SCREEN_DPI`); a monitor's effective DPI ÷ this is its scale.
+const BASE_DPI: f32 = 96.0;
+
+/// Typographic points per inch — for device-pixel ↔ point conversion of font
+/// metrics (`GDI` reports `lfHeight` in device pixels).
+const POINTS_PER_INCH: f32 = 72.0;
 
 /// The private window message the tray icon posts back to its owner window.
 const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
@@ -447,7 +455,7 @@ unsafe extern "system" fn wnd_proc(
 /// coordinates (points), using the window's own DPI.
 fn to_logical_client(hwnd: HWND, (x, y): (i32, i32)) -> (f32, f32) {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
-    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / BASE_DPI };
     (x as f32 / scale, y as f32 / scale)
 }
 
@@ -656,7 +664,7 @@ impl WinGeometry {
         let sys_scale = if sys_dpi == 0 {
             1.0
         } else {
-            sys_dpi as f32 / 96.0
+            sys_dpi as f32 / BASE_DPI
         };
         let to_phys = |scale: f32| RECT {
             left: (rect.origin.x * scale).round() as i32,
@@ -679,7 +687,7 @@ impl WinGeometry {
             == S_OK
             && dpi_x != 0
         {
-            dpi_x as f32 / 96.0
+            dpi_x as f32 / BASE_DPI
         } else {
             sys_scale
         };
@@ -972,7 +980,7 @@ impl WindowsAnchor {
             return None;
         }
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
-        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / BASE_DPI };
 
         let id = self.identifier();
         let mut anchor: RECT = unsafe { std::mem::zeroed() };
@@ -2172,7 +2180,7 @@ fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
         // lfHeight < 0 is the char height in device pixels; convert to points at
         // the 96-DPI baseline (the size is a secondary refinement).
         let point_size = if lf.lfHeight < 0 {
-            (-lf.lfHeight as f32) * 72.0 / 96.0
+            (-lf.lfHeight as f32) * POINTS_PER_INCH / BASE_DPI
         } else {
             0.0
         };
@@ -2272,6 +2280,29 @@ impl Platform for WindowsPlatform {
 
     fn supports_tray_anchor(&self) -> bool {
         self.anchor.supports_tray_anchor()
+    }
+
+    fn cursor_position(&self) -> Option<LogicalPoint> {
+        // `GetCursorPos`: physical pixels, virtual-screen space, top-left origin.
+        // Convert to logical using the effective DPI of the monitor under the
+        // cursor — the same `physical / scale` logical space the popup path uses.
+        // DEVICE-VERIFY(0.10.7): per-monitor DPI on a mixed-DPI multi-monitor setup.
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut pt) } == 0 {
+            return None;
+        }
+        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        let mut dpi_x: u32 = 96;
+        let mut dpi_y: u32 = 96;
+        let scale = if !hmon.is_null()
+            && unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) } == S_OK
+            && dpi_x != 0
+        {
+            dpi_x as f32 / BASE_DPI
+        } else {
+            1.0
+        };
+        Some(LogicalPoint::new(pt.x as f32 / scale, pt.y as f32 / scale))
     }
 
     fn appearance(&self) -> Appearance {

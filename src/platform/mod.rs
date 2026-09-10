@@ -191,6 +191,16 @@ pub trait Platform {
     /// [`ContextMenu`](crate::ContextMenu)) up front.
     fn supports_tray_anchor(&self) -> bool;
 
+    /// The current mouse-cursor position in **screen logical coordinates**
+    /// (top-left origin, the same space [`ContextMenu::open_at`](crate::ContextMenu::open_at) takes), or `None`
+    /// when the platform cannot report it (Wayland forbids a client from querying
+    /// the global pointer). Used by the compat context-menu facade to place a
+    /// `None`-position menu at the cursor like muda does. Default `None`; each
+    /// backend overrides it (#1).
+    fn cursor_position(&self) -> Option<crate::geometry::LogicalPoint> {
+        None
+    }
+
     /// The host's current light/dark appearance for the anchor's own monitor.
     fn appearance(&self) -> Appearance;
 

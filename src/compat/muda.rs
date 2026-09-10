@@ -1400,7 +1400,7 @@ pub trait ContextMenu {
     /// muri and is best-effort (divergence D3/D4).
     fn init_for_gtk_window(&self) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on macOS.
+    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on macOS.
     ///
     /// # Safety
     /// `nsview` must be a valid `NSView` pointer. (Signature parity with muda.)
@@ -1410,7 +1410,7 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on Windows.
+    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on Windows.
     ///
     /// # Safety
     /// `hwnd` must be a valid window handle. (Signature parity with muda.)
@@ -1420,7 +1420,7 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the screen origin — muri has no cursor-query helper yet, so pass an explicit point; see `open_custom`) on Linux.
+    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on Linux.
     /// muri takes an **opaque** `*mut c_void` GTK window handle (muda takes an
     /// `&impl IsA<gtk::Widget>`) so the facade needs no GTK dependency yet keeps
     /// muda's call arity — a migrating GTK consumer's positional argument still
@@ -1436,19 +1436,31 @@ pub trait ContextMenu {
 /// is driven by [`ContextMenu::open_at`](crate::ContextMenu::open_at), which
 /// routes through the real platform popup loop; row clicks reach muda's global
 /// [`MenuEvent`] channel via the backend's dispatch. `position` is muda's screen
-/// point; `None` (the "current cursor" form muda supports) has no cursor-query
-/// helper in muri yet, so it falls back to the origin — pass an explicit point.
+/// point; `None` (the "current cursor" form muda supports) resolves to the live
+/// mouse cursor via [`Platform::cursor_position`](crate::Platform::cursor_position),
+/// falling back to the screen origin only where the platform can't report the
+/// pointer (a Wayland session).
 fn open_custom(menu: &Menu, position: Option<Position>) -> Result<()> {
     let surface = menu.build_custom_surface();
-    let point = position
-        .map(|p| crate::LogicalPoint::new(p.x as f32, p.y as f32))
-        .unwrap_or_default();
+    let point = cursor_or_origin(position);
     surface
         .open_at(point, crate::Edge::Bottom)
         .map_err(|e| match e {
             crate::Error::Unsupported(u) => Error::Unsupported(u),
             other => Error::Platform(other.to_string()),
         })
+}
+
+/// The open point for a compat context menu: an explicit muda `position`, else the
+/// live cursor ([`Platform::cursor_position`](crate::Platform::cursor_position)),
+/// else the screen origin (Wayland / no pointer). Matches muda's `None` = "at the
+/// cursor" behavior (#1).
+fn cursor_or_origin(position: Option<Position>) -> crate::LogicalPoint {
+    use crate::platform::Platform as _;
+    position
+        .map(|p| crate::LogicalPoint::new(p.x as f32, p.y as f32))
+        .or_else(|| crate::platform::current().cursor_position())
+        .unwrap_or_default()
 }
 
 impl Menu {
@@ -1470,9 +1482,7 @@ impl Menu {
         options: crate::MenuOptions,
     ) -> Result<()> {
         let surface = self.custom_surface_with_options(options);
-        let point = position
-            .map(|p| crate::LogicalPoint::new(p.x as f32, p.y as f32))
-            .unwrap_or_default();
+        let point = cursor_or_origin(position);
         surface
             .open_at(point, crate::Edge::Bottom)
             .map_err(|e| match e {

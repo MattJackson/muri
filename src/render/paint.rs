@@ -34,6 +34,9 @@ struct MeasureKey {
     family_name: String,
     size_bits: u32,
     weight: u16,
+    // Tracking is part of the key: a tracked and untracked measurement of the same
+    // text have different widths and must not collide (#42).
+    spacing_bits: u32,
 }
 
 impl MeasureKey {
@@ -49,6 +52,7 @@ impl MeasureKey {
             family_name,
             size_bits: font.size.to_bits(),
             weight: font.weight.ot_weight(),
+            spacing_bits: font.letter_spacing.to_bits(),
         }
     }
 }

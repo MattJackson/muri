@@ -386,26 +386,45 @@ impl TrayIconBuilder {
     /// [`crate::Tray::spawn`] directly (which surfaces the `Result`) instead of the
     /// facade.
     pub fn build(self) -> super::muda::Result<TrayIcon> {
+        // Infallible-degrade for tray-icon parity: a spawn failure yields a
+        // passive facade (`handle: None`) rather than an error. Use
+        // [`build_result`](Self::build_result) or [`TrayIcon::is_live`] to detect
+        // a real failure.
+        let handle = self.spawn_handle().ok();
+        Ok(self.into_tray_icon(handle))
+    }
+
+    /// Like [`build`](Self::build) but **surfaces** a real spawn failure instead
+    /// of degrading to a passive facade — returns `Err` when the platform backend
+    /// can't install the tray (issue: `build()` swallowed every error). Off the
+    /// macOS main thread / in a headless session this returns `Err` too, so use
+    /// [`build`](Self::build) for the tray-icon-parity infallible behavior and this
+    /// when you must know the tray is live.
+    pub fn build_result(self) -> super::muda::Result<TrayIcon> {
+        let handle = self.spawn_handle()?;
+        Ok(self.into_tray_icon(Some(handle)))
+    }
+
+    /// Spawn the configured tray, returning the live handle or the real error.
+    fn spawn_handle(&self) -> super::muda::Result<crate::TrayHandle> {
         let tray = self.configured_tray();
+        let marker = crate::MainThreadMarker::new().ok_or_else(|| {
+            super::muda::Error::Platform("a tray must be built on the main thread".into())
+        })?;
+        tray.spawn(marker)
+            .map_err(|e| super::muda::Error::Platform(e.to_string()))
+    }
 
-        // Install + drive the tray without blocking. `Tray::spawn` now requires
-        // a `MainThreadMarker` (issue #46) — obtain one and pass it through.
-        // `MainThreadMarker::new()` is compile-time proof only (see its own
-        // doc), so it always returns `Some` here; the `and_then` still degrades
-        // to a passive facade (rather than failing `build()`) if the platform
-        // backend itself can't install the tray (a headless session, or off the
-        // macOS main thread — e.g. in a unit test), matching tray-icon's build
-        // being infallible in practice.
-        let handle = crate::MainThreadMarker::new().and_then(|m| tray.spawn(m).ok());
-
+    /// Assemble the facade `TrayIcon` around an (optional) live handle.
+    fn into_tray_icon(self, handle: Option<crate::TrayHandle>) -> TrayIcon {
         let id = self.id.unwrap_or_else(|| TrayIconId(next_tray_id()));
-        Ok(TrayIcon {
+        TrayIcon {
             id,
             icon: RefCell::new(self.icon),
             tooltip: RefCell::new(self.tooltip),
             title: RefCell::new(self.title),
             handle,
-        })
+        }
     }
 }
 
@@ -445,6 +464,15 @@ impl TrayIcon {
     /// This tray icon's id.
     pub fn id(&self) -> &TrayIconId {
         &self.id
+    }
+
+    /// Whether a live OS tray is backing this facade. `false` means
+    /// [`TrayIconBuilder::build`] degraded (a headless/off-main-thread
+    /// environment, or a real spawn failure): the icon isn't shown and the
+    /// setters (`set_icon`/`set_tooltip`/…) are no-ops. Use
+    /// [`TrayIconBuilder::build_result`] to get the underlying error instead.
+    pub fn is_live(&self) -> bool {
+        self.handle.is_some()
     }
 
     /// Replace the tray icon image.
@@ -863,6 +891,24 @@ mod tests {
         let rect: Rect = logical.into();
         assert_eq!(rect.position, PhysicalPosition { x: 10.0, y: 20.0 });
         assert_eq!(rect.size, (30.0, 40.0));
+    }
+
+    #[test]
+    fn build_and_build_result_agree_on_liveness() {
+        // #3: `build()` degrades a spawn failure to a passive facade (infallible,
+        // `is_live() == false`); `build_result()` surfaces it as `Err`. Both go
+        // through the same spawn path, so they must agree: `build_result().is_ok()`
+        // iff `build().is_live()`. Portable across environments (whether or not a
+        // tray can actually spawn in the test harness).
+        let live = TrayIconBuilder::new()
+            .build()
+            .expect("build() is infallible")
+            .is_live();
+        let ok = TrayIconBuilder::new().build_result().is_ok();
+        assert_eq!(
+            ok, live,
+            "build_result() must succeed exactly when build() yields a live tray"
+        );
     }
 
     #[test]
