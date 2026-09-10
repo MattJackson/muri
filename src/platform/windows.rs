@@ -1811,6 +1811,12 @@ impl AppState {
                     a.set_tooltip(tip.as_deref());
                 }
             }
+            TrayCommand::SetTitle(title) => {
+                // The Windows notification area has no text label (the menu-bar
+                // title is a macOS concept); retain it, but there is nothing to
+                // draw here.
+                self.tray.title = title;
+            }
             TrayCommand::SetVisible(visible) => {
                 if let Anchor::Tray(a) = &self.session.anchor {
                     a.set_visible(visible);

@@ -293,6 +293,11 @@ impl TrayIconBuilder {
         if let Some(tooltip) = &self.tooltip {
             tray = tray.tooltip(tooltip.clone());
         }
+        // The macOS menu-bar text (e.g. usagio's live "45%"); drawn on the
+        // NSStatusItem, retained-only on Windows/Linux (#8 part 3).
+        if let Some(title) = &self.title {
+            tray = tray.title(title.clone());
+        }
 
         // Install + drive the tray without blocking. Best-effort: if it can't be
         // spawned (a headless session, or off the macOS main thread — e.g. in a
@@ -379,9 +384,14 @@ impl TrayIcon {
         Ok(())
     }
 
-    /// Replace the title (macOS).
+    /// Replace the status-item text title (the macOS menu-bar text). Posted to
+    /// the live tray; a no-op on the drawn item on Windows/Linux.
     pub fn set_title(&self, title: Option<impl Into<String>>) {
-        *self.title.borrow_mut() = title.map(Into::into);
+        let title = title.map(Into::into);
+        if let Some(handle) = &self.handle {
+            handle.set_title(title.clone());
+        }
+        *self.title.borrow_mut() = title;
     }
 
     /// Show or hide the tray icon (posted to the live tray as an SNI/status
@@ -585,5 +595,23 @@ mod tests {
         // No configured icon → the placeholder symbol (never an empty pixmap that
         // a host would drop).
         assert!(matches!(icon_to_muri(&None), MuriIcon::Symbol("tray")));
+    }
+
+    #[test]
+    fn title_is_recorded_from_the_builder_and_setter() {
+        // The macOS menu-bar text (#8 part 3): with_title records it, set_title
+        // replaces and clears it on the facade. (The live NSStatusItem render is
+        // exercised on-device; here we assert the facade-side contract.)
+        let tray = TrayIconBuilder::new()
+            .with_title("45%")
+            .build()
+            .expect("tray builds");
+        assert_eq!(tray.title.borrow().as_deref(), Some("45%"));
+
+        tray.set_title(Some("12%"));
+        assert_eq!(tray.title.borrow().as_deref(), Some("12%"));
+
+        tray.set_title(None::<String>);
+        assert!(tray.title.borrow().is_none());
     }
 }
