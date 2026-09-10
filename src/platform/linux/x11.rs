@@ -311,7 +311,7 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
     // -- placement / open ----------------------------------------------------
 
     fn open_popup(&mut self, anchor: LogicalRect) -> Result<()> {
-        let mut drawer = RasterDrawer::new(SCALE);
+        let mut drawer = RasterDrawer::new_native(SCALE);
         let laid = render_menu(&mut drawer, &self.menu, &self.theme, &self.options, None);
         let origin =
             crate::anchor::place_popup(anchor, laid.size, self.env.work_area, self.edge, POPUP_GAP);
@@ -602,7 +602,7 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             (pp.origin, pp.laid.size, rect)
         };
 
-        let mut drawer = RasterDrawer::new(SCALE);
+        let mut drawer = RasterDrawer::new_native(SCALE);
         let child_laid = render_menu(&mut drawer, &child, &self.theme, &self.options, None);
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
         let placement = place_flyout(parent_rect, row_rect, child_laid.size, self.env.work_area);

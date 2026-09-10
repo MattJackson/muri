@@ -1171,7 +1171,7 @@ impl PopupSession<'_> {
         };
         let scale = geom.scale.max(1.0);
 
-        let mut probe = RasterDrawer::new(scale);
+        let mut probe = RasterDrawer::new_native(scale);
         let laid = render_menu(&mut probe, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -1205,7 +1205,7 @@ impl PopupSession<'_> {
 
         self.popup = Some(Panel {
             hwnd,
-            drawer: RasterDrawer::new(scale),
+            drawer: RasterDrawer::new_native(scale),
             laid: Some(laid),
             cursor: LogicalPoint::default(),
             hovered: None,
@@ -1270,7 +1270,7 @@ impl PopupSession<'_> {
         let Some(geom) = self.anchor.geometry() else {
             return;
         };
-        let mut probe = RasterDrawer::new(scale);
+        let mut probe = RasterDrawer::new_native(scale);
         let child_laid = render_menu(&mut probe, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
@@ -1305,7 +1305,7 @@ impl PopupSession<'_> {
             parent: parent_index,
             panel: Panel {
                 hwnd,
-                drawer: RasterDrawer::new(scale),
+                drawer: RasterDrawer::new_native(scale),
                 laid: None,
                 cursor: LogicalPoint::default(),
                 hovered: None,
@@ -1983,6 +1983,49 @@ impl Platform for WindowsPlatform {
 
     fn appearance(&self) -> Appearance {
         Appearance::from_is_dark(system_is_dark())
+    }
+
+    fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
+        use crate::platform::{SystemFont, SystemFontSource};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
+        };
+        unsafe {
+            let mut ncm: NONCLIENTMETRICSW = std::mem::zeroed();
+            ncm.cbSize = std::mem::size_of::<NONCLIENTMETRICSW>() as u32;
+            let ok = SystemParametersInfoW(
+                SPI_GETNONCLIENTMETRICS,
+                ncm.cbSize,
+                (&mut ncm as *mut NONCLIENTMETRICSW).cast(),
+                0,
+            );
+            if ok == 0 {
+                return None;
+            }
+            let lf = ncm.lfMenuFont;
+            // `lfFaceName` is a null-terminated UTF-16 buffer (typically Segoe UI,
+            // which fontdb resolves by name on Windows).
+            let len = lf
+                .lfFaceName
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(lf.lfFaceName.len());
+            let family = String::from_utf16_lossy(&lf.lfFaceName[..len]);
+            if family.is_empty() {
+                return None;
+            }
+            // lfHeight < 0 is the char height in device pixels; convert to points
+            // at the 96-DPI baseline (the size is a secondary refinement).
+            let point_size = if lf.lfHeight < 0 {
+                (-lf.lfHeight as f32) * 72.0 / 96.0
+            } else {
+                0.0
+            };
+            Some(SystemFont {
+                source: SystemFontSource::Family(family),
+                point_size,
+            })
+        }
     }
 
     fn work_area(&self) -> LogicalRect {

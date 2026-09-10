@@ -28,12 +28,43 @@
 //!
 //! [ADR-0002]: https://github.com/MattJackson/muri/blob/main/docs/design/adr/0002-single-platform-module-per-os-behind-one-trait.md
 
+use std::path::PathBuf;
+
 use crate::error::Result;
 use crate::geometry::{Edge, LogicalRect};
 use crate::keynav::NavKey;
 use crate::menu::{Icon, Menu, MenuId};
 use crate::theme::MenuOptions;
 use crate::Tray;
+
+/// Where the host's native menu-font face data comes from, so the render layer
+/// can register it in its `fontdb` database and resolve
+/// [`FontFamily::System`](crate::FontFamily::System) to the real OS UI face — no
+/// `cfg(target_os)` and no `NSFont`/`HFONT`/CoreText handle crossing the seam.
+#[derive(Debug, Clone)]
+pub enum SystemFontSource {
+    /// Raw font-file bytes to register directly into the database.
+    Data(Vec<u8>),
+    /// A filesystem path to a font file to register.
+    Path(PathBuf),
+    /// A family name already present in the host font database (Windows'
+    /// `Segoe UI`, a Linux desktop's configured UI family) — pinned by name with
+    /// no byte loading.
+    Family(String),
+}
+
+/// The host's native menu font: where to get its face (or family name) and the
+/// point size the OS draws menus at. Acquired OS-specifically by the per-OS
+/// backend ([`Platform::system_menu_font`]) and consumed OS-agnostically by the
+/// renderer.
+#[derive(Debug, Clone)]
+pub struct SystemFont {
+    /// Where the face data (or family name) comes from.
+    pub source: SystemFontSource,
+    /// The OS menu point size (logical points), e.g. ~13.5 on macOS, 9.0 on
+    /// Windows. A non-positive value means "use the theme default".
+    pub point_size: f32,
+}
 
 /// The host's current light/dark appearance, used by the engine to resolve the
 /// [`Theme`](crate::Theme) without ever touching an OS appearance API directly.
@@ -114,6 +145,19 @@ pub trait Platform {
 
     /// The host's current light/dark appearance for the anchor's own monitor.
     fn appearance(&self) -> Appearance;
+
+    /// The host's native menu font (the real OS UI face and its menu point size),
+    /// acquired OS-specifically so the render layer can pin
+    /// [`FontFamily::System`](crate::FontFamily::System) to it — SF Pro on macOS,
+    /// Segoe UI on Windows, the configured UI family on Linux (#10).
+    ///
+    /// Must never panic: a platform that cannot resolve its menu font
+    /// (headless/CI, a sandbox, an acquisition failure) returns `None`, and the
+    /// renderer falls back to its installed-font discovery. The default returns
+    /// `None` for any platform that does not override it.
+    fn system_menu_font(&self) -> Option<SystemFont> {
+        None
+    }
 
     /// The logical work area (screen minus reserved bars) of the monitor the
     /// tray anchor lives on, used to clamp/flip popup placement so it never

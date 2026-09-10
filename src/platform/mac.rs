@@ -617,7 +617,7 @@ impl PopupSession<'_> {
         let scale = geom.scale.max(1.0);
 
         // Measure offscreen to size the panel before it exists (no resize flash).
-        let mut probe = RasterDrawer::new(scale);
+        let mut probe = RasterDrawer::new_native(scale);
         let laid = render_menu(&mut probe, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -655,7 +655,7 @@ impl PopupSession<'_> {
             panel: native.panel,
             view: native.view,
             delegate: native.delegate,
-            drawer: RasterDrawer::new(scale),
+            drawer: RasterDrawer::new_native(scale),
             laid: Some(laid),
             cursor: LogicalPoint::default(),
             hovered: None,
@@ -721,7 +721,7 @@ impl PopupSession<'_> {
         let Some(geom) = self.anchor.geometry() else {
             return;
         };
-        let mut probe = RasterDrawer::new(scale);
+        let mut probe = RasterDrawer::new_native(scale);
         let child_laid = render_menu(&mut probe, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
@@ -757,7 +757,7 @@ impl PopupSession<'_> {
                 panel: native.panel,
                 view: native.view,
                 delegate: native.delegate,
-                drawer: RasterDrawer::new(scale),
+                drawer: RasterDrawer::new_native(scale),
                 laid: None,
                 cursor: LogicalPoint::default(),
                 hovered: None,
@@ -1318,6 +1318,27 @@ impl Platform for MacPlatform {
 
     fn appearance(&self) -> Appearance {
         Appearance::from_is_dark(system_is_dark())
+    }
+
+    fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
+        use crate::platform::{SystemFont, SystemFontSource};
+        // The system menu font (`+[NSFont menuFontOfSize:0]`). Requires the main
+        // thread (AppKit); off it we return None and the renderer keeps its
+        // discovered UI face. Best-effort: SF Pro lives in a protected file
+        // `fontdb` can't load by name, so the family may not resolve — the point
+        // size still applies, and the face falls back cleanly. (Loading the real
+        // SF Pro file via CoreText's URL attribute is future work.)
+        self.require_mtm().ok()?;
+        let font = objc2_app_kit::NSFont::menuFontOfSize(0.0);
+        let family = font.familyName()?.to_string();
+        if family.is_empty() {
+            return None;
+        }
+        let point_size = font.pointSize() as f32;
+        Some(SystemFont {
+            source: SystemFontSource::Family(family),
+            point_size,
+        })
     }
 
     fn work_area(&self) -> LogicalRect {
