@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-09
+
+macOS menu-parity + performance: menu clicks now work on macOS, the menu paints
+~7× faster on hover, the native two-column tab-stop layout is preserved, plus a
+second-round code-audit sweep.
+
+### Fixed
+
+- **macOS: menu clicks now reach every `muda-compat` consumer (#13)** — the
+  macOS tray dispatch ran only the per-surface `on_click` and never projected the
+  activation onto the global `MenuEvent` channel. The facade sets no `on_click`
+  (consumers poll `MenuEvent::receiver()`), so every facade menu item was inert
+  on macOS (Quit didn't quit). The dispatch now emits after the handler, matching
+  the Windows pump.
+- **Menu repaint is ~7× faster (hover no longer lags)** — a hover-highlight
+  re-ran the full text pipeline: recompiling harfrust `ShaperData` per run, and —
+  the dominant cost — re-scanning the entire system font DB for fallback glyphs
+  and re-parsing each font's cmap, on every frame. Now the compiled shaper data,
+  per-`(face,char)` coverage, per-`(char,weight)` fallback decision, and shaped
+  runs are all cached across frames. Measured on a heavy menu: warm repaint
+  187 ms → 27 ms.
+- **`muda-compat`: native two-column tab-stop layout + active checkmark (#12)** —
+  a `label\tvalue` label now splits into a grow-left segment plus a right-aligned
+  trailing column (muda's NSMenu tab stop), and a checked `CheckMenuItem` renders
+  the leading checkmark.
+- **`Icon::from_rgba` rejects zero dimensions** (was accepted, then silently
+  dropped by the encoder — a success that never drew).
+- **`StyleRun` span check uses saturating add** (public `start`/`len` fields
+  could overflow `usize` and panic under debug overflow checks).
+
+### Performance
+
+- The `muda-compat` RGBA→PNG icon encode is cached (`compat::encode_rgba_cached`)
+  so an unchanged logo encodes once and returns a stable `Arc`, restoring the
+  render layer's decode-cache hits across `set_menu` ticks.
+
+### Internal
+
+- macOS `Drop` delegates to `remove()`; the Linux dead `Shutdown` match arm gains
+  a `debug_assert`; two stale "D6" doc references corrected.
+
 ## [0.9.4] - 2026-09-09
 
 The last menu-parity fix for the first adopter, plus release-gate code-audit
