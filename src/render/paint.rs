@@ -604,6 +604,7 @@ mod tests {
     use super::*;
     use crate::menu::{Align, Flex, StyleRun};
     use crate::style::Color;
+    use std::sync::Arc;
 
     fn demo_menu() -> Menu {
         Menu::new()
@@ -828,5 +829,98 @@ mod tests {
         assert_eq!(w_large, d.measure_text(text, &large));
         assert!(w_large > w_small, "a larger font must measure wider");
         assert_eq!(cache.len(), 2);
+    }
+
+    /// A drawer that records the geometry of every draw op, with deterministic
+    /// monospace metrics (7px/char, 14px line height) so layout is exactly
+    /// reproducible in a test. Icons decode to a 2x2 stub without touching the
+    /// PNG codec.
+    #[derive(Default)]
+    struct RecordingDrawer {
+        texts: Vec<(String, f32, f32)>, // (text, origin.x, origin.y)
+        images: Vec<LogicalRect>,       // dest rects of draw_image
+    }
+    impl SceneDrawer for RecordingDrawer {
+        fn begin_frame(&mut self, _size: LogicalSize) {}
+        fn fill_round_rect(&mut self, _r: LogicalRect, _cr: f32, _c: Rgba) {}
+        fn draw_separator(&mut self, _r: LogicalRect, _c: Rgba) {}
+        fn measure_text(&self, text: &str, _font: &Font) -> f32 {
+            text.chars().count() as f32 * 7.0
+        }
+        fn line_height(&self, _font: &Font) -> f32 {
+            14.0
+        }
+        fn draw_text(&mut self, run: &TextRun<'_>) {
+            self.texts
+                .push((run.text.to_string(), run.origin.x, run.origin.y));
+        }
+        fn draw_image(&mut self, _rgba: &[u8], _w: u32, _h: u32, dest: LogicalRect) {
+            self.images.push(dest);
+        }
+        fn decode_icon(&self, _bytes: &Arc<[u8]>) -> Option<crate::render::DecodedIcon> {
+            Some(std::rc::Rc::new((vec![0u8; 16], 2, 2)))
+        }
+    }
+
+    /// Right edge (`origin.x + measured width`) of the draw_text op whose text
+    /// matches `needle`, using the same 7px/char metric the drawer reports.
+    fn text_right_edge(d: &RecordingDrawer, needle: &str) -> f32 {
+        let (t, x, _) = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == needle)
+            .unwrap_or_else(|| panic!("no draw_text for {needle:?}; got {:?}", d.texts));
+        x + t.chars().count() as f32 * 7.0
+    }
+
+    /// Regression for #15: a menu mixing icon-bearing section headers with
+    /// `label\tvalue` rows must (1) draw every leading icon at the same left
+    /// gutter x (never trailing), and (2) right-align each `\t` value to one
+    /// shared column, for both `Row` and `Submenu` items.
+    #[test]
+    fn issue15_leading_icons_and_tab_values_align_to_shared_columns() {
+        let logo: Arc<[u8]> = Arc::from(vec![0u8; 8]);
+        let menu = Menu::new()
+            .row(
+                Row::new("hdr:claude")
+                    .leading(Icon::Png(logo.clone()))
+                    .label("Claude")
+                    .enabled(false),
+            )
+            .submenu(
+                Row::new("acct:short").segments(vec![
+                    Segment::new("a@x.com").flex(Flex::Grow),
+                    Segment::new("20% / 38%").align(Align::Right),
+                ]),
+                Menu::new().row(Row::new("d").label("detail")),
+            )
+            .submenu(
+                Row::new("acct:longemail").segments(vec![
+                    Segment::new("demo1@example.com").flex(Flex::Grow),
+                    Segment::new("47% / 52%").align(Align::Right),
+                ]),
+                Menu::new().row(Row::new("d2").label("detail")),
+            );
+
+        let mut d = RecordingDrawer::default();
+        let _ = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        // (1) The header's leading icon is drawn in the left gutter, near x≈0,
+        //     never at the right edge of the row.
+        assert_eq!(d.images.len(), 1, "one leading icon drawn");
+        let icon_x = d.images[0].origin.x;
+        assert!(
+            icon_x < 12.0,
+            "leading icon must sit in the left gutter, got x={icon_x}"
+        );
+
+        // (2) Both `\t` values right-align to the same column: their right edges
+        //     match despite different value/label widths.
+        let r_short = text_right_edge(&d, "20% / 38%");
+        let r_long = text_right_edge(&d, "47% / 52%");
+        assert!(
+            (r_short - r_long).abs() < 0.5,
+            "tab-stop values must share a right column: short={r_short} long={r_long}"
+        );
     }
 }

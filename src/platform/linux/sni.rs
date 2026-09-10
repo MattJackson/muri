@@ -7,6 +7,25 @@
 //! is accessible over AT-SPI for free because the host draws a real native menu.
 //! The cost is that muri's custom styling (`Segment`/`Flex`/`Align`/`Color`/
 //! `Font`) is dropped — dbusmenu carries only label + icon + state (spec 22 §2).
+//! Two consequences are worth calling out, because they surface as "muri doesn't
+//! look like the native macOS menu" reports (issue #15) even though muri's own
+//! painter renders both correctly (see `render::paint`'s `issue15_*` test):
+//!
+//!   1. **No tab-stop column.** A `label\tvalue` row is flattened to one string
+//!      via [`Row::accessible_name`] (space-joined). dbusmenu has no right-aligned
+//!      secondary column (the only trailing field is `shortcut`, for key
+//!      accelerators, which GNOME Shell's appindicator does not render), so the
+//!      value cannot be aligned into a shared column the way an `NSMenu` tab stop
+//!      — or muri's own styled popup — does. muda/tray-icon share this host menu
+//!      on Linux and have the same limitation.
+//!   2. **Icon side is the host's.** A leading [`Icon::Png`] is exported as the
+//!      item's `icon_data`; whether the host draws it leading or trailing (and at
+//!      what size) is GNOME Shell / KDE's call, not muri's.
+//!
+//! Callers that need muri's exact OEM row layout on Linux should show the menu as
+//! a pointer-anchored [`ContextMenu::open_at`](crate::ContextMenu::open_at), which
+//! renders through muri's X11 styled popup (`render::paint`) and honors every
+//! `Segment`/`Flex`/`Align` — identical to the macOS/Windows tray popup.
 //!
 //! Activations arrive as `ksni` `activate` callbacks on the menu items; each
 //! carries the row's [`MenuId`], which is dispatched straight through the muri
