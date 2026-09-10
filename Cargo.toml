@@ -82,6 +82,11 @@ accesskit = { version = "0.17", optional = true }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+# Objective-C block bridge (part of the objc2 stack, already resolved via
+# objc2-app-kit's default `block2` feature). The only click-away primitives
+# AppKit exposes — `NSEvent`'s global/local event monitors — take a block
+# handler, so native-menu-parity dismissal (#11) constructs them here.
+block2 = "0.6"
 # CALayer present path: build a CGImage from the raster RGBA framebuffer and set
 # it as the panel content view's layer contents (replaces softbuffer).
 objc2-quartz-core = "0.3"
