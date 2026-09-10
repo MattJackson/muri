@@ -14,23 +14,24 @@
 //! dismiss. Clicking "Quit" exits. On other platforms `Tray::run` is not
 //! implemented yet (Windows) or unsupported (Linux).
 
+use muri::render::Framebuffer;
 use muri::{Align, Color, Flex, Font, Icon, Menu, Row, Segment, StyleRun, Tray, Weight};
 
 /// Build a tiny solid-color circular 16×16 PNG so the demo ships no binary asset.
 fn swatch_png(r: u8, g: u8, b: u8) -> Vec<u8> {
-    let mut pm = tiny_skia::Pixmap::new(16, 16).unwrap();
-    for (i, px) in pm.pixels_mut().iter_mut().enumerate() {
+    let mut fb = Framebuffer::new(16, 16);
+    let px = fb.pixels_mut();
+    for i in 0..256usize {
         let (x, y) = ((i % 16) as i32 - 8, (i / 16) as i32 - 8);
-        let a = if x * x + y * y <= 49 { 255u8 } else { 0 };
-        *px = tiny_skia::PremultipliedColorU8::from_rgba(
-            (r as u16 * a as u16 / 255) as u8,
-            (g as u16 * a as u16 / 255) as u8,
-            (b as u16 * a as u16 / 255) as u8,
-            a,
-        )
-        .unwrap();
+        let a: u16 = if x * x + y * y <= 49 { 255 } else { 0 };
+        let o = i * 4;
+        // Premultiplied RGBA (what `Framebuffer` stores).
+        px[o] = (r as u16 * a / 255) as u8;
+        px[o + 1] = (g as u16 * a / 255) as u8;
+        px[o + 2] = (b as u16 * a / 255) as u8;
+        px[o + 3] = a as u8;
     }
-    pm.encode_png().unwrap()
+    fb.encode_png()
 }
 
 /// The per-account detail panel shown as a flyout beside an account row: reset

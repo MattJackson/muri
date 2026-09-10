@@ -1,39 +1,39 @@
 //! Headless render snapshot: paints a representative menu straight to an
-//! in-memory `tiny-skia` pixmap (no window, no tray) and saves it to
+//! in-memory [`Framebuffer`] (no window, no tray) and saves it to
 //! `target/muri-phase1-render.png`. Proves the shared scene drawer renders the
 //! styled menu — flush-right colored values with no chevron column, section
 //! headers, separators, a checkmark, and a provider logo — identically to what
-//! the live macOS popup blits to its softbuffer surface.
+//! the live macOS popup blits to its surface.
 
 use std::path::PathBuf;
 
 use muri::render::paint::render_menu;
-use muri::render::RasterDrawer;
+use muri::render::{Framebuffer, RasterDrawer};
 use muri::{
     place_flyout, Align, Color, Flex, FlyoutSide, Font, Icon, LogicalPoint, LogicalRect,
-    LogicalSize, Menu, MenuOptions, Row, Segment, StyleRun, Theme, Weight,
+    LogicalSize, Menu, MenuOptions, Rgba, Row, Segment, StyleRun, Theme, Weight,
 };
 
 /// A tiny solid-color 16×16 PNG so the `draw_image` (leading logo) path is
 /// exercised by the snapshot without shipping a binary asset.
 fn swatch_png(r: u8, g: u8, b: u8) -> Vec<u8> {
-    let mut pm = tiny_skia::Pixmap::new(16, 16).unwrap();
-    for (i, px) in pm.pixels_mut().iter_mut().enumerate() {
+    let mut fb = Framebuffer::new(16, 16);
+    let px = fb.pixels_mut();
+    for i in 0..256usize {
         let x = (i % 16) as i32;
         let y = (i / 16) as i32;
         // A filled rounded-ish blob: circle mask.
         let dx = x - 8;
         let dy = y - 8;
-        let a = if dx * dx + dy * dy <= 49 { 255 } else { 0 };
-        *px = tiny_skia::PremultipliedColorU8::from_rgba(
-            (r as u16 * a as u16 / 255) as u8,
-            (g as u16 * a as u16 / 255) as u8,
-            (b as u16 * a as u16 / 255) as u8,
-            a,
-        )
-        .unwrap();
+        let a: u16 = if dx * dx + dy * dy <= 49 { 255 } else { 0 };
+        let o = i * 4;
+        // Premultiplied RGBA (what `Framebuffer` stores).
+        px[o] = (r as u16 * a / 255) as u8;
+        px[o + 1] = (g as u16 * a / 255) as u8;
+        px[o + 2] = (b as u16 * a / 255) as u8;
+        px[o + 3] = a as u8;
     }
-    pm.encode_png().unwrap()
+    fb.encode_png()
 }
 
 fn demo_menu() -> Menu {
@@ -130,10 +130,10 @@ fn snapshot_dark_and_light_are_nonblank_and_saved() {
 
         // Non-blank: a meaningful fraction of pixels are painted (panel fill).
         let painted = drawer
-            .pixmap()
+            .framebuffer()
             .pixels()
-            .iter()
-            .filter(|p| p.alpha() > 0)
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0)
             .count();
         let total = (dw * dh) as usize;
         assert!(
@@ -268,29 +268,13 @@ fn snapshot_flyout_parent_plus_child_is_saved() {
     let margin = (10.0 * scale) as u32;
     let canvas_w = ((ox as u32 + cw).max(pw)) + margin * 2;
     let canvas_h = ((oy as u32 + ch).max(ph)) + margin * 2;
-    let mut canvas = tiny_skia::Pixmap::new(canvas_w, canvas_h).unwrap();
-    canvas.fill(tiny_skia::Color::from_rgba8(28, 28, 30, 255)); // desktop backdrop
+    let mut canvas = Framebuffer::new(canvas_w, canvas_h);
+    canvas.fill(Rgba::opaque(28, 28, 30)); // desktop backdrop
 
-    let paint = tiny_skia::PixmapPaint::default();
-    let ident = tiny_skia::Transform::identity();
-    canvas.draw_pixmap(
-        margin as i32,
-        margin as i32,
-        pd.pixmap().as_ref(),
-        &paint,
-        ident,
-        None,
-    );
-    canvas.draw_pixmap(
-        margin as i32 + ox,
-        margin as i32 + oy,
-        cd.pixmap().as_ref(),
-        &paint,
-        ident,
-        None,
-    );
+    canvas.draw(pd.framebuffer(), margin as i32, margin as i32);
+    canvas.draw(cd.framebuffer(), margin as i32 + ox, margin as i32 + oy);
 
-    let png = canvas.encode_png().unwrap();
+    let png = canvas.encode_png();
     let path = out_dir.join("muri-phase2-flyout.png");
     std::fs::write(&path, &png).unwrap();
     eprintln!("wrote {} ({} bytes)", path.display(), png.len());
