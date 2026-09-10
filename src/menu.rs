@@ -18,6 +18,13 @@ use crate::style::{Color, Font, Weight};
 pub struct MenuId(pub String);
 
 impl MenuId {
+    /// A `MenuId` from any string-like value. Mirrors real muda's
+    /// `MenuId::new(impl Into<String>)` so `MenuId::new(id)` migrates through the
+    /// `muda-compat` facade with a pure import swap.
+    pub fn new(id: impl Into<String>) -> Self {
+        MenuId(id.into())
+    }
+
     /// A sentinel id for non-interactive rows (section headers, separators).
     /// Rows carrying this id never emit a click event.
     pub fn none() -> Self {
@@ -464,6 +471,15 @@ mod tests {
         assert!(MenuId::none().is_none());
         assert!(MenuId::from("quit").as_str() == "quit");
         assert!(!MenuId::from("quit").is_none());
+    }
+
+    #[test]
+    fn menu_id_new_accepts_str_and_string() {
+        // muda-compatible constructor: builds a MenuId from any string-like value
+        // (issue #4 — `MenuId::new(...)` must work through the facade).
+        assert_eq!(MenuId::new("quit").as_str(), "quit");
+        assert_eq!(MenuId::new(String::from("open")).as_str(), "open");
+        assert!(!MenuId::new("open").is_none());
     }
 
     #[test]

@@ -26,6 +26,14 @@ use crate::menu::Icon as MuriIcon;
 // Re-export the shared icon/error types so a `tray_icon::Icon` import resolves.
 pub use super::muda::{BadIcon, Icon, Menu};
 
+/// Mirrors `tray_icon::menu` — real `tray-icon` does `pub use muda as menu`, and
+/// that is the canonical path apps use to reach the menu-item types (e.g.
+/// `tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem,
+/// Submenu}`). Re-exporting the facade's muda module here so those
+/// `tray_icon::menu::*` paths migrate with a pure `use tray_icon` → `use
+/// muri::compat::tray_icon` swap (issue #5).
+pub use super::muda as menu;
+
 /// A tray icon identifier, mirroring `tray-icon`'s `TrayIconId`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TrayIconId(pub String);
@@ -362,6 +370,30 @@ impl TrayIcon {
 mod tests {
     use super::super::muda::{MenuItem, SurfaceMode};
     use super::*;
+
+    #[test]
+    fn menu_submodule_reexports_muda_menu_item_types() {
+        // Real tray-icon does `pub use muda as menu`; apps reach menu-item types
+        // via `tray_icon::menu::*`. The facade must resolve those same paths so a
+        // pure import swap compiles (issue #5).
+        use super::super::tray_icon::menu::{
+            CheckMenuItem, Menu as MenuViaTrayIcon, MenuItem, PredefinedMenuItem, Submenu,
+        };
+
+        let menu = MenuViaTrayIcon::new();
+        let item = MenuItem::with_id("open", "Open", true, None);
+        let check = CheckMenuItem::with_id("toggle", "Toggle", true, true, None);
+        let sep = PredefinedMenuItem::separator();
+        let sub = Submenu::new("More", true);
+        menu.append(&item).unwrap();
+        menu.append(&check).unwrap();
+        menu.append(&sep).unwrap();
+        menu.append(&sub).unwrap();
+
+        // `tray_icon::menu::Menu` is the same type as the directly imported `Menu`.
+        let _same_type: MenuViaTrayIcon = Menu::new();
+        assert_eq!(item.id().as_str(), "open");
+    }
 
     #[test]
     fn with_menu_routes_to_a_custom_surface() {
