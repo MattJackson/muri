@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-09
+
+Patch release in the 0.9.x testing cycle: `muda-compat` drop-in parity fixes found
+while migrating the first real adopter (usagio) onto the facade.
+
+### Fixed
+
+- **`muda-compat`: `MenuId::new()` constructor** — added `MenuId::new(impl
+  Into<String>)` mirroring real muda's constructor, so callers that build ids via
+  `MenuId::new(id)` (rather than passing a `&str`/`String`) compile through the
+  facade unchanged (#4).
+- **`muda-compat`: `compat::tray_icon::menu` module** — `compat::tray_icon` now
+  re-exports the facade's muda module as `menu` (mirroring real tray-icon's `pub
+  use muda as menu`), so the canonical `tray_icon::menu::{Menu, MenuItem,
+  CheckMenuItem, Submenu, PredefinedMenuItem, …}` import paths migrate with a pure
+  `use tray_icon` → `use muri::compat::tray_icon` swap (#5).
+
+### Documentation
+
+- README synced to the published 0.9.0: install shows `muri = "0.9"` (crate is on
+  crates.io), the Windows backend is described as code-complete, the version is
+  `0.9.x`, and the feature-flag table reflects the shipped `muda-compat` (and drops
+  the non-existent `serde` flag).
+
 ## [0.9.0] - 2026-09-09
 
 First crates.io release: a themeable, custom-drawn tray + popup/menu library — a
@@ -84,5 +108,6 @@ release**; behaviors that require real hardware or screen readers are marked
   `Unsupported::ClientPositioning` on a bare Wayland session. Use the native menu
   or an X11 (incl. XWayland) session for the styled popup.
 
-[Unreleased]: https://github.com/MattJackson/muri/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/MattJackson/muri/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/MattJackson/muri/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/MattJackson/muri/releases/tag/v0.9.0
