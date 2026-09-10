@@ -169,8 +169,8 @@ impl Framebuffer {
 /// ([`Icon::from_rgba`](crate::compat::muda::Icon::from_rgba)) reach muri's
 /// encoded-bytes [`Icon::Png`](crate::menu::Icon::Png): the Linux SNI backend
 /// (`icon_pixmap`) and the macOS/Windows image paths all consume encoded bytes,
-/// so without this the facade icon never reaches the drawn tray (divergence D6)
-/// and, on GNOME, the appindicator extension drops an item with an empty pixmap.
+/// so without this the facade icon never reaches the drawn tray and, on GNOME,
+/// the appindicator extension drops an item with an empty pixmap.
 pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;

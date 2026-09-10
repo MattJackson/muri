@@ -307,9 +307,15 @@ fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
         // host-drawn menu from the app side (spec 22 §1). Honest no-op.
         TrayCommand::Open | TrayCommand::Close => {}
         // Intercepted in `run_sni_loop`'s drain before reaching here (it needs to
-        // end the loop + call `Handle::shutdown`), so this arm is never taken;
-        // present only to keep the match exhaustive.
-        TrayCommand::Shutdown => {}
+        // end the loop + call `Handle::shutdown`), so this arm is never taken.
+        // The debug assertion catches a future second `apply_command` caller that
+        // forgets to intercept Shutdown (which would silently swallow it and
+        // regress the drop-removes contract); it stays a no-op in release.
+        TrayCommand::Shutdown => debug_assert!(
+            false,
+            "TrayCommand::Shutdown must be intercepted by run_sni_loop's drain, \
+             not routed through apply_command"
+        ),
     }
 }
 

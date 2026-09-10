@@ -446,10 +446,9 @@ impl MacosAnchor {
 
 impl Drop for MacosAnchor {
     fn drop(&mut self) {
-        // Explicit teardown (spec 20 §1): don't rely on ARC release alone.
-        if let Some(item) = self.status_item.take() {
-            NSStatusBar::systemStatusBar().removeStatusItem(&item);
-        }
+        // Explicit teardown (spec 20 §1): don't rely on ARC release alone. Same
+        // operation as the `Shutdown` command, so delegate to keep the two in sync.
+        self.remove();
     }
 }
 
