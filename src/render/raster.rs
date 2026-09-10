@@ -210,21 +210,107 @@ pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Ve
     Some(out)
 }
 
+/// sRGB-encoded byte (0..=255) → linear-light intensity (0.0..=1.0), as a 256-
+/// entry lookup table. Built once on first blend.
+static SRGB_TO_LINEAR: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+    let mut t = [0.0f32; 256];
+    for (i, v) in t.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *v = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+    }
+    t
+});
+
+/// Number of entries in the linear→sRGB table. The encode curve is smooth and
+/// the output is only 8-bit, so 4096 buckets keep quantization error below 1 LSB.
+const LIN2SRGB_N: usize = 4096;
+
+/// Linear-light intensity (0.0..=1.0) → sRGB-encoded byte (0..=255), precomputed
+/// so the blit hot path never calls `powf` per pixel (#17). Built once on first
+/// blend.
+static LINEAR_TO_SRGB: std::sync::LazyLock<[u8; LIN2SRGB_N]> = std::sync::LazyLock::new(|| {
+    let mut t = [0u8; LIN2SRGB_N];
+    for (i, v) in t.iter_mut().enumerate() {
+        let l = i as f32 / (LIN2SRGB_N as f32 - 1.0);
+        let c = if l <= 0.003_130_8 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        };
+        *v = (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+    t
+});
+
+/// Linear-light intensity (0.0..=1.0) → sRGB-encoded byte (0..=255), via the
+/// precomputed [`LINEAR_TO_SRGB`] table — no per-pixel `powf` (#17).
+#[inline]
+fn linear_to_srgb_u8(l: f32) -> u8 {
+    let idx = (l.clamp(0.0, 1.0) * (LIN2SRGB_N as f32 - 1.0) + 0.5) as usize;
+    LINEAR_TO_SRGB[idx.min(LIN2SRGB_N - 1)]
+}
+
 /// Blend a straight-alpha source color, scaled by coverage `a`, over one
-/// premultiplied destination pixel at byte offset `off`. This is the exact
-/// `over` arithmetic the previous `tiny-skia`-backed path used for glyph and
-/// image blits, so those outputs are unchanged.
+/// premultiplied destination pixel at byte offset `off`, **gamma-correctly**:
+/// the `over` compositing is done in linear light, not directly on the sRGB-
+/// encoded bytes (#42).
+///
+/// Naive sRGB-space blending (`dst = src*a + dst*(1-a)` on the encoded bytes)
+/// leaves anti-aliased edge pixels too dark — dark-on-light text renders visibly
+/// heavier/thicker than a native CoreText/Quartz menu, which composites in linear
+/// light. This linearizes both operands (unpremultiplying the premultiplied
+/// destination first), blends in linear premultiplied space, then re-encodes to
+/// premultiplied sRGB storage — so AA text/edges match the native weight. Applies
+/// to every blit that funnels through here (glyph masks, rounded-rect fills,
+/// hairline separators, image/icon blits).
 #[inline]
 pub(crate) fn blend_pixel(dst: &mut [u8], off: usize, src: Rgba, a: u8) {
-    let sa = a as u32;
-    let inv = 255 - sa;
-    let sr = src.r as u32 * sa / 255;
-    let sg = src.g as u32 * sa / 255;
-    let sb = src.b as u32 * sa / 255;
-    dst[off] = (sr + dst[off] as u32 * inv / 255).min(255) as u8;
-    dst[off + 1] = (sg + dst[off + 1] as u32 * inv / 255).min(255) as u8;
-    dst[off + 2] = (sb + dst[off + 2] as u32 * inv / 255).min(255) as u8;
-    dst[off + 3] = (sa + dst[off + 3] as u32 * inv / 255).min(255) as u8;
+    if a == 0 {
+        return;
+    }
+    if a == 255 {
+        // Fully covering: the result is exactly the (premultiplied-by-1) source.
+        // Skip the linear round-trip — it's an identity here, and avoids the LUT's
+        // sub-LSB quantization on the common opaque-fill/separator path (#18).
+        dst[off] = src.r;
+        dst[off + 1] = src.g;
+        dst[off + 2] = src.b;
+        dst[off + 3] = 255;
+        return;
+    }
+    let lut = &*SRGB_TO_LINEAR;
+    let sa = a as f32 / 255.0;
+    let da = dst[off + 3] as f32 / 255.0;
+    let inv = 1.0 - sa;
+    let out_a = sa + da * inv;
+    if out_a <= 0.0 {
+        dst[off] = 0;
+        dst[off + 1] = 0;
+        dst[off + 2] = 0;
+        dst[off + 3] = 0;
+        return;
+    }
+    let src_ch = [src.r, src.g, src.b];
+    for c in 0..3 {
+        // Source: straight sRGB → linear, premultiplied by coverage.
+        let s_lin_pm = lut[src_ch[c] as usize] * sa;
+        // Destination: premultiplied sRGB → unpremultiply → linear → re-premultiply.
+        let d_lin_pm = if da > 0.0 {
+            let straight = (dst[off + c] as f32 / da).min(255.0);
+            lut[straight.round() as usize] * da
+        } else {
+            0.0
+        };
+        // Composite in linear premultiplied space, then back to premultiplied sRGB.
+        let out_lin_pm = s_lin_pm + d_lin_pm * inv;
+        let out_srgb_straight = linear_to_srgb_u8(out_lin_pm / out_a) as f32;
+        dst[off + c] = (out_srgb_straight * out_a).round().clamp(0.0, 255.0) as u8;
+    }
+    dst[off + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
 /// Signed distance (in device pixels) from point `(px, py)` to a rounded rect
@@ -394,6 +480,36 @@ pub(crate) fn scaled(rect: LogicalRect, scale: f32) -> (f32, f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blend_is_gamma_correct_not_naive_srgb() {
+        // Black text at 50% coverage over an opaque white background. Gamma-
+        // correct compositing (linear-light) lands near sRGB 188 — the encoding of
+        // linear 0.5 — NOT the naive sRGB-space midpoint 128 that made AA text
+        // read heavier than native CoreText (#42).
+        let mut dst = [255u8, 255, 255, 255];
+        blend_pixel(&mut dst, 0, Rgba::new(0, 0, 0, 255), 127);
+        assert!(
+            (185..=191).contains(&dst[0]),
+            "expected gamma-correct ~188, got {} (128 would be the old naive bug)",
+            dst[0]
+        );
+        assert_eq!(dst[0], dst[1]);
+        assert_eq!(dst[1], dst[2]);
+        assert_eq!(dst[3], 255, "opaque over opaque stays opaque");
+    }
+
+    #[test]
+    fn blend_preserves_opaque_endpoints() {
+        // Full coverage replaces the destination with the (premultiplied) source;
+        // zero coverage is a no-op.
+        let mut dst = [10u8, 20, 30, 255];
+        blend_pixel(&mut dst, 0, Rgba::new(200, 100, 50, 255), 255);
+        assert_eq!(&dst[..3], &[200, 100, 50]);
+        let mut untouched = [10u8, 20, 30, 255];
+        blend_pixel(&mut untouched, 0, Rgba::new(0, 0, 0, 255), 0);
+        assert_eq!(untouched, [10, 20, 30, 255]);
+    }
 
     /// The standard PNG chunk CRC (CRC-32/ISO-HDLC over the chunk's type+data
     /// bytes), needed to hand-build a syntactically valid IHDR chunk for the

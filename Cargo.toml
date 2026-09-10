@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.10.4"
+version = "0.10.5"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -136,6 +136,18 @@ windows-sys = { version = "0.59", features = [
 # over UI Automation. 0.24 pairs with accesskit 0.17; it re-exports its own
 # `windows`-crate `HWND`, which never crosses the `Platform` seam. Mirrors how
 # `accesskit_macos` is wired on the macOS target.
+#
+# DEP-SKEW NOTES (#39), all confined to the optional `a11y` feature — the default
+# build carries none of them:
+#   * `accesskit_windows` pulls the heavy `windows` crate (not `windows-sys`) for
+#     its UIA provider. muri's own Windows backend uses `windows-sys` only, so the
+#     `windows` stack is present solely under `a11y`.
+#   * `accesskit_macos` still pins **objc2 0.5** (^0.5.1 / objc2-app-kit ^0.2.0)
+#     while muri's macOS backend is on **objc2 0.6**, so `a11y` unavoidably brings
+#     a small objc2 0.5 subtree alongside 0.6 — bridged only in the a11y adapter.
+#     Track upstream for an objc2 0.6 migration to collapse the two.
+#   * `read-fonts`/`font-types` (transitive via the text stack) can version-skew
+#     across `swash`/`fontations` bumps; pin-check on toolchain/dep updates.
 accesskit_windows = { version = "0.24", optional = true }
 
 # Linux backend (M5): the native-menu fallback (spec 22 §2, Path 1). Both crates
@@ -146,8 +158,13 @@ accesskit_windows = { version = "0.24", optional = true }
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # StatusNotifierItem / AppIndicator over D-Bus. The `blocking` feature exposes the
 # synchronous `ksni::blocking` API (`TrayMethods::spawn` -> `Handle`) that
-# `run_tray` drives without pulling an async runtime into muri's public surface.
-ksni = { version = "0.3.6", features = ["blocking"] }
+# `run_tray` drives. `default-features = false` drops ksni's default `tokio`
+# feature (an unused async runtime muri never touches) in favor of the lightweight
+# `async-io` reactor that backs the blocking wrapper (#20).
+ksni = { version = "0.3.6", default-features = false, features = [
+    "blocking",
+    "async-io",
+] }
 # Direct, pure-Rust D-Bus for the best-effort `org.freedesktop.appearance`
 # color-scheme portal read (light/dark). Same major version `ksni` already uses.
 zbus = { version = "5", features = ["blocking-api"] }
@@ -158,10 +175,23 @@ zbus = { version = "5", features = ["blocking-api"] }
 # `RustConnection` — no `libxcb`/`allow-unsafe-code`, so the build needs no system
 # X libraries (only a running X server, incl. XWayland, at *runtime*). MSRV is well
 # below muri's 1.85 floor.
-x11rb = { version = "0.13", default-features = false }
+#
+# Gated behind the (default-on) `x11-popup` feature so a tray-only Linux consumer
+# (e.g. `default-features = false`) drops `x11rb` + `x11rb-protocol` + `gethostname`
+# entirely — the SNI tray + native dbusmenu (Path 1) is the recommended default and
+# needs none of it, and the tray-anchored styled popup is impossible by design
+# (spec 22 §1). See spec 22 §7 item 3 (#21).
+x11rb = { version = "0.13", default-features = false, optional = true }
 
 [features]
-default = []
+default = ["x11-popup"]
+# Linux only: the styled, pointer-anchored `ContextMenu::open_at` popup (spec 22 §2
+# Path 2), which pulls the pure-Rust `x11rb` X11 client. On by default for
+# back-compat and `muda-compat` parity; a tray-only consumer can opt out with
+# `default-features = false` to drop `x11rb` + `x11rb-protocol` + `gethostname` and
+# keep just the SNI tray (Path 1). Inert on non-Linux targets — `x11rb` is a
+# Linux-target dependency, so `dep:x11rb` is a no-op elsewhere (#21).
+x11-popup = ["dep:x11rb"]
 # Screen-reader integration via AccessKit on the raster backend (see README).
 # On macOS this activates the `accesskit_macos` platform adapter; the `dep:`
 # reference to a target-specific optional dependency is inert on other targets.

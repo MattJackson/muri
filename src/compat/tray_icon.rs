@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::menu::Icon as MuriIcon;
+use crate::{MenuOptions, ThemeSource};
 
 // Re-export the shared icon/error types so a `tray_icon::Icon` import resolves.
 pub use super::muda::{BadIcon, Icon, Menu};
@@ -70,6 +71,25 @@ pub struct Rect {
     pub position: PhysicalPosition,
     /// The rect's size, `(width, height)` in physical pixels.
     pub size: (f64, f64),
+}
+
+/// Convert the native, DPI-independent [`LogicalRect`](crate::LogicalRect) into
+/// the facade's physical-pixel [`Rect`] (issue #48). muri reports anchor
+/// geometry in logical points; the facade widens to `f64` to match
+/// `tray-icon`'s `PhysicalPosition`/`Rect` field types. No DPI scale is applied
+/// (muri does not track a scale factor at this layer), so on a HiDPI display
+/// this is numerically the logical rect, not the true physical-pixel rect —
+/// documented best-effort, matching the rest of this facade's geometry story.
+impl From<crate::LogicalRect> for Rect {
+    fn from(r: crate::LogicalRect) -> Self {
+        Rect {
+            position: PhysicalPosition {
+                x: r.origin.x as f64,
+                y: r.origin.y as f64,
+            },
+            size: (r.size.width as f64, r.size.height as f64),
+        }
+    }
 }
 
 /// A mouse button, mirroring `tray-icon`'s `MouseButton`.
@@ -230,6 +250,10 @@ pub struct TrayIconBuilder {
     tooltip: Option<String>,
     title: Option<String>,
     menu: Option<Menu>,
+    /// **muri extension (issue #45):** popup options (theme, width bounds,
+    /// gutter policy) threaded into the built [`Tray`](crate::Tray) instead of
+    /// always leaving it on [`MenuOptions::default`]. Not muda/tray-icon's API.
+    options: Option<MenuOptions>,
 }
 
 impl TrayIconBuilder {
@@ -263,8 +287,15 @@ impl TrayIconBuilder {
     }
 
     /// Attach the menu. Routes the menu to a muri **custom** surface (spec
-    /// `02` §2). Accepts a `Box<Menu>` (the facade's `Menu` is `!Send`, so
-    /// tray-icon's `Box<dyn ContextMenu + Send + Sync>` bound cannot apply).
+    /// `02` §2). Takes a concrete `Box<Menu>`, not a trait object like real
+    /// tray-icon's `Box<dyn ContextMenu + Send + Sync>` (issue #53, item 1):
+    /// the facade's `Menu` is `Rc`-shared (`!Send`), so it cannot satisfy that
+    /// `Send + Sync` bound. Making `ContextMenu` object-safe *and* dropping
+    /// `Send + Sync` here would ripple into every surface method's signature
+    /// across both compat modules — a real trait-object refactor, not a
+    /// same-file fix — so this facade instead documents the divergence and
+    /// keeps the concrete type; there is exactly one facade `Menu` type, so
+    /// nothing is actually lost by not being generic over it.
     // `Box<Menu>` is deliberate signature parity with tray-icon's `with_menu`.
     #[allow(clippy::boxed_local)]
     pub fn with_menu(mut self, menu: Box<Menu>) -> Self {
@@ -272,13 +303,30 @@ impl TrayIconBuilder {
         self
     }
 
-    /// Build the tray icon. Returns immediately (passive model, spec `02` §2.1):
-    /// it does **not** block the caller, but — unlike tray-icon, which relies on
-    /// the host's event loop — it installs a **live** muri tray driven on a
-    /// background UI thread (macOS: on the host's main-thread run loop), so the
-    /// icon actually appears (issues #6, #7). The returned handle mutates it
-    /// (`set_icon` / `set_menu` / `set_tooltip`) via the same cross-thread path.
-    pub fn build(self) -> super::muda::Result<TrayIcon> {
+    /// **muri extension (issue #45):** set the popup options (theme, width
+    /// bounds, gutter policy) the built [`Tray`](crate::Tray) opens with,
+    /// instead of leaving it on [`MenuOptions::default`]. Not muda/tray-icon's
+    /// API — the escape hatch for reaching muri-only tuning through the facade.
+    pub fn with_options(mut self, options: MenuOptions) -> Self {
+        self.options = Some(options);
+        self
+    }
+
+    /// **muri extension (issue #45):** sugar for `with_options` that only sets
+    /// the theme source, preserving any width/gutter settings already staged.
+    /// Not muda/tray-icon's API.
+    pub fn with_theme(mut self, theme: ThemeSource) -> Self {
+        let options = self.options.take().unwrap_or_default();
+        self.options = Some(options.theme(theme));
+        self
+    }
+
+    /// Build the configured native [`crate::Tray`] — menu, icon, tooltip, title,
+    /// and staged [`MenuOptions`] (#45) — **without** spawning it. Factored out of
+    /// [`build`](Self::build) so the option/theme threading is observable in a
+    /// test (via [`crate::Tray::menu_options`]) rather than only after the tray is
+    /// spawned and consumed.
+    fn configured_tray(&self) -> crate::Tray {
         let muri_menu = if let Some(menu) = &self.menu {
             // Route to a muri custom surface (marks the menu Custom).
             menu.build_custom_surface().menu().clone()
@@ -300,13 +348,32 @@ impl TrayIconBuilder {
         if let Some(title) = &self.title {
             tray = tray.title(title.clone());
         }
+        // muri extension (#45): thread staged options into the built tray
+        // instead of always leaving it on `MenuOptions::default()`.
+        if let Some(options) = self.options.clone() {
+            tray = tray.options(options);
+        }
+        tray
+    }
 
-        // Install + drive the tray without blocking. Best-effort: if it can't be
-        // spawned (a headless session, or off the macOS main thread — e.g. in a
-        // unit test), degrade to a passive facade that records state rather than
-        // failing `build()`, matching tray-icon's build being infallible in
-        // practice.
-        let handle = tray.spawn().ok();
+    /// Build the tray icon. Returns immediately (passive model, spec `02` §2.1):
+    /// it does **not** block the caller, but — unlike tray-icon, which relies on
+    /// the host's event loop — it installs a **live** muri tray driven on a
+    /// background UI thread (macOS: on the host's main-thread run loop), so the
+    /// icon actually appears (issues #6, #7). The returned handle mutates it
+    /// (`set_icon` / `set_menu` / `set_tooltip`) via the same cross-thread path.
+    pub fn build(self) -> super::muda::Result<TrayIcon> {
+        let tray = self.configured_tray();
+
+        // Install + drive the tray without blocking. `Tray::spawn` now requires
+        // a `MainThreadMarker` (issue #46) — obtain one and pass it through.
+        // `MainThreadMarker::new()` is compile-time proof only (see its own
+        // doc), so it always returns `Some` here; the `and_then` still degrades
+        // to a passive facade (rather than failing `build()`) if the platform
+        // backend itself can't install the tray (a headless session, or off the
+        // macOS main thread — e.g. in a unit test), matching tray-icon's build
+        // being infallible in practice.
+        let handle = crate::MainThreadMarker::new().and_then(|m| tray.spawn(m).ok());
 
         let id = self.id.unwrap_or_else(|| TrayIconId(next_tray_id()));
         Ok(TrayIcon {
@@ -417,13 +484,38 @@ impl TrayIcon {
         }
     }
 
-    /// The tray icon's on-screen rect, or `None` when it is unavailable —
-    /// including on **Linux**, where tray anchoring is unsupported (matching
-    /// tray-icon's own "unsupported on Linux", spec `02` §8). muri reports this
-    /// as an absent rect (`None`) rather than an error, since `tray-icon`'s
-    /// signature is `Option<Rect>`.
+    /// The tray icon's on-screen rect, or `None` when it is unavailable — no
+    /// live tray was spawned, the query timed out, or (on **Linux**) tray
+    /// anchoring is unsupported (matching tray-icon's own "unsupported on
+    /// Linux", spec `02` §8). Wired to the native best-effort cross-thread
+    /// accessor, [`TrayHandle::anchor_rect`](crate::TrayHandle::anchor_rect)
+    /// (issue #48); muri reports absence as `None` rather than an error, since
+    /// `tray-icon`'s own signature is `Option<Rect>`.
     pub fn rect(&self) -> Option<Rect> {
-        None
+        self.handle
+            .as_ref()
+            .and_then(|h| h.anchor_rect())
+            .map(Rect::from)
+    }
+
+    /// **muri extension (issue #45):** swap the live theme source on the
+    /// running tray. The next popup open uses it, and any currently-open popup
+    /// is repainted with it — the primitive an in-menu "Preview theme"
+    /// switcher is built on. Not muda/tray-icon's API; a no-op if no live tray
+    /// was spawned.
+    pub fn set_theme(&self, theme: ThemeSource) {
+        if let Some(handle) = &self.handle {
+            handle.set_theme(theme);
+        }
+    }
+
+    /// **muri extension (issue #45):** swap the live [`MenuOptions`] wholesale
+    /// (theme + width bounds + gutter policy) on the running tray. Not
+    /// muda/tray-icon's API; a no-op if no live tray was spawned.
+    pub fn set_options(&self, options: MenuOptions) {
+        if let Some(handle) = &self.handle {
+            handle.set_options(options);
+        }
     }
 }
 
@@ -669,5 +761,106 @@ mod tests {
             "Drop must post Shutdown so the OS icon is removed; got {:?}",
             posted.get(5)
         );
+    }
+
+    #[test]
+    fn with_options_and_with_theme_are_threaded_into_the_built_tray() {
+        // #45: the builder's staged `MenuOptions` (and the `with_theme` sugar)
+        // must actually reach the `Tray` `build()` constructs — not be left on
+        // `MenuOptions::default()`. Observe the configured Tray's `menu_options()`
+        // directly; this fails if `with_options`/`with_theme` were no-ops (the old
+        // test only checked the tray had a numeric id, which is tautological).
+        let tray = TrayIconBuilder::new()
+            .with_options(MenuOptions::default().min_width(200.0).max_width(400.0))
+            .configured_tray();
+        let mo = tray.menu_options();
+        assert_eq!(
+            mo.min_width,
+            Some(200.0),
+            "with_options width must reach the tray"
+        );
+        assert_eq!(mo.max_width, Some(400.0));
+
+        // `with_theme` sets `options.theme`, and applied after `with_options` must
+        // not clobber the previously-staged width bound.
+        let themed = TrayIconBuilder::new()
+            .with_options(MenuOptions::default().min_width(50.0))
+            .with_theme(ThemeSource::Windows(crate::ThemeMode::Dark))
+            .configured_tray();
+        let tm = themed.menu_options();
+        assert_eq!(
+            tm.min_width,
+            Some(50.0),
+            "with_theme must not clobber a prior width bound"
+        );
+        assert!(
+            matches!(tm.theme, ThemeSource::Windows(_)),
+            "with_theme must set options.theme, got {:?}",
+            tm.theme
+        );
+    }
+
+    #[test]
+    fn rect_maps_the_native_anchor_rect_through_the_live_handle() {
+        // #48: `rect()` must consult the live `TrayHandle::anchor_rect()`
+        // rather than unconditionally returning `None`. There is no running
+        // platform backend in a headless unit test to answer the query, so the
+        // *query path* is exercised (it must not panic and must time out to
+        // `None` rather than hang); the `From<LogicalRect>` conversion itself
+        // is asserted directly below.
+        let native = crate::Tray::new(MuriIcon::Symbol("tray"));
+        let handle = native.handle();
+        let tray = TrayIcon {
+            id: TrayIconId("t".into()),
+            icon: RefCell::new(None),
+            tooltip: RefCell::new(None),
+            title: RefCell::new(None),
+            handle: Some(handle),
+        };
+        // No backend is installed to answer `QueryAnchorRect`, so this must
+        // resolve to `None` (via the query's own timeout) rather than block.
+        assert_eq!(tray.rect(), None);
+
+        // Without a live handle at all, `rect()` is `None` unconditionally.
+        let headless = TrayIcon {
+            id: TrayIconId("h".into()),
+            icon: RefCell::new(None),
+            tooltip: RefCell::new(None),
+            title: RefCell::new(None),
+            handle: None,
+        };
+        assert_eq!(headless.rect(), None);
+    }
+
+    #[test]
+    fn logical_rect_converts_into_the_facade_physical_rect() {
+        // #48: the `From<crate::LogicalRect> for Rect` bridge used by `rect()`.
+        use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
+        let logical = LogicalRect::new(LogicalPoint::new(10.0, 20.0), LogicalSize::new(30.0, 40.0));
+        let rect: Rect = logical.into();
+        assert_eq!(rect.position, PhysicalPosition { x: 10.0, y: 20.0 });
+        assert_eq!(rect.size, (30.0, 40.0));
+    }
+
+    #[test]
+    fn set_theme_and_set_options_post_to_the_live_handle() {
+        // #45: the runtime-swap escape hatch on the live `TrayIcon`.
+        use crate::TrayCommand;
+        let native = crate::Tray::new(MuriIcon::Symbol("tray"));
+        let handle = native.handle();
+        let tray = TrayIcon {
+            id: TrayIconId("t".into()),
+            icon: RefCell::new(None),
+            tooltip: RefCell::new(None),
+            title: RefCell::new(None),
+            handle: Some(handle.clone()),
+        };
+
+        tray.set_theme(ThemeSource::System(crate::ThemeMode::Dark));
+        tray.set_options(MenuOptions::default().min_width(10.0));
+
+        let posted = handle.take_posted();
+        assert!(matches!(&posted[0], TrayCommand::SetTheme(_)));
+        assert!(matches!(&posted[1], TrayCommand::SetOptions(_)));
     }
 }

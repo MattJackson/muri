@@ -26,7 +26,8 @@
 //!     .tooltip("My App")
 //!     .menu(menu)
 //!     .on_click(|id| println!("clicked {}", id.as_str()));
-//! // _tray.run(); // installs the tray icon and enters the platform event loop
+//! // let _m = muri::MainThreadMarker::new().unwrap(); // call this on the real main thread
+//! // _tray.run(_m); // installs the tray icon and enters the platform event loop
 //! # }
 //! ```
 //!
@@ -151,11 +152,83 @@ pub use flyout::{next_flyout, place_flyout, FlyoutPlacement, FlyoutSide, HoverTa
 pub use geometry::{Edge, Insets, LogicalPoint, LogicalRect, LogicalSize};
 pub use keynav::{handle_key, FlyoutFocus, MenuFocus, NavAction, NavKey};
 pub use menu::{
-    Align, ClickHandler, Flex, Icon, Item, Menu, MenuEvent, MenuId, Row, Segment, StyleRun,
+    Align, Axis, ClickHandler, Content, Flex, Icon, Item, Menu, MenuEvent, MenuId, Row, Segment,
+    Stack, StyleRun, TextContent,
 };
 pub use platform::{Appearance, Platform, PlatformEvent};
 pub use style::{Color, Font, FontFamily, Rgba, Weight};
-pub use theme::{MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
+pub use theme::{GutterPolicy, MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
+
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// =============================================================================
+// MainThreadMarker
+// =============================================================================
+
+/// A zero-cost, `!Send + !Sync` proof that the calling code is running on the
+/// thread that obtained it — required by [`Tray::run`] and [`Tray::spawn`]
+/// because installing an `NSStatusItem` is only ever safe from AppKit's main
+/// thread on macOS (issue #46). Windows and Linux have no such restriction,
+/// but both entry points take the same proof so there is one uniform,
+/// compile-time-flagged contract across all three backends.
+///
+/// `PhantomData<*const ()>` is what makes this `!Send + !Sync` for free (a raw
+/// pointer is neither): a `MainThreadMarker` obtained on one thread cannot be
+/// moved to another thread and used there, so it cannot be smuggled across a
+/// channel or into a spawned closure. The only way to have one on a given
+/// thread is to call [`MainThreadMarker::new`] *on* that thread.
+///
+/// ```compile_fail
+/// fn is_send<T: Send>() {}
+/// is_send::<muri::MainThreadMarker>(); // fails: MainThreadMarker is !Send
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct MainThreadMarker(PhantomData<*const ()>);
+
+impl MainThreadMarker {
+    /// Obtain a proof that the caller is on the main thread.
+    ///
+    /// muri has no portable, safe way to *verify* "is this the main thread"
+    /// without OS-specific FFI — and this crate root denies `unsafe_code`
+    /// (see the crate-level `#![deny(unsafe_code)]`), so a real runtime check
+    /// would have to live behind the per-OS [`platform`] seam, not here. This
+    /// constructor is therefore intentionally **not** a runtime check: it
+    /// always returns `Some`. Its value is entirely at compile time — see the
+    /// type-level doc on [`MainThreadMarker`] — so it is the caller's
+    /// responsibility to actually call this from the real main thread
+    /// (typically the first thing `fn main()` does), exactly as documented.
+    /// The per-OS backend (e.g. macOS's `objc2::MainThreadMarker`, used
+    /// internally by the macOS `platform` module) still performs its own real
+    /// runtime check before touching AppKit, so a caller that gets this wrong is
+    /// caught there, not silently accepted.
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn new() -> Option<Self> {
+        Some(MainThreadMarker(PhantomData))
+    }
+}
+
+// =============================================================================
+// SurfaceId
+// =============================================================================
+
+/// A process-global, monotonically increasing identifier for one *surface*
+/// instance — a [`Tray`], [`ContextMenu`], or [`Popup`] — so a [`MenuEvent`]
+/// consumer can tell which surface an activation came from (issue #51).
+///
+/// Assigned once, in the surface's constructor, from a process-wide
+/// [`AtomicU64`] counter; every live surface has a distinct id, and ids are
+/// issued in creation order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SurfaceId(u64);
+
+impl SurfaceId {
+    /// Issue the next process-global id.
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        SurfaceId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 // =============================================================================
 // Tray
@@ -179,6 +252,18 @@ pub use theme::{MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
 ///   (the anchor rect is unavailable — the backend reports
 ///   [`Error::Unsupported`]`(`[`Unsupported::TrayAnchor`]`)`). Use that native
 ///   menu or a pointer-anchored [`ContextMenu`].
+///
+/// ## Shutdown
+///
+/// Dropping a [`Tray`] itself does **not** post `TrayCommand::Shutdown` — a
+/// `Tray` is normally consumed by [`Tray::run`]/[`Tray::spawn`] long before it
+/// would go out of scope. What *does* auto-shut-down the tray is dropping the
+/// **last** outstanding [`TrayHandle`] obtained from a given [`Tray::handle`]
+/// call (a handle and every clone of it): `TrayHandle`'s own `Drop`
+/// (issue #47) posts `Shutdown` exactly once, when its internal clone count
+/// reaches zero, so simply letting a handle family go out of scope removes
+/// the tray — matching `tray-icon`'s drop-removes contract without an
+/// explicit [`TrayHandle::shutdown`] call.
 pub struct Tray {
     icon: Icon,
     menu: Menu,
@@ -198,6 +283,9 @@ pub struct Tray {
     /// The main-thread wake, installed by the backend once its run loop is
     /// live. Posting a command calls this (if present) to schedule a drain.
     waker: std::sync::Arc<std::sync::Mutex<Option<WakeFn>>>,
+    /// This surface's process-global identity (issue #51). Exposed via
+    /// [`Tray::surface_id`].
+    surface_id: SurfaceId,
 }
 
 /// A thread-safe wake callback the backend installs to poke its native run
@@ -228,11 +316,30 @@ pub(crate) enum TrayCommand {
     Close,
     /// Stop the tray: remove the OS status item and end the backend's run loop
     /// (and, for a spawned tray, its background thread). Posted by the compat
-    /// facade's `Drop` (and [`TrayHandle::shutdown`]) so dropping a tray removes
-    /// its icon, matching `tray-icon`'s drop-removes contract. Best-effort and
+    /// facade's `Drop`, by an explicit [`TrayHandle::shutdown`] call, and
+    /// **automatically by [`TrayHandle`]'s own `Drop`** when the last
+    /// outstanding handle from a given [`Tray::handle`] call (including every
+    /// clone of it) goes out of scope (issue #47) — so dropping every handle
+    /// in a family removes the tray with no explicit call needed, matching
+    /// `tray-icon`'s drop-removes contract. Note that `Tray` itself has no
+    /// `Drop` impl; only `TrayHandle` auto-posts this. Best-effort and
     /// asynchronous, like every other command; the process-exit path also
     /// reclaims the OS registration on all three backends.
     Shutdown,
+    /// Swap the live theme source. Applied on the backend's UI thread: the next
+    /// popup open uses it, and any currently-open popup is repainted with it —
+    /// so a consumer can offer an in-menu "Preview theme" switcher (issue #45).
+    /// On Linux the persistent tray is a native `dbusmenu` the host renders, so
+    /// this only affects muri's own styled context-menu popups, not the SNI tray.
+    SetTheme(ThemeSource),
+    /// Swap the live [`MenuOptions`] wholesale (theme + width bounds + gutter
+    /// policy). Applied exactly like [`SetTheme`](TrayCommand::SetTheme) (#45).
+    SetOptions(MenuOptions),
+    /// Best-effort cross-thread request for the tray icon's current on-screen
+    /// anchor rectangle: the backend replies on its UI thread with the live rect
+    /// (or `None` when unavailable / unsupported, e.g. the Linux SNI tray, whose
+    /// host never exposes icon geometry) (issue #48).
+    QueryAnchorRect(std::sync::mpsc::Sender<Option<LogicalRect>>),
 }
 
 /// A cheap, `Clone + Send` remote control for a running [`Tray`].
@@ -249,6 +356,44 @@ pub(crate) enum TrayCommand {
 pub struct TrayHandle {
     queue: std::sync::Arc<std::sync::Mutex<Vec<TrayCommand>>>,
     waker: std::sync::Arc<std::sync::Mutex<Option<WakeFn>>>,
+    /// Shared across every clone of *this handle family* — a fresh one per
+    /// [`Tray::handle`] call, `.clone()` shares it. Its [`Drop`] posts
+    /// `TrayCommand::Shutdown` **exactly once**, when the last clone releases the
+    /// final `Arc` reference (issue #47). Deliberately its own `Arc`, independent
+    /// of `queue`/`waker` (which the running backend also holds), so the backend's
+    /// reference never factors in.
+    ///
+    /// Held purely for its `Drop` (an RAII shutdown guard); never read directly,
+    /// hence the `allow(dead_code)` — cloning it (via `derive(Clone)`) is what
+    /// shares the family across handle clones.
+    #[allow(dead_code)]
+    family: std::sync::Arc<HandleFamily>,
+}
+
+/// The shared drop-guard for a [`TrayHandle`] family. Posting `Shutdown` from
+/// *this* type's `Drop` (rather than from `TrayHandle::drop` gated on
+/// `Arc::strong_count == 1`) makes the "last clone gone" signal race-free: the
+/// `Arc` runtime guarantees `HandleFamily::drop` runs exactly once, when the
+/// final clone is released, even if two final clones on different threads drop
+/// concurrently. A `strong_count == 1` check in `TrayHandle::drop` could let both
+/// such drops read `count > 1` (each still counts itself, and neither field
+/// decrement has happened yet) and neither post — leaking the tray + its thread.
+struct HandleFamily {
+    queue: std::sync::Arc<std::sync::Mutex<Vec<TrayCommand>>>,
+    waker: std::sync::Arc<std::sync::Mutex<Option<WakeFn>>>,
+}
+
+impl Drop for HandleFamily {
+    fn drop(&mut self) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.push(TrayCommand::Shutdown);
+        }
+        if let Ok(waker) = self.waker.lock() {
+            if let Some(wake) = waker.as_ref() {
+                wake();
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for TrayHandle {
@@ -259,7 +404,7 @@ impl std::fmt::Debug for TrayHandle {
 
 impl TrayHandle {
     /// Test-only: drain and return the commands posted so far, so a unit test can
-    /// assert that a setter posted the *right* [`TrayCommand`] with the right
+    /// assert that a setter posted the *right* `TrayCommand` with the right
     /// payload (the facade setters go through this path but the OS backend that
     /// would otherwise consume it is not installed headlessly).
     #[cfg(test)]
@@ -325,6 +470,36 @@ impl TrayHandle {
     pub fn shutdown(&self) {
         self.post(TrayCommand::Shutdown);
     }
+
+    /// Swap the live theme source (issue #45). Applied asynchronously on the
+    /// backend's UI thread: the next popup open uses it, and any currently-open
+    /// popup is repainted — so a consumer can wire an in-menu "Preview theme"
+    /// submenu. See `TrayCommand::SetTheme` for the Linux SNI-tray caveat.
+    pub fn set_theme(&self, theme: ThemeSource) {
+        self.post(TrayCommand::SetTheme(theme));
+    }
+
+    /// Swap the live [`MenuOptions`] wholesale — theme, width bounds, gutter
+    /// policy (issue #45). Applied like [`set_theme`](TrayHandle::set_theme).
+    pub fn set_options(&self, options: MenuOptions) {
+        self.post(TrayCommand::SetOptions(options));
+    }
+
+    /// Best-effort cross-thread query for the tray icon's current on-screen
+    /// rectangle (issue #48). The native, main-thread counterpart is
+    /// [`Tray::anchor_rect`].
+    ///
+    /// Posts a `TrayCommand::QueryAnchorRect` and waits briefly for the
+    /// backend to reply on its UI thread. Returns `None` if the run loop is not
+    /// yet live, the query times out, or the platform can't report geometry
+    /// (the Linux SNI tray never can — its host owns the icon).
+    pub fn anchor_rect(&self) -> Option<LogicalRect> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.post(TrayCommand::QueryAnchorRect(tx));
+        rx.recv_timeout(std::time::Duration::from_millis(200))
+            .ok()
+            .flatten()
+    }
 }
 
 impl Tray {
@@ -339,17 +514,55 @@ impl Tray {
             on_click: None,
             commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             waker: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            surface_id: SurfaceId::next(),
         }
+    }
+
+    /// This tray's process-global [`SurfaceId`] (issue #51), assigned once in
+    /// [`Tray::new`]. Lets a [`MenuEvent`] consumer correlate an activation
+    /// back to the surface it came from.
+    pub fn surface_id(&self) -> SurfaceId {
+        self.surface_id
     }
 
     /// A cheap, `Clone + Send` [`TrayHandle`] that can drive this tray from any
     /// thread once [`Tray::run`] is live (posts made earlier buffer). Obtain it
     /// before `run` consumes the tray.
+    ///
+    /// Each call starts a fresh, independently-tracked handle *family*: drop
+    /// every handle and clone in the family returned by one `handle()` call
+    /// and the tray auto-shuts-down (see [`TrayHandle`]'s `Drop`, issue #47).
+    /// Calling `handle()` more than once creates separate families that don't
+    /// share that shutdown-on-last-drop tracking with each other — prefer
+    /// calling it once and fanning out with `.clone()`.
     pub fn handle(&self) -> TrayHandle {
         TrayHandle {
             queue: std::sync::Arc::clone(&self.commands),
             waker: std::sync::Arc::clone(&self.waker),
+            family: std::sync::Arc::new(HandleFamily {
+                queue: std::sync::Arc::clone(&self.commands),
+                waker: std::sync::Arc::clone(&self.waker),
+            }),
         }
+    }
+
+    /// The tray icon's current on-screen rectangle in logical coordinates
+    /// (issue #48) — the native, main-thread counterpart of
+    /// [`TrayHandle::anchor_rect`].
+    ///
+    /// **Honest limitation:** [`Tray::run`]/[`Tray::spawn`] *consume* the
+    /// `Tray` to install the real, live status item, so by the time an icon
+    /// exists to have an anchor rect, there is no `&self` left to call this
+    /// on. This method queries a **fresh** [`platform::current()`] instance
+    /// instead, which has never had `install_tray` called on it — so on
+    /// macOS/Windows (which require an installed status item to compute the
+    /// rect) it will reliably return `Err` until the engine grows a way to
+    /// query the *live* platform state a running `Tray`/backend owns. It is
+    /// provided now for API completeness/symmetry with
+    /// [`TrayHandle::anchor_rect`] and because Linux's answer
+    /// ([`Unsupported::TrayAnchor`]) does not depend on installation state.
+    pub fn anchor_rect(&self) -> Result<LogicalRect> {
+        platform::current().tray_anchor_rect()
     }
 
     /// Attach the menu shown when the icon is clicked.
@@ -454,7 +667,7 @@ impl Tray {
         if let Some(handler) = &self.on_click {
             handler(id);
         }
-        event::emit(id.clone());
+        event::emit(id.clone(), self.surface_id);
     }
 
     /// Install the tray icon and run the platform event loop, dispatching row
@@ -467,7 +680,12 @@ impl Tray {
     /// `NSStatusItem` and runs the native `NSApplication` loop; Windows installs
     /// the `Shell_NotifyIcon` icon and runs the Win32 message pump; Linux
     /// installs an SNI/AppIndicator native menu and runs its worker loop.
-    pub fn run(self) -> Result<()> {
+    ///
+    /// Takes a [`MainThreadMarker`] (issue #46): installing the `NSStatusItem`
+    /// is only ever safe from AppKit's main thread on macOS, and requiring the
+    /// proof here makes that a compile-time-visible contract for every
+    /// backend, not just a documentation note.
+    pub fn run(self, _m: MainThreadMarker) -> Result<()> {
         // One seam: the per-OS backend selected once in `platform::current()`.
         platform::current().run_tray(self)
     }
@@ -483,7 +701,10 @@ impl Tray {
     /// must live on the main thread, so `spawn` must be called from the main
     /// thread and relies on the host's existing `NSApplication` run loop to
     /// service the icon (see [`Platform::spawn_tray`]).
-    pub fn spawn(self) -> Result<TrayHandle> {
+    ///
+    /// Takes a [`MainThreadMarker`] (issue #46) for the same reason as
+    /// [`Tray::run`].
+    pub fn spawn(self, _m: MainThreadMarker) -> Result<TrayHandle> {
         let handle = self.handle();
         platform::current().spawn_tray(self)?;
         Ok(handle)
@@ -502,6 +723,8 @@ pub struct ContextMenu {
     menu: Menu,
     options: MenuOptions,
     on_click: Option<ClickHandler>,
+    /// This surface's process-global identity (issue #51).
+    surface_id: SurfaceId,
 }
 
 impl ContextMenu {
@@ -511,7 +734,14 @@ impl ContextMenu {
             menu,
             options: MenuOptions::default(),
             on_click: None,
+            surface_id: SurfaceId::next(),
         }
+    }
+
+    /// This surface's process-global [`SurfaceId`] (issue #51), assigned once
+    /// in [`ContextMenu::new`].
+    pub fn surface_id(&self) -> SurfaceId {
+        self.surface_id
     }
 
     /// Set popup options.
@@ -552,7 +782,7 @@ impl ContextMenu {
         if let Some(handler) = &self.on_click {
             handler(id);
         }
-        event::emit(id.clone());
+        event::emit(id.clone(), self.surface_id);
     }
 
     /// Show the menu at the given screen point, growing from `edge`, and block
@@ -589,6 +819,8 @@ pub struct Popup {
     menu: Menu,
     options: MenuOptions,
     on_click: Option<ClickHandler>,
+    /// This surface's process-global identity (issue #51).
+    surface_id: SurfaceId,
 }
 
 impl Popup {
@@ -598,7 +830,14 @@ impl Popup {
             menu,
             options: MenuOptions::default(),
             on_click: None,
+            surface_id: SurfaceId::next(),
         }
+    }
+
+    /// This surface's process-global [`SurfaceId`] (issue #51), assigned once
+    /// in [`Popup::new`].
+    pub fn surface_id(&self) -> SurfaceId {
+        self.surface_id
     }
 
     /// Set popup options (width bounds, theme source).
@@ -641,7 +880,7 @@ impl Popup {
         if let Some(handler) = &self.on_click {
             handler(id);
         }
-        event::emit(id.clone());
+        event::emit(id.clone(), self.surface_id);
     }
 
     /// Show the popup anchored to `anchor` (a caller rectangle in screen logical
@@ -807,5 +1046,121 @@ mod tests {
         });
         cm.dispatch(&MenuId::from("x"));
         assert_eq!(hit.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn main_thread_marker_new_always_returns_some() {
+        // Documents the intentional "no portable safe runtime check" contract
+        // (issue #46): see the type-level compile_fail doctest for the
+        // !Send/!Sync half of the guarantee.
+        assert!(MainThreadMarker::new().is_some());
+    }
+
+    #[test]
+    fn surface_id_is_unique_and_monotonic_across_surface_kinds() {
+        // issue #51: every Tray/ContextMenu/Popup gets its own id, in
+        // creation order, from the same process-global counter.
+        let a = Tray::new(Icon::Checkmark).surface_id();
+        let b = ContextMenu::new(Menu::new()).surface_id();
+        let c = Popup::new(Menu::new()).surface_id();
+        let d = Tray::new(Icon::Checkmark).surface_id();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, d);
+        assert!(b.0 > a.0);
+        assert!(c.0 > b.0);
+        assert!(d.0 > c.0);
+    }
+
+    #[test]
+    fn tray_handle_drop_posts_shutdown_once_on_last_clone_only() {
+        // issue #47: an intermediate clone dropping must NOT shut the tray
+        // down; only the last outstanding clone of a handle family does, and
+        // exactly once. `inspector` is a *separate* handle family (its own
+        // `handle()` call) sharing the same underlying command queue, used
+        // purely to observe what got posted without itself counting toward
+        // `family`'s clone count.
+        let tray = Tray::new(Icon::Checkmark);
+        let family = tray.handle();
+        let clone = family.clone();
+        let inspector = tray.handle();
+
+        drop(clone);
+        assert!(
+            inspector.take_posted().is_empty(),
+            "an intermediate clone dropping must not post Shutdown"
+        );
+
+        drop(family);
+        let posted = inspector.take_posted();
+        assert!(
+            matches!(posted.as_slice(), [TrayCommand::Shutdown]),
+            "the last clone dropping must post exactly one Shutdown, got {:?}",
+            posted
+        );
+    }
+
+    #[test]
+    fn concurrent_last_clone_drops_post_shutdown_exactly_once() {
+        // Race regression: the last two clones of a family dropped concurrently on
+        // two threads must still post exactly ONE Shutdown. The old
+        // `Arc::strong_count == 1` check in `TrayHandle::drop` could let both drops
+        // read count > 1 and neither post, leaking the tray; the `Arc<HandleFamily>`
+        // drop-guard makes it exactly-once regardless of interleaving (issue #47).
+        let tray = Tray::new(Icon::Checkmark);
+        let inspector = tray.handle(); // separate family; only observes the queue
+        let h1 = tray.handle();
+        let h2 = h1.clone();
+        let t1 = std::thread::spawn(move || drop(h1));
+        let t2 = std::thread::spawn(move || drop(h2));
+        t1.join().unwrap();
+        t2.join().unwrap();
+        let posted = inspector.take_posted();
+        let shutdowns = posted
+            .iter()
+            .filter(|c| matches!(c, TrayCommand::Shutdown))
+            .count();
+        assert_eq!(
+            shutdowns, 1,
+            "the family's final drop must post exactly one Shutdown, got {posted:?}"
+        );
+    }
+
+    #[test]
+    fn set_theme_and_options_post_live_swap_commands() {
+        // The in-menu "Preview theme" path (#45): a handle posts SetTheme /
+        // SetOptions, which the backend applies on its UI thread.
+        let tray = Tray::new(Icon::Checkmark);
+        let inspector = tray.handle();
+        let control = tray.handle();
+        control.set_theme(ThemeSource::MacOs(ThemeMode::Dark));
+        control.set_options(MenuOptions::default().min_width(120.0));
+        let posted = inspector.take_posted();
+        assert!(
+            matches!(
+                posted.as_slice(),
+                [TrayCommand::SetTheme(_), TrayCommand::SetOptions(_)]
+            ),
+            "set_theme/set_options must post the matching commands in order, got {:?}",
+            posted
+        );
+    }
+
+    #[test]
+    fn anchor_rect_query_times_out_to_none_with_no_live_backend() {
+        // With no run loop draining the queue, the QueryAnchorRect reply never
+        // arrives, so the best-effort cross-thread query returns None (#48).
+        let tray = Tray::new(Icon::Checkmark);
+        let handle = tray.handle();
+        assert!(handle.anchor_rect().is_none());
+        // Prove it actually *posted* the query (not merely returned a stubbed
+        // None): a QueryAnchorRect command must be sitting in the queue.
+        let posted = handle.take_posted();
+        assert!(
+            posted
+                .iter()
+                .any(|c| matches!(c, TrayCommand::QueryAnchorRect(_))),
+            "anchor_rect must post a QueryAnchorRect command, got {posted:?}"
+        );
     }
 }

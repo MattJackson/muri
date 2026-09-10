@@ -1,7 +1,7 @@
 //! Painting a [`Menu`] through a [`SceneDrawer`]: the single, platform-agnostic
 //! layout + draw pass that turns the declarative menu tree into pixels and a
 //! hit-test map. It measures text through the drawer, resolves the
-//! [`Flex`](crate::Flex)/[`Align`](crate::Align) layout with
+//! [`Flex`](crate::Flex)/[`Align`] layout with
 //! [`crate::layout::resolve_segments`] (the flush-right promise), and emits
 //! fills, separators, icons, and text runs.
 //!
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
 use crate::layout::{resolve_segments, SegmentMetrics};
-use crate::menu::{Icon, Item, MenuId, Row, Segment};
+use crate::menu::{Align, Axis, Content, Icon, Item, MenuId, Row, Segment, Stack};
 use crate::render::{SceneDrawer, TextRun};
 use crate::style::{Font, FontFamily, Rgba, Weight};
 use crate::theme::{MenuOptions, Theme};
@@ -117,6 +117,11 @@ const ICON_SIZE: f32 = 16.0;
 const TRAILING_COLUMN: f32 = 14.0;
 const DEFAULT_MIN_WIDTH: f32 = 200.0;
 const DEFAULT_MAX_WIDTH: f32 = 380.0;
+/// Vertical padding above/below an [`Item::Content`] row's measured stack
+/// height, on top of the theme's `row_height` floor (issue #44). Chosen to
+/// roughly match the breathing room a text row gets from its line-height
+/// centering within `theme.row_height`.
+const CONTENT_ROW_VPAD: f32 = 4.0;
 
 fn is_submenu(item: &Item) -> bool {
     matches!(item, Item::Submenu { .. })
@@ -137,14 +142,19 @@ fn row_leading_width(row: &Row, gap: f32) -> f32 {
 }
 
 /// Whether the menu reserves a shared leading gutter: true when any row is
-/// **checkable** (carries a checkmark), so checked *and* unchecked rows align
-/// their text past the gutter — the native `NSMenu` look. A menu with only a
-/// section-header icon and no checkmarks reserves nothing and stays per-row
-/// inline (#16). This reconciles #16's shared-left-x with native alignment.
+/// **checkable** — `checked.is_some()`, i.e. `Some(true)` *or* `Some(false)`, per
+/// the `Row::checked` contract that "`Some(true/false)` shows a check column" —
+/// so checked *and* currently-unchecked-but-checkable rows align their text past
+/// the gutter (the native `NSMenu` look). Testing only `Some(true)` would leave a
+/// menu whose checkable rows are all currently unchecked with no reserved column,
+/// making every row's text jump right the instant one row is toggled on. A menu
+/// with only a section-header icon and no checkable rows reserves nothing and
+/// stays per-row inline (#16). This reconciles #16's shared-left-x with native
+/// alignment.
 fn menu_reserves_gutter(menu: &Menu) -> bool {
     menu.items.iter().any(|it| {
         item_row(it)
-            .is_some_and(|r| r.checked == Some(true) || matches!(r.leading, Some(Icon::Checkmark)))
+            .is_some_and(|r| r.checked.is_some() || matches!(r.leading, Some(Icon::Checkmark)))
     })
 }
 
@@ -207,7 +217,220 @@ fn item_row(item: &Item) -> Option<&Row> {
     match item {
         Item::Row(r) | Item::SectionHeader(r) => Some(r),
         Item::Submenu { label, .. } => Some(label),
-        Item::Separator => None,
+        Item::Separator | Item::Content(_) => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Content stacks (issue #44): recursive measure + paint over a `Stack` tree.
+// -----------------------------------------------------------------------------
+
+/// The intrinsic (unconstrained) size of one [`Content`] node: text measured
+/// through the drawer's shaper at its resolved font, an image at `size`×`size`,
+/// a spacer at zero (it only absorbs slack at paint time), and a stack as the
+/// recursive sum-along-axis / max-across-axis of its own children.
+fn measure_content<D: SceneDrawer>(
+    drawer: &D,
+    cache: &mut MeasureCache,
+    theme: &Theme,
+    content: &Content,
+) -> LogicalSize {
+    match content {
+        Content::Text(t) => {
+            let font = t.font.clone().unwrap_or_else(|| theme.row_font.clone());
+            let w = measure_cached(drawer, cache, &t.text, &font);
+            let h = drawer.line_height(&font);
+            LogicalSize::new(w, h)
+        }
+        Content::Image { size, .. } => LogicalSize::new(*size, *size),
+        Content::Stack(stack) => measure_stack(drawer, cache, theme, stack),
+        Content::Spacer => LogicalSize::new(0.0, 0.0),
+    }
+}
+
+/// The intrinsic size of a [`Stack`]: children summed (plus inter-child
+/// `spacing`) along `axis`, maxed across the cross axis.
+fn measure_stack<D: SceneDrawer>(
+    drawer: &D,
+    cache: &mut MeasureCache,
+    theme: &Theme,
+    stack: &Stack,
+) -> LogicalSize {
+    let mut main = 0.0_f32;
+    let mut cross = 0.0_f32;
+    for (i, child) in stack.children.iter().enumerate() {
+        let sz = measure_content(drawer, cache, theme, child);
+        let (m, c) = match stack.axis {
+            Axis::Horizontal => (sz.width, sz.height),
+            Axis::Vertical => (sz.height, sz.width),
+        };
+        main += m;
+        if i + 1 < stack.children.len() {
+            main += stack.spacing;
+        }
+        cross = cross.max(c);
+    }
+    match stack.axis {
+        Axis::Horizontal => LogicalSize::new(main, cross),
+        Axis::Vertical => LogicalSize::new(cross, main),
+    }
+}
+
+/// Paint one [`Content`] node into `rect` (already resolved by the parent
+/// stack's layout pass). `base_color` is the row's default text color (used
+/// when a [`crate::menu::TextContent`] carries no explicit color override).
+fn paint_content<D: SceneDrawer>(
+    drawer: &mut D,
+    cache: &mut MeasureCache,
+    theme: &Theme,
+    content: &Content,
+    rect: LogicalRect,
+    base_color: Rgba,
+) {
+    match content {
+        Content::Text(t) => {
+            let font = t.font.clone().unwrap_or_else(|| theme.row_font.clone());
+            let color = t.color.map(|c| theme.resolve(c)).unwrap_or(base_color);
+            let w = measure_cached(drawer, cache, &t.text, &font);
+            let lh = drawer.line_height(&font);
+            let x = match t.align {
+                Align::Left => rect.origin.x,
+                Align::Center => rect.origin.x + (rect.size.width - w) / 2.0,
+                Align::Right => rect.origin.x + (rect.size.width - w),
+            };
+            let y = rect.origin.y + (rect.size.height - lh) / 2.0;
+            drawer.draw_text(&TextRun {
+                text: &t.text,
+                origin: LogicalPoint::new(x, y),
+                font: &font,
+                color,
+                weight: font.weight,
+            });
+        }
+        Content::Image { icon, size } => {
+            let x = rect.origin.x + (rect.size.width - size) / 2.0;
+            let y = rect.origin.y + (rect.size.height - size) / 2.0;
+            let dest = LogicalRect::new(LogicalPoint::new(x, y), LogicalSize::new(*size, *size));
+            match icon {
+                // Both raster and SVG icon bytes converge on the same decoded-icon
+                // blit path (`decode_icon` tries PNG then falls back to the SVG
+                // rasterizer; see `crate::render::decode_icon_bytes`).
+                Icon::Png(bytes) | Icon::Svg(bytes) => {
+                    if let Some(decoded) = drawer.decode_icon(bytes) {
+                        let (rgba, w, h) = &*decoded;
+                        drawer.draw_image(rgba, *w, *h, dest);
+                    }
+                }
+                Icon::Checkmark => draw_glyph_centered(
+                    drawer,
+                    cache,
+                    "\u{2713}",
+                    &theme.row_font,
+                    Weight::Bold,
+                    base_color,
+                    dest,
+                ),
+                // A named symbol has no bundled fallback glyph in the content-stack
+                // path yet (Phase 2, same limit `draw_row_content` documents for
+                // its own leading-icon column); skip rather than draw nothing
+                // useful.
+                Icon::Symbol(_) => {}
+            }
+        }
+        Content::Stack(s) => paint_stack(drawer, cache, theme, s, rect, base_color),
+        Content::Spacer => {}
+    }
+}
+
+/// Lay out and paint a [`Stack`]'s children into `rect`: each child gets its
+/// intrinsic main-axis size (measured via [`measure_content`]) except a
+/// [`Content::Spacer`], which receives an equal share of whatever main-axis
+/// space is left over after fixed children and `spacing` are subtracted
+/// (clamped to zero — an over-full stack simply overflows `rect`, it is never
+/// negative-sized). Cross-axis position honors `stack.align`.
+fn paint_stack<D: SceneDrawer>(
+    drawer: &mut D,
+    cache: &mut MeasureCache,
+    theme: &Theme,
+    stack: &Stack,
+    rect: LogicalRect,
+    base_color: Rgba,
+) {
+    if stack.children.is_empty() {
+        return;
+    }
+    let sizes: Vec<LogicalSize> = stack
+        .children
+        .iter()
+        .map(|c| measure_content(drawer, cache, theme, c))
+        .collect();
+
+    let n = stack.children.len();
+    let spacing_total = stack.spacing * (n.saturating_sub(1)) as f32;
+    let main_avail = match stack.axis {
+        Axis::Horizontal => rect.size.width,
+        Axis::Vertical => rect.size.height,
+    } - spacing_total;
+    let cross_avail = match stack.axis {
+        Axis::Horizontal => rect.size.height,
+        Axis::Vertical => rect.size.width,
+    };
+
+    let mut fixed_main_sum = 0.0_f32;
+    let mut spacer_count = 0usize;
+    for (child, sz) in stack.children.iter().zip(&sizes) {
+        if matches!(child, Content::Spacer) {
+            spacer_count += 1;
+        } else {
+            fixed_main_sum += match stack.axis {
+                Axis::Horizontal => sz.width,
+                Axis::Vertical => sz.height,
+            };
+        }
+    }
+    let leftover = (main_avail - fixed_main_sum).max(0.0);
+    let spacer_share = if spacer_count > 0 {
+        leftover / spacer_count as f32
+    } else {
+        0.0
+    };
+
+    let cross_origin = match stack.axis {
+        Axis::Horizontal => rect.origin.y,
+        Axis::Vertical => rect.origin.x,
+    };
+    let mut main_pos = match stack.axis {
+        Axis::Horizontal => rect.origin.x,
+        Axis::Vertical => rect.origin.y,
+    };
+
+    for (child, sz) in stack.children.iter().zip(&sizes) {
+        let (m, c) = match stack.axis {
+            Axis::Horizontal => (sz.width, sz.height),
+            Axis::Vertical => (sz.height, sz.width),
+        };
+        let this_main = if matches!(child, Content::Spacer) {
+            spacer_share
+        } else {
+            m
+        };
+        let cross_pos = match stack.align {
+            Align::Left => cross_origin,
+            Align::Center => cross_origin + (cross_avail - c) / 2.0,
+            Align::Right => cross_origin + (cross_avail - c),
+        };
+        let child_rect = match stack.axis {
+            Axis::Horizontal => LogicalRect::new(
+                LogicalPoint::new(main_pos, cross_pos),
+                LogicalSize::new(this_main, c),
+            ),
+            Axis::Vertical => LogicalRect::new(
+                LogicalPoint::new(cross_pos, main_pos),
+                LogicalSize::new(c, this_main),
+            ),
+        };
+        paint_content(drawer, cache, theme, child, child_rect, base_color);
+        main_pos += this_main + stack.spacing;
     }
 }
 
@@ -317,9 +540,14 @@ pub fn render_menu<D: SceneDrawer>(
     let pad = theme.padding;
     let gap = theme.column_gap;
     let base_font = theme.row_font.clone();
-    // Reserve a shared leading gutter when the menu has checkmarks, so checked
-    // and unchecked rows align their text (native look, #16 reconciliation).
-    let reserve_gutter = menu_reserves_gutter(menu);
+    // Reserve a shared leading gutter per the caller's policy (#43): `Auto` (the
+    // OEM default) reserves it only when the menu has checkmarks so checked and
+    // unchecked rows align (#16 reconciliation); `Always`/`Never` force it.
+    let reserve_gutter = match opts.gutter {
+        crate::theme::GutterPolicy::Always => true,
+        crate::theme::GutterPolicy::Never => false,
+        crate::theme::GutterPolicy::Auto => menu_reserves_gutter(menu),
+    };
 
     let trailing_w = if menu.items.iter().any(is_submenu) {
         TRAILING_COLUMN
@@ -360,6 +588,9 @@ pub fn render_menu<D: SceneDrawer>(
                     gap,
                 );
             max_content = max_content.max(content);
+        } else if let Item::Content(stack) = item {
+            let stack_size = measure_stack(drawer, &mut measure_cache, theme, stack);
+            max_content = max_content.max(stack_size.width);
         }
     }
 
@@ -385,6 +616,12 @@ pub fn render_menu<D: SceneDrawer>(
             Item::SectionHeader(_) => theme.row_height,
             Item::Row(r) | Item::Submenu { label: r, .. } => {
                 theme.row_height.max(r.min_height.unwrap_or(0.0))
+            }
+            Item::Content(stack) => {
+                let stack_size = measure_stack(drawer, &mut measure_cache, theme, stack);
+                theme
+                    .row_height
+                    .max(stack_size.height + CONTENT_ROW_VPAD * 2.0)
             }
         };
         plan.push((i, y, h));
@@ -427,6 +664,28 @@ pub fn render_menu<D: SceneDrawer>(
                     false,
                     false,
                     theme.resolve(theme.secondary_label),
+                );
+            }
+            Item::Content(stack) => {
+                if let Some(bg) = stack.background {
+                    let band =
+                        LogicalRect::new(LogicalPoint::new(0.0, ry), LogicalSize::new(width, rh));
+                    drawer.fill_round_rect(band, 0.0, theme.resolve(bg));
+                }
+                let content_rect = LogicalRect::new(
+                    LogicalPoint::new(content_left, ry + CONTENT_ROW_VPAD),
+                    LogicalSize::new(
+                        (band_right - content_left).max(1.0),
+                        (rh - CONTENT_ROW_VPAD * 2.0).max(1.0),
+                    ),
+                );
+                paint_stack(
+                    drawer,
+                    &mut measure_cache,
+                    theme,
+                    stack,
+                    content_rect,
+                    theme.resolve(theme.label),
                 );
             }
             Item::Row(row) | Item::Submenu { label: row, .. } => {
@@ -638,7 +897,7 @@ fn draw_glyph_centered<D: SceneDrawer>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::menu::{Align, Flex, StyleRun};
+    use crate::menu::{Align, Flex, StyleRun, TextContent};
     use crate::style::Color;
     use std::sync::Arc;
 
@@ -1008,6 +1267,41 @@ mod tests {
         assert!(x("you@example.com") > 6.0);
     }
 
+    /// Regression: a menu whose checkable rows are ALL currently *unchecked*
+    /// (`checked(false)`) must still reserve the shared gutter — `Row::checked`'s
+    /// contract is "`Some(true/false)` shows a check column". Testing only
+    /// `Some(true)` (the pre-fix bug) reserved nothing here, so the rows' text
+    /// sat flush-left and every row jumped right the instant one was toggled on.
+    #[test]
+    fn all_unchecked_checkable_menu_still_reserves_gutter() {
+        let text_x = |checked: bool| {
+            let menu = Menu::new()
+                .row(Row::new("a").checked(checked).label("Alpha"))
+                .row(Row::new("b").checked(checked).label("Beta"));
+            let mut d = RecordingDrawer::default();
+            let _ = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+            d.texts
+                .iter()
+                .find(|(t, ..)| t == "Alpha")
+                .map(|(_, x, _)| *x)
+                .expect("Alpha text")
+        };
+        // The gutter is reserved regardless of the current on/off state, so text
+        // starts at the same x whether the checkable rows are on or off — no jump
+        // on toggle. (With the bug, the all-unchecked menu reserved nothing and
+        // its text x was smaller.)
+        let off = text_x(false);
+        let on = text_x(true);
+        assert!(
+            (off - on).abs() < 0.5,
+            "checkable rows must reserve the gutter whether checked or not: off={off} on={on}"
+        );
+        assert!(
+            off > 6.0,
+            "an all-unchecked checkable menu must still reserve the check column, text x={off}"
+        );
+    }
+
     /// Regression for #15: a menu mixing icon-bearing section headers with
     /// `label\tvalue` rows must (1) draw every leading icon at the same left
     /// gutter x (never trailing), and (2) right-align each `\t` value to one
@@ -1057,5 +1351,167 @@ mod tests {
             (r_short - r_long).abs() < 0.5,
             "tab-stop values must share a right column: short={r_short} long={r_long}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Content stacks (issue #44)
+    // -------------------------------------------------------------------------
+
+    /// A vertical stack of 3 texts measures to: width = the widest text (the
+    /// cross axis, maxed), height = the summed line heights plus inter-child
+    /// spacing (the main axis) — using `RecordingDrawer`'s deterministic
+    /// 7px/char, 14px-line-height metrics.
+    #[test]
+    fn measure_vertical_stack_of_three_texts() {
+        let d = RecordingDrawer::default();
+        let mut cache = MeasureCache::new();
+        let theme = Theme::light();
+        let stack = Stack::vertical(2.0)
+            .child(Content::Text(TextContent::new("a"))) // 1 char -> 7px wide
+            .child(Content::Text(TextContent::new("bb"))) // 2 chars -> 14px wide
+            .child(Content::Text(TextContent::new("ccc"))); // 3 chars -> 21px wide
+
+        let size = measure_stack(&d, &mut cache, &theme, &stack);
+
+        // Cross axis (width) = widest child = "ccc" at 21px.
+        assert_eq!(size.width, 21.0);
+        // Main axis (height) = 3 * 14 (line height) + 2 * 2.0 (spacing between
+        // the 3 children).
+        assert_eq!(size.height, 3.0 * 14.0 + 2.0 * 2.0);
+    }
+
+    /// A horizontal strip measures to: width = summed child widths + spacing
+    /// (main axis), height = the tallest child (cross axis).
+    #[test]
+    fn measure_horizontal_strip() {
+        let d = RecordingDrawer::default();
+        let mut cache = MeasureCache::new();
+        let theme = Theme::light();
+        let stack = Stack::horizontal(5.0)
+            .child(Content::Text(TextContent::new("ab"))) // 14px wide, 14px tall
+            .child(Content::Image {
+                icon: Icon::Checkmark,
+                size: 20.0,
+            }) // 20x20
+            .child(Content::Text(TextContent::new("c"))); // 7px wide, 14px tall
+
+        let size = measure_stack(&d, &mut cache, &theme, &stack);
+
+        // Main axis (width) = 14 + 20 + 7 + 2 * 5.0 (spacing between 3 children).
+        assert_eq!(size.width, 14.0 + 20.0 + 7.0 + 2.0 * 5.0);
+        // Cross axis (height) = tallest child = the 20px image.
+        assert_eq!(size.height, 20.0);
+    }
+
+    /// A `Spacer` has zero intrinsic size and absorbs the leftover main-axis
+    /// space at paint time, splitting it equally among sibling spacers — the
+    /// same "grow" promise `Flex::Grow` makes for `Segment`s, generalized to
+    /// the `Content` tree.
+    #[test]
+    fn spacer_distributes_leftover_space_equally() {
+        let mut d = RecordingDrawer::default();
+        let mut cache = MeasureCache::new();
+        let theme = Theme::light();
+        // "a" (7px) + spacer + "bb" (14px) + spacer, in a 100px-wide row: the
+        // two spacers must split (100 - 7 - 14) = 79px evenly (39.5px each).
+        let stack = Stack::horizontal(0.0)
+            .child(Content::Text(TextContent::new("a")))
+            .child(Content::Spacer)
+            .child(Content::Text(TextContent::new("bb")))
+            .child(Content::Spacer);
+
+        let rect = LogicalRect::new(LogicalPoint::new(0.0, 0.0), LogicalSize::new(100.0, 14.0));
+        paint_stack(&mut d, &mut cache, &theme, &stack, rect, Rgba::BLACK);
+
+        let a_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "a")
+            .map(|(_, x, _)| *x)
+            .expect("'a' drawn");
+        let bb_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "bb")
+            .map(|(_, x, _)| *x)
+            .expect("'bb' drawn");
+
+        assert_eq!(a_x, 0.0, "'a' sits flush at the stack's leading edge");
+        // "bb" starts after "a" (7px) plus one spacer's share (39.5px).
+        assert_eq!(bb_x, 7.0 + 39.5);
+        // The trailing spacer pushes the stack's total content to fill the
+        // full 100px width: "bb" ends at 100 - 39.5 (its own trailing spacer).
+        assert_eq!(bb_x + 2.0 * 7.0, 100.0 - 39.5);
+    }
+
+    /// A nested stack's size is the recursive sum: a horizontal strip of
+    /// vertical "cells" (time/icon/temp, the Apple-Weather-extra use case)
+    /// measures as wide as its cells summed, and as tall as its tallest cell.
+    #[test]
+    fn nested_stack_size_recurses() {
+        let d = RecordingDrawer::default();
+        let mut cache = MeasureCache::new();
+        let theme = Theme::light();
+
+        let cell = |time: &str, temp: &str| {
+            Content::Stack(
+                Stack::vertical(1.0)
+                    .child(Content::Text(TextContent::new(time)))
+                    .child(Content::Image {
+                        icon: Icon::Checkmark,
+                        size: 16.0,
+                    })
+                    .child(Content::Text(TextContent::new(temp))),
+            )
+        };
+        // Each cell: width = max(time, 16, temp) widths; height = time_h + 16 +
+        // temp_h + 2 * 1.0 spacing = 14 + 16 + 14 + 2 = 46.
+        let strip = Stack::horizontal(3.0)
+            .child(cell("1PM", "72°"))
+            .child(cell("2PM", "70°"));
+
+        let size = measure_stack(&d, &mut cache, &theme, &strip);
+
+        let cell_height = 14.0 + 16.0 + 14.0 + 2.0 * 1.0;
+        assert_eq!(size.height, cell_height, "strip height = tallest cell");
+        // Each cell's width = widest of its 3 children; "1PM"/"2PM" are 3
+        // chars (21px), wider than the 16px icon, so each cell is 21px wide.
+        // Strip width = 2 cells + 1 gap of 3.0.
+        assert_eq!(size.width, 21.0 * 2.0 + 3.0);
+    }
+
+    /// `Item::Content` integrates into `render_menu`: the row's height is
+    /// derived from the stack's measured content (plus padding), it paints
+    /// through the ordinary `SceneDrawer` text/image path, and it never
+    /// appears in `LaidMenu::rows` (non-interactive, like `SectionHeader`).
+    #[test]
+    fn item_content_sizes_and_paints_through_render_menu() {
+        let logo: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0u8; 8]);
+        let mut d = RecordingDrawer::default();
+        let menu = Menu::new().content(
+            Stack::vertical(2.0)
+                .child(Content::Text(TextContent::new("Weather")))
+                .child(Content::Image {
+                    icon: Icon::Png(logo),
+                    size: 16.0,
+                }),
+        );
+        let laid = render_menu(
+            &mut d,
+            &menu,
+            &Theme::light(),
+            &MenuOptions::default(),
+            None,
+        );
+
+        // Non-interactive: no clickable row recorded for a content item.
+        assert!(laid.rows.is_empty());
+        // The text was actually painted.
+        assert!(d.texts.iter().any(|(t, ..)| t == "Weather"));
+        assert_eq!(d.images.len(), 1, "the icon image was blitted");
+        // The row is tall enough to fit "Weather" (14px) + gap (2px) + the
+        // 16px icon, plus the row's own vertical padding.
+        let min_expected = 14.0 + 2.0 + 16.0;
+        assert!(laid.size.height > min_expected);
     }
 }

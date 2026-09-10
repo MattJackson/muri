@@ -132,7 +132,14 @@ fn main() {
         });
 
     println!("muri demo_tray: click the status-bar icon to open the styled popup.");
-    if let Err(e) = tray.run() {
+    // The tray owns the platform status item, which has main-thread affinity on
+    // macOS; `Tray::run` proves that at compile time by taking a MainThreadMarker
+    // (issue #46). `main` runs on the main thread, so this is always `Some`.
+    let Some(mtm) = muri::MainThreadMarker::new() else {
+        eprintln!("tray error: must be started on the main thread");
+        return;
+    };
+    if let Err(e) = tray.run(mtm) {
         eprintln!("tray error: {e}");
     }
 }

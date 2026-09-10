@@ -141,10 +141,87 @@ thread_local! {
     static MAIN_APP: RefCell<Option<Rc<RefCell<AppState>>>> = const { RefCell::new(None) };
 
     /// Pending high-level UI events, pushed by callbacks and applied by the drain.
-    static EVENTS: RefCell<Vec<UiEvent>> = const { RefCell::new(Vec::new()) };
+    /// Each entry is tagged with the id of the [`PopupSession`] that owns it
+    /// (#33), so a nested session's [`PopupSession::drain_events`] only consumes
+    /// its own events — an enclosing session's events stay queued, untouched,
+    /// until *it* drains. Without this a tray click handler that opens a nested
+    /// context menu before the outer popup closes could have the outer window's
+    /// events drained/applied by the nested session (wrong hover, or a click
+    /// fired for a row never clicked).
+    static EVENTS: RefCell<Vec<(u32, UiEvent)>> = const { RefCell::new(Vec::new()) };
 
     /// The owner window, so on-thread callbacks can post a drain to it.
     static OWNER_HWND: Cell<isize> = const { Cell::new(0) };
+
+    /// Monotonically increasing counter handing out unique [`PopupSession`] ids
+    /// (#33). Ids are never reused within a thread's lifetime (see
+    /// [`next_session_id`]), so a stale queued event can never be misattributed
+    /// to an unrelated later session.
+    static NEXT_SESSION_ID: Cell<u32> = const { Cell::new(1) };
+
+    /// The id of the innermost [`PopupSession`] currently pumping messages on
+    /// this thread (`0` = none yet). Global, window-less events — the tray
+    /// click, and the low-level mouse/keyboard hooks — have no `HWND` to recover
+    /// a session id from, so they're attributed to whichever session is "on top"
+    /// of the pump stack, mirroring how [`OWNER_HWND`] already tracks the same
+    /// nesting for `WM_MURI_DRAIN` routing (#33).
+    static ACTIVE_SESSION: Cell<u32> = const { Cell::new(0) };
+
+    /// Reference-counted global low-level hooks, shared across all popup sessions
+    /// on the pump thread so nested sessions don't double-install them (#34).
+    static HOOKS: RefCell<HookState> =
+        const { RefCell::new(HookState { mouse: null_mut(), kbd: null_mut(), refs: 0 }) };
+}
+
+/// Allocate a fresh, unique id for a new [`PopupSession`] (#33). `0` is reserved
+/// for "no session yet" ([`ACTIVE_SESSION`]'s initial value), so the counter
+/// starts at `1` and skips back over `0` on wraparound (practically unreachable,
+/// but cheap to guard).
+fn next_session_id() -> u32 {
+    NEXT_SESSION_ID.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1).max(1));
+        id
+    })
+}
+
+/// The id of the innermost [`PopupSession`] currently pumping on this thread, for
+/// tagging a window-less [`UiEvent`] (see [`ACTIVE_SESSION`]).
+fn active_session() -> u32 {
+    ACTIVE_SESSION.with(|c| c.get())
+}
+
+/// Split `events` into (this session's events, in original relative order) and
+/// (every other session's events, also in original relative order) (#33). Pure
+/// logic behind [`take_session_events`], factored out so the session-id
+/// filtering is unit-testable without a live `HWND`/message pump.
+fn partition_session_events(
+    events: Vec<(u32, UiEvent)>,
+    session_id: u32,
+) -> (Vec<UiEvent>, Vec<(u32, UiEvent)>) {
+    let (mine, other): (Vec<_>, Vec<_>) = events.into_iter().partition(|(id, _)| *id == session_id);
+    (mine.into_iter().map(|(_, event)| event).collect(), other)
+}
+
+/// Remove and return every queued event tagged `session_id`, leaving every other
+/// session's events in [`EVENTS`] untouched and in their original relative order
+/// (#33). Both [`PopupSession::drain_events`] and [`AppState::drain`] use this
+/// instead of draining the whole inbox, so a nested session's drain can never
+/// consume — or reorder — an enclosing session's still-pending events.
+fn take_session_events(session_id: u32) -> Vec<UiEvent> {
+    EVENTS.with(|e| {
+        let taken = std::mem::take(&mut *e.borrow_mut());
+        let (mine, other) = partition_session_events(taken, session_id);
+        *e.borrow_mut() = other;
+        mine
+    })
+}
+
+/// The thread-shared `WH_MOUSE_LL`/`WH_KEYBOARD_LL` handles + install refcount.
+struct HookState {
+    mouse: HHOOK,
+    kbd: HHOOK,
+    refs: u32,
 }
 
 /// Encode a Rust string as a NUL-terminated UTF-16 buffer for the Win32 `*W`
@@ -153,10 +230,11 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Enqueue a UI event and ask the pump to drain. Safe from any on-thread callback
-/// (it takes no [`AppState`] borrow).
-pub(super) fn push_event(event: UiEvent) {
-    EVENTS.with(|e| e.borrow_mut().push(event));
+/// Enqueue a UI event tagged with the id of the [`PopupSession`] that owns it
+/// (#33) and ask the pump to drain. Safe from any on-thread callback (it takes
+/// no [`AppState`] borrow).
+pub(super) fn push_event(session_id: u32, event: UiEvent) {
+    EVENTS.with(|e| e.borrow_mut().push((session_id, event)));
     let owner = OWNER_HWND.with(|h| h.get());
     if owner != 0 {
         unsafe {
@@ -209,13 +287,26 @@ impl WindowKind {
     }
 
     /// The `GWLP_USERDATA` tag identifying this window's kind + depth, so the
-    /// shared `wnd_proc` can recover the exact stack level from an `HWND`.
+    /// shared `wnd_proc` can recover the exact stack level from an `HWND`. This
+    /// tag alone is *not* unique across nested [`PopupSession`]s (every popup is
+    /// tagged `POPUP_TAG` regardless of which session opened it) — see
+    /// [`packed_tag`], which additionally encodes the owning session's id.
     fn tag(self) -> isize {
         match self {
             WindowKind::Popup => POPUP_TAG,
             WindowKind::Flyout(depth) => FLYOUT_TAG + depth as isize,
         }
     }
+}
+
+/// Pack a window's [`WindowKind`] tag together with its owning [`PopupSession`]'s
+/// id (#33) into the single `GWLP_USERDATA` slot: the low 32 bits hold the kind
+/// tag (as before #33), the high 32 bits hold the session id. Both halves are
+/// small, always-non-negative values, so the packing is exact and lossless —
+/// relies on `isize` being 64-bit, true of the `x86_64-pc-windows-msvc` target
+/// this backend compiles for (see the module doc comment).
+fn packed_tag(kind: WindowKind, session_id: u32) -> isize {
+    (((session_id as u64) << 32) | (kind.tag() as u64)) as isize
 }
 
 /// A translated, backend-neutral UI event awaiting application on the drain.
@@ -264,14 +355,20 @@ fn lparam_xy(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-/// The `WindowKind` tagged on a window via `GWLP_USERDATA`, or `None` for the
-/// message-only owner window.
-fn window_kind(hwnd: HWND) -> Option<WindowKind> {
-    match unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } {
-        POPUP_TAG => Some(WindowKind::Popup),
-        n if n >= FLYOUT_TAG => Some(WindowKind::Flyout((n - FLYOUT_TAG) as usize)),
-        _ => None,
-    }
+/// The `(WindowKind, owning session id)` tagged on a window via `GWLP_USERDATA`
+/// ([`packed_tag`]), or `None` for the message-only owner window (untagged) or
+/// an unrecognized tag. The session id is what lets [`PopupSession::drain_events`]
+/// tell nested sessions' events apart (#33).
+fn window_kind(hwnd: HWND) -> Option<(WindowKind, u32)> {
+    let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as u64;
+    let session_id = (raw >> 32) as u32;
+    let tag = (raw & 0xFFFF_FFFF) as isize;
+    let kind = match tag {
+        POPUP_TAG => WindowKind::Popup,
+        n if n >= FLYOUT_TAG => WindowKind::Flyout((n - FLYOUT_TAG) as usize),
+        _ => return None,
+    };
+    Some((kind, session_id))
 }
 
 /// The shared window procedure for the owner, popup, and flyout windows. Every
@@ -294,29 +391,33 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TRAY_CALLBACK => {
-            // The low word of lParam carries the actual mouse message.
+            // The low word of lParam carries the actual mouse message. This
+            // fires on the owner window (no per-session `HWND` tag), so it's
+            // attributed to whichever session is innermost/active (#33).
             if (lparam & 0xFFFF) as u32 == WM_LBUTTONUP {
-                push_event(UiEvent::TrayClicked);
+                push_event(active_session(), UiEvent::TrayClicked);
             }
             0
         }
         WM_MOUSEMOVE => {
-            if let Some(kind) = window_kind(hwnd) {
+            if let Some((kind, session_id)) = window_kind(hwnd) {
                 let (x, y) = to_logical_client(hwnd, lparam_xy(lparam));
-                push_event(UiEvent::MouseMoved { kind, x, y });
+                push_event(session_id, UiEvent::MouseMoved { kind, x, y });
             }
             0
         }
         WM_LBUTTONUP => {
-            if let Some(kind) = window_kind(hwnd) {
+            if let Some((kind, session_id)) = window_kind(hwnd) {
                 let (x, y) = to_logical_client(hwnd, lparam_xy(lparam));
-                push_event(UiEvent::MouseClick { kind, x, y });
+                push_event(session_id, UiEvent::MouseClick { kind, x, y });
             }
             0
         }
         WM_ACTIVATEAPP => {
             if wparam == 0 {
-                push_event(UiEvent::AppDeactivated);
+                // Window-less (fires on the owner window): attribute to the
+                // active session, same as `WM_TRAY_CALLBACK` above (#33).
+                push_event(active_session(), UiEvent::AppDeactivated);
             }
             0
         }
@@ -362,10 +463,14 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         let msg = wparam as u32;
         if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
             let data = &*(lparam as *const MSLLHOOKSTRUCT);
-            push_event(UiEvent::GlobalMouseDown {
-                x: data.pt.x,
-                y: data.pt.y,
-            });
+            // System-wide, window-less: attribute to the active session (#33).
+            push_event(
+                active_session(),
+                UiEvent::GlobalMouseDown {
+                    x: data.pt.x,
+                    y: data.pt.y,
+                },
+            );
         }
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
@@ -382,7 +487,8 @@ unsafe extern "system" fn kbd_hook_proc(code: i32, wparam: WPARAM, lparam: LPARA
     if code == HC_ACTION as i32 && wparam as u32 == WM_KEYDOWN {
         let data = &*(lparam as *const KBDLLHOOKSTRUCT);
         if let Some(key) = input::translate_vk(data.vkCode as u16) {
-            push_event(UiEvent::Key(key));
+            // System-wide, window-less: attribute to the active session (#33).
+            push_event(active_session(), UiEvent::Key(key));
         }
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
@@ -1065,6 +1171,10 @@ struct Flyout {
 /// handler owned for the whole run loop; a context menu borrows the caller's
 /// handler for the duration of its blocking `open_at` / `anchored_to` call.
 struct PopupSession<'a> {
+    /// This session's unique id (#33), allocated by [`next_session_id`]. Tags
+    /// every window this session opens ([`packed_tag`]) and every [`UiEvent`]
+    /// that originates from it, so nested sessions' events never conflate.
+    session_id: u32,
     /// The top-level menu; source of truth for rendering + a11y.
     menu: Menu,
     options: MenuOptions,
@@ -1160,27 +1270,55 @@ impl PopupSession<'_> {
 
     // -- hooks ---------------------------------------------------------------
 
+    /// Install the global low-level hooks, **reference-counted per thread** (#34).
+    /// Low-level hooks are per-thread and every popup session shares the one pump
+    /// thread, so nested sessions must share a single `WH_MOUSE_LL`/`WH_KEYBOARD_LL`
+    /// pair — otherwise each session installs its own and every system input event
+    /// is delivered (and enqueued) twice. This session takes one ref; the actual
+    /// `SetWindowsHookExW` runs only on the 0→1 transition.
     fn install_hooks(&mut self) {
-        if self.mouse_hook.is_null() {
-            self.mouse_hook =
-                unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), self.hinstance, 0) };
+        if !self.mouse_hook.is_null() {
+            return; // this session already holds a ref (idempotent per session)
         }
-        if self.kbd_hook.is_null() {
-            self.kbd_hook = unsafe {
-                SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_hook_proc), self.hinstance, 0)
-            };
-        }
+        let hinstance = self.hinstance;
+        HOOKS.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.refs == 0 {
+                h.mouse =
+                    unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hinstance, 0) };
+                h.kbd =
+                    unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_hook_proc), hinstance, 0) };
+            }
+            h.refs += 1;
+            // Mirror the shared handles into the session as its "holds a ref" flag.
+            self.mouse_hook = h.mouse;
+            self.kbd_hook = h.kbd;
+        });
     }
 
+    /// Release this session's hook ref; the last release (1→0) unhooks (#34).
     fn remove_hooks(&mut self) {
-        if !self.mouse_hook.is_null() {
-            unsafe { UnhookWindowsHookEx(self.mouse_hook) };
-            self.mouse_hook = null_mut();
+        if self.mouse_hook.is_null() {
+            return; // this session holds no ref
         }
-        if !self.kbd_hook.is_null() {
-            unsafe { UnhookWindowsHookEx(self.kbd_hook) };
-            self.kbd_hook = null_mut();
-        }
+        self.mouse_hook = null_mut();
+        self.kbd_hook = null_mut();
+        HOOKS.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.refs > 0 {
+                h.refs -= 1;
+                if h.refs == 0 {
+                    if !h.mouse.is_null() {
+                        unsafe { UnhookWindowsHookEx(h.mouse) };
+                        h.mouse = null_mut();
+                    }
+                    if !h.kbd.is_null() {
+                        unsafe { UnhookWindowsHookEx(h.kbd) };
+                        h.kbd = null_mut();
+                    }
+                }
+            }
+        });
     }
 
     // -- open / close --------------------------------------------------------
@@ -1197,7 +1335,12 @@ impl PopupSession<'_> {
 
         // Reuse the measuring drawer as the panel drawer so shaping/glyph caches
         // carry into the first paint (menu not shaped twice per open) (#23).
-        let mut drawer = RasterDrawer::new_native(scale);
+        // Forced-OS themes render the TARGET OS font, not this host's (#54); the
+        // native drawer is kept for `System`/`Preset`/`Custom`.
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(scale, family),
+            None => RasterDrawer::new_native(scale),
+        };
         let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -1212,7 +1355,11 @@ impl PopupSession<'_> {
         let class = wide("muri_popup_wnd");
         register_popup_class(self.hinstance, &class);
         let hwnd = unsafe {
-            window::create_popup(class.as_ptr(), self.hinstance, WindowKind::Popup.tag())
+            window::create_popup(
+                class.as_ptr(),
+                self.hinstance,
+                packed_tag(WindowKind::Popup, self.session_id),
+            )
         };
         if hwnd.is_null() {
             return;
@@ -1297,7 +1444,12 @@ impl PopupSession<'_> {
             return;
         };
         // Reuse the measuring drawer as the flyout drawer (#23).
-        let mut drawer = RasterDrawer::new_native(scale);
+        // Forced-OS themes render the TARGET OS font, not this host's (#54); the
+        // native drawer is kept for `System`/`Preset`/`Custom`.
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(scale, family),
+            None => RasterDrawer::new_native(scale),
+        };
         let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
@@ -1312,7 +1464,13 @@ impl PopupSession<'_> {
         let kind = WindowKind::Flyout(depth);
         let class = wide("muri_popup_wnd");
         register_popup_class(self.hinstance, &class);
-        let hwnd = unsafe { window::create_popup(class.as_ptr(), self.hinstance, kind.tag()) };
+        let hwnd = unsafe {
+            window::create_popup(
+                class.as_ptr(),
+                self.hinstance,
+                packed_tag(kind, self.session_id),
+            )
+        };
         if hwnd.is_null() {
             return;
         }
@@ -1768,13 +1926,16 @@ impl PopupSession<'_> {
         any
     }
 
-    /// Apply all pending UI events, looping until the inbox is empty (applying one
-    /// can enqueue more). The standalone `open_at` / `anchored_to` pump uses this
-    /// on the caller's stack; the tray drains through [`AppState::drain`] instead so
-    /// it also applies [`TrayHandle`](crate::TrayHandle) commands.
+    /// Apply all pending UI events *tagged with this session's id* (#33),
+    /// looping until this session's slice of the inbox is empty (applying one
+    /// can enqueue more). Events tagged with a different (enclosing or sibling)
+    /// session's id are left in [`EVENTS`] untouched — see [`take_session_events`].
+    /// The standalone `open_at` / `anchored_to` pump uses this on the caller's
+    /// stack; the tray drains through [`AppState::drain`] instead so it also
+    /// applies [`TrayHandle`](crate::TrayHandle) commands.
     fn drain_events(&mut self) {
         loop {
-            let events = EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+            let events = take_session_events(self.session_id);
             let had_events = !events.is_empty();
             for event in events {
                 self.apply_event(event);
@@ -1861,14 +2022,42 @@ impl AppState {
                 // the notification icon (NIM_DELETE). Ends the 'muri-tray' thread.
                 unsafe { PostQuitMessage(0) };
             }
+            TrayCommand::SetTheme(theme) => {
+                self.session.options.theme = theme;
+                self.repaint_open_popup();
+            }
+            TrayCommand::SetOptions(options) => {
+                self.session.options = options;
+                self.repaint_open_popup();
+            }
+            TrayCommand::QueryAnchorRect(reply) => {
+                let rect = match &self.session.anchor {
+                    Anchor::Tray(a) => a.anchor_rect().ok(),
+                    _ => None,
+                };
+                let _ = reply.send(rect);
+            }
         }
     }
 
-    /// Apply all pending commands and UI events, looping until both inboxes are
-    /// empty (applying one can enqueue more).
+    /// Repaint an already-open popup after a live theme/options swap (#45), so an
+    /// in-menu theme switcher redraws instantly instead of only on next open.
+    fn repaint_open_popup(&mut self) {
+        if self.session.popup.is_some() {
+            self.session.truncate_flyouts(0);
+            self.session.redraw(WindowKind::Popup);
+            self.session.sync_a11y();
+        }
+    }
+
+    /// Apply all pending commands and UI events *tagged with this session's id*
+    /// (#33), looping until both inboxes are empty (applying one can enqueue
+    /// more). See [`take_session_events`]: a nested `open_at` / `anchored_to`
+    /// session opened from a command/click handler below leaves its own events
+    /// queued for its own drain, so they're never double-applied here.
     fn drain(&mut self) {
         loop {
-            let events = EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+            let events = take_session_events(self.session.session_id);
             let commands: Vec<TrayCommand> = self
                 .tray
                 .commands
@@ -2162,15 +2351,23 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
     // whole run loop, hence `'static`). Preserve `Tray::dispatch`'s behavior:
     // run the per-surface handler, then project the activation onto the global
     // `MenuEvent` channel (callers only ever invoke this for addressable ids).
+    let surface = tray.surface_id;
     let dispatch: Box<dyn Fn(&MenuId) + 'static> = match tray.on_click.take() {
         Some(handler) => Box::new(move |id| {
             handler(id);
-            crate::event::emit(id.clone());
+            crate::event::emit(id.clone(), surface);
         }),
-        None => Box::new(|id| crate::event::emit(id.clone())),
+        None => Box::new(move |id| crate::event::emit(id.clone(), surface)),
     };
 
+    // Allocate this session's unique id (#33) and mark it active so window-less
+    // events (tray click, global hooks) fired before any nested session opens
+    // are attributed to it.
+    let session_id = next_session_id();
+    ACTIVE_SESSION.with(|c| c.set(session_id));
+
     let session = PopupSession {
+        session_id,
         menu: tray.menu.clone(),
         options: tray.options.clone(),
         dispatch,
@@ -2205,6 +2402,7 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
 
     MAIN_APP.with(|slot| *slot.borrow_mut() = None);
     OWNER_HWND.with(|h| h.set(0));
+    ACTIVE_SESSION.with(|c| c.set(0));
     // Clear the waker so a `TrayHandle` outliving the pump can't post to the
     // now-destroyed owner window.
     if let Ok(mut waker) = waker_arc.lock() {
@@ -2242,7 +2440,9 @@ fn run_popup_session(
     let geom = WinGeometry::for_rect(anchor)
         .ok_or_else(|| Error::Platform("no monitor available for the popup".into()))?;
 
+    let session_id = next_session_id();
     let mut session = PopupSession {
+        session_id,
         menu,
         options,
         dispatch: Box::new(move |id| on_click(id)),
@@ -2254,8 +2454,15 @@ fn run_popup_session(
         mouse_hook: null_mut(),
         kbd_hook: null_mut(),
     };
+    // Mark this session active (#33) so window-less events (global hooks) raised
+    // once its popup opens are attributed to it rather than an enclosing
+    // session's (e.g. a tray loop that opened us from a click handler). Restored
+    // below so control returning to an enclosing session also restores *its*
+    // "active" status.
+    let prev_active_session = ACTIVE_SESSION.with(|c| c.replace(session_id));
     session.open_popup();
     let Some(popup_hwnd) = session.popup.as_ref().map(|p| p.hwnd) else {
+        ACTIVE_SESSION.with(|c| c.set(prev_active_session));
         return Err(Error::Platform("failed to open the popup window".into()));
     };
 
@@ -2294,6 +2501,7 @@ fn run_popup_session(
     // with the popup still open (`close_popup` is a no-op once already closed).
     session.close_popup();
     OWNER_HWND.with(|h| h.set(prev_owner));
+    ACTIVE_SESSION.with(|c| c.set(prev_active_session));
     #[cfg(feature = "a11y")]
     A11Y_OWNER.store(prev_a11y_owner, Ordering::SeqCst);
     Ok(())
@@ -2520,5 +2728,105 @@ mod tests {
             Some(Item::Row(row)) => assert_eq!(row.id, MenuId::from("deep_leaf")),
             other => panic!("expected the deep leaf row, got {other:?}"),
         }
+    }
+
+    // #33: nested popup sessions must not conflate each other's queued events.
+    // `partition_session_events` is the pure logic behind `take_session_events`
+    // (in turn behind both `PopupSession::drain_events` and `AppState::drain`),
+    // so the session-id filtering is exercised here on a plain `Vec` — no
+    // `HWND`/message pump required.
+    #[test]
+    fn session_events_are_filtered_by_owning_session_and_order_preserved() {
+        let outer = 1u32;
+        let inner = 2u32;
+        let events = vec![
+            (
+                outer,
+                UiEvent::MouseMoved {
+                    kind: WindowKind::Popup,
+                    x: 1.0,
+                    y: 1.0,
+                },
+            ),
+            (
+                inner,
+                UiEvent::MouseMoved {
+                    kind: WindowKind::Popup,
+                    x: 2.0,
+                    y: 2.0,
+                },
+            ),
+            (
+                outer,
+                UiEvent::MouseClick {
+                    kind: WindowKind::Popup,
+                    x: 3.0,
+                    y: 3.0,
+                },
+            ),
+            (
+                inner,
+                UiEvent::MouseClick {
+                    kind: WindowKind::Popup,
+                    x: 4.0,
+                    y: 4.0,
+                },
+            ),
+        ];
+
+        let (mine, other) = partition_session_events(events, inner);
+
+        // Only the inner session's two events come back, in their original order.
+        assert_eq!(mine.len(), 2);
+        assert!(matches!(
+            mine[0],
+            UiEvent::MouseMoved { x, .. } if x == 2.0
+        ));
+        assert!(matches!(
+            mine[1],
+            UiEvent::MouseClick { x, .. } if x == 4.0
+        ));
+
+        // The outer session's two events are left behind, untouched and still in
+        // their original order — an inner (nested) session's drain must never
+        // consume, drop, or reorder an outer session's still-pending events.
+        assert_eq!(other.len(), 2);
+        assert_eq!(other[0].0, outer);
+        assert_eq!(other[1].0, outer);
+        assert!(matches!(
+            other[0].1,
+            UiEvent::MouseMoved { x, .. } if x == 1.0
+        ));
+        assert!(matches!(
+            other[1].1,
+            UiEvent::MouseClick { x, .. } if x == 3.0
+        ));
+    }
+
+    // #33: `GWLP_USERDATA` must roundtrip both the window's `WindowKind` and its
+    // owning session's id, so two nested sessions' popups (both tagged
+    // `POPUP_TAG`) remain distinguishable by session id alone.
+    #[test]
+    fn packed_tag_roundtrips_kind_and_session_id() {
+        for (kind, session_id) in [
+            (WindowKind::Popup, 1u32),
+            (WindowKind::Popup, 2u32),
+            (WindowKind::Flyout(0), 1u32),
+            (WindowKind::Flyout(3), 42u32),
+        ] {
+            let raw = packed_tag(kind, session_id);
+            // Mirror `window_kind`'s decode without a live `HWND`.
+            let decoded_session = ((raw as u64) >> 32) as u32;
+            let decoded_tag = (raw as u64 & 0xFFFF_FFFF) as isize;
+            assert_eq!(decoded_session, session_id);
+            assert_eq!(decoded_tag, kind.tag());
+        }
+
+        // Two sessions' top-level popups share the same `WindowKind` tag but
+        // pack to different `GWLP_USERDATA` values — the crux of the #33 fix.
+        assert_ne!(
+            packed_tag(WindowKind::Popup, 1),
+            packed_tag(WindowKind::Popup, 2)
+        );
     }
 }

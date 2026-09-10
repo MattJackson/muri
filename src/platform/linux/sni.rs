@@ -110,6 +110,15 @@ fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
                 }
                 .into()
             }
+            // A rich content row (#44) has no dbusmenu/SNI equivalent (the host
+            // draws plain menu items); degrade to a disabled, empty label so the
+            // native tray menu stays well-formed.
+            Item::Content(_) => StandardItem {
+                label: String::new(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
             Item::Row(row) => {
                 let id = row.id.clone();
                 let label = row.accessible_name();

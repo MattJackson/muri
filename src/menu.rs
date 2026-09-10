@@ -59,6 +59,12 @@ impl From<String> for MenuId {
 pub struct MenuEvent {
     /// The [`MenuId`] of the activated row.
     pub id: MenuId,
+    /// Which surface — [`Tray`](crate::Tray), [`ContextMenu`](crate::ContextMenu),
+    /// or [`Popup`](crate::Popup) — the activation came from (issue #51). A
+    /// consumer with more than one live surface uses this to tell them apart on
+    /// the process-global channel; the muda-compat facade ignores it (structural
+    /// [`MenuId`] equality is unaffected).
+    pub source: crate::SurfaceId,
 }
 
 /// The callback invoked on row activation. Stored by
@@ -155,6 +161,37 @@ impl StyleRun {
         }
     }
 
+    /// A span from a Rust byte range into `text`, converted to the UTF-16 code
+    /// units `start`/`len` are measured in (see the [`StyleRun`] note). `range`
+    /// is clamped to `text`'s bounds and, if an endpoint doesn't land on a char
+    /// boundary, snapped **outward** to the enclosing boundary — so the whole
+    /// character a partial range touches is styled — rather than panicking.
+    pub fn from_byte_range(text: &str, range: std::ops::Range<usize>, color: Color) -> Self {
+        let byte_len = text.len();
+        let start_byte = range.start.min(byte_len);
+        let end_byte = range.end.min(byte_len).max(start_byte);
+
+        // Snap each endpoint outward to the enclosing char boundary (start moves
+        // earlier, end moves later) so a partially-covered char is fully styled.
+        let start_byte = (0..=start_byte)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0);
+        let end_byte = (end_byte..=byte_len)
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(byte_len);
+
+        let start = text[..start_byte].encode_utf16().count();
+        let len = text[start_byte..end_byte].encode_utf16().count();
+
+        StyleRun {
+            start,
+            len,
+            color,
+            weight: None,
+        }
+    }
+
     /// Set an explicit weight for this span.
     pub fn weight(mut self, weight: Weight) -> Self {
         self.weight = Some(weight);
@@ -190,6 +227,18 @@ impl Segment {
         }
     }
 
+    /// A segment that absorbs leftover row width (`Segment::new(text).flex(Flex::Grow)`).
+    /// Pair with [`Segment::trailing_value`] for a flush-right label/value row.
+    pub fn grow(text: impl Into<String>) -> Self {
+        Segment::new(text).flex(Flex::Grow)
+    }
+
+    /// A right-aligned segment (`Segment::new(text).align(Align::Right)`), for
+    /// the trailing value column of a label/value row.
+    pub fn trailing_value(text: impl Into<String>) -> Self {
+        Segment::new(text).align(Align::Right)
+    }
+
     /// Set the alignment.
     pub fn align(mut self, align: Align) -> Self {
         self.align = align;
@@ -205,6 +254,13 @@ impl Segment {
     /// Replace the per-substring style runs.
     pub fn runs(mut self, runs: Vec<StyleRun>) -> Self {
         self.runs = runs;
+        self
+    }
+
+    /// Append a single per-substring style run (sibling of [`Segment::runs`]
+    /// for building up spans one at a time).
+    pub fn run(mut self, run: StyleRun) -> Self {
+        self.runs.push(run);
         self
     }
 
@@ -279,10 +335,29 @@ impl Row {
         Row::default()
     }
 
+    /// A non-interactive row (id = [`MenuId::none`], no check column) carrying
+    /// only text, an optional leading icon, and the enabled flag. Intended for
+    /// the label [`Row`] of an [`Item::Submenu`] or [`Item::SectionHeader`],
+    /// where the [`MenuId`] and `checked` state are discarded anyway (see the
+    /// note on [`Menu::submenu`]/[`Menu::section_header`]) — using this
+    /// constructor makes that discard explicit at the call site.
+    pub fn label_only(text: impl Into<String>) -> Self {
+        Row::info().label(text)
+    }
+
     /// Append a plain-text left-aligned segment (convenience).
     pub fn label(mut self, text: impl Into<String>) -> Self {
         self.segments.push(Segment::new(text));
         self
+    }
+
+    /// Append the common two-column pair: a growing left-aligned label segment
+    /// followed by a right-aligned value segment (`Segment::grow(label)` +
+    /// `Segment::trailing_value(value)`), yielding a flush-right value with no
+    /// reserved chevron column.
+    pub fn label_value(self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.segment(Segment::grow(label))
+            .segment(Segment::trailing_value(value))
     }
 
     /// Append a pre-built segment.
@@ -355,6 +430,166 @@ impl Row {
 }
 
 // =============================================================================
+// Content stacks (issue #44)
+// =============================================================================
+//
+// A declarative, opt-in layout primitive for a row whose body is an arbitrary
+// nested stack rather than the `Segment`-based column model above — the
+// motivating case is an Apple-Weather-style "extra" row: a horizontal hourly
+// strip whose cells each stack a time label, an icon, and a temperature
+// vertically. This is purely additive: every existing `Item`/`Row`/`Segment`
+// path is untouched, and a `Content` row is opted into via the new
+// [`Item::Content`] variant only.
+//
+// Rendering (recursive measure + paint over this tree) lives in
+// `crate::render::paint`, which is the only consumer of these types outside
+// this module.
+
+/// The main axis a [`Stack`] lays its children out along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Left-to-right.
+    Horizontal,
+    /// Top-to-bottom.
+    Vertical,
+}
+
+/// A run of plain text inside a [`Content`] tree, styled independently of the
+/// [`Segment`] column model (no `Flex`, no per-substring [`StyleRun`]s — a
+/// content cell is expected to be small and simple; nest a [`Stack`] if a
+/// cell needs more than one styled run).
+#[derive(Clone, Debug)]
+pub struct TextContent {
+    /// The text to draw.
+    pub text: String,
+    /// Optional font override (else the theme's row font).
+    pub font: Option<Font>,
+    /// Optional color override (else the row's resolved base color).
+    pub color: Option<Color>,
+    /// Alignment within the box this content is given.
+    pub align: Align,
+}
+
+impl TextContent {
+    /// A new, unstyled, left-aligned text content.
+    pub fn new(text: impl Into<String>) -> Self {
+        TextContent {
+            text: text.into(),
+            font: None,
+            color: None,
+            align: Align::Left,
+        }
+    }
+
+    /// Set a font override.
+    pub fn font(mut self, font: Font) -> Self {
+        self.font = Some(font);
+        self
+    }
+
+    /// Set a color override.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Set the alignment within this content's allotted box.
+    pub fn align(mut self, align: Align) -> Self {
+        self.align = align;
+        self
+    }
+}
+
+/// One node in a [`Stack`] tree.
+#[derive(Clone, Debug)]
+pub enum Content {
+    /// A run of text (see [`TextContent`]).
+    Text(TextContent),
+    /// A square-ish icon, drawn at `size` logical points on each side.
+    Image {
+        /// The icon to draw.
+        icon: Icon,
+        /// The side length, in logical points.
+        size: f32,
+    },
+    /// A nested stack (arbitrary depth).
+    Stack(Stack),
+    /// A flexible gap: zero intrinsic size, absorbs an equal share of any
+    /// leftover main-axis space alongside sibling spacers.
+    Spacer,
+}
+
+/// A declarative box-model stack: children laid out along `axis`, separated by
+/// `spacing`, aligned on the cross axis per `align`. The body of an
+/// [`Item::Content`] row, and freely nestable (a horizontal strip of vertical
+/// cells, e.g. the Apple-Weather hourly extra).
+#[derive(Clone, Debug)]
+pub struct Stack {
+    /// The main axis children are laid out along.
+    pub axis: Axis,
+    /// The gap between consecutive children, in logical points.
+    pub spacing: f32,
+    /// Cross-axis alignment of children within the stack's cross-axis extent.
+    pub align: Align,
+    /// The stack's children, in order.
+    pub children: Vec<Content>,
+    /// Optional background fill, painted behind this stack's own bounds
+    /// before its children. Only the **top-level** stack of an
+    /// [`Item::Content`] row paints this (a nested stack's `background` is
+    /// currently ignored) — kept simple rather than churning the row-tint
+    /// story for nested cells.
+    pub background: Option<Color>,
+}
+
+impl Stack {
+    /// A new empty horizontal stack with the given inter-child spacing.
+    pub fn horizontal(spacing: f32) -> Self {
+        Stack {
+            axis: Axis::Horizontal,
+            spacing,
+            align: Align::Left,
+            children: Vec::new(),
+            background: None,
+        }
+    }
+
+    /// A new empty vertical stack with the given inter-child spacing.
+    pub fn vertical(spacing: f32) -> Self {
+        Stack {
+            axis: Axis::Vertical,
+            spacing,
+            align: Align::Left,
+            children: Vec::new(),
+            background: None,
+        }
+    }
+
+    /// Set the cross-axis alignment.
+    pub fn align(mut self, align: Align) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// Set an explicit background fill (top-level stack only; see the field doc).
+    pub fn background(mut self, color: Color) -> Self {
+        self.background = Some(color);
+        self
+    }
+
+    /// Append a single child.
+    pub fn child(mut self, content: Content) -> Self {
+        self.children.push(content);
+        self
+    }
+
+    /// Replace all children.
+    pub fn children(mut self, children: Vec<Content>) -> Self {
+        self.children = children;
+        self
+    }
+}
+
+// =============================================================================
 // Menu tree
 // =============================================================================
 
@@ -374,16 +609,26 @@ pub enum Item {
         /// The nested menu shown in the flyout.
         menu: Menu,
     },
+    /// A non-interactive, non-clickable row whose body is an arbitrary
+    /// declarative [`Stack`] (issue #44) rather than the `Segment` column
+    /// model — e.g. a horizontal hourly-forecast strip. Row height is derived
+    /// from the stack's measured content. Never carries a [`MenuId`]: like
+    /// [`Item::SectionHeader`], it is always non-interactive (see
+    /// [`Item::is_interactive`]) and never appears in
+    /// [`crate::render::paint::LaidMenu::rows`] — a future revision could add
+    /// an id if an interactive content row is ever needed.
+    Content(Stack),
 }
 
 impl Item {
     /// Whether this item can receive focus/clicks (rows and submenus that carry
-    /// a real id). Separators and section headers are never interactive.
+    /// a real id). Separators, section headers, and content rows are never
+    /// interactive.
     pub fn is_interactive(&self) -> bool {
         match self {
             Item::Row(row) => row.enabled && !row.id.is_none(),
             Item::Submenu { label, .. } => label.enabled,
-            Item::Separator | Item::SectionHeader(_) => false,
+            Item::Separator | Item::SectionHeader(_) | Item::Content(_) => false,
         }
     }
 }
@@ -395,6 +640,10 @@ impl Item {
 ///
 /// Shared by every platform backend's flyout stack (macOS/Windows/X11) so the
 /// open-submenu path is resolved by borrowing, never cloning, the nested menus.
+// A tray-only Linux build (`default-features = false`) compiles no flyout backend
+// at all — the SNI tray defers submenu rendering to the host — so this helper has
+// no caller there; allow it rather than warn in that one configuration (#21).
+#[cfg_attr(not(feature = "x11-popup"), allow(dead_code))]
 pub(crate) fn descend(root: &Menu, parents: impl IntoIterator<Item = usize>) -> Option<&Menu> {
     let mut menu = root;
     for parent in parents {
@@ -439,14 +688,31 @@ impl Menu {
     }
 
     /// Append an [`Item::SectionHeader`].
+    ///
+    /// Note: the label `Row`'s [`MenuId`] and `checked` state are ignored for
+    /// this position; only its text, leading icon, and `enabled` flag are
+    /// used. Consider [`Row::label_only`] to make that explicit at the call
+    /// site.
     pub fn section_header(mut self, row: Row) -> Self {
         self.items.push(Item::SectionHeader(row));
         self
     }
 
     /// Append an [`Item::Submenu`].
+    ///
+    /// Note: the label `Row`'s [`MenuId`] and `checked` state are ignored for
+    /// this position; only its text, leading icon, and `enabled` flag are
+    /// used. Consider [`Row::label_only`] to make that explicit at the call
+    /// site.
     pub fn submenu(mut self, label: Row, menu: Menu) -> Self {
         self.items.push(Item::Submenu { label, menu });
+        self
+    }
+
+    /// Append an [`Item::Content`] row (issue #44): a non-interactive row
+    /// whose body is an arbitrary declarative [`Stack`].
+    pub fn content(mut self, stack: Stack) -> Self {
+        self.items.push(Item::Content(stack));
         self
     }
 
@@ -588,5 +854,92 @@ mod tests {
         let info = Row::info();
         assert!(info.id.is_none());
         assert!(info.enabled);
+    }
+
+    // Issue #49 — convenience constructors for the two-column / per-span build path.
+    #[test]
+    fn segment_grow_and_trailing_value() {
+        let label = Segment::grow("me@example.com");
+        assert_eq!(label.flex, Flex::Grow);
+        assert_eq!(label.align, Align::Left);
+
+        let value = Segment::trailing_value("99%");
+        assert_eq!(value.align, Align::Right);
+        assert_eq!(value.flex, Flex::Fixed);
+    }
+
+    #[test]
+    fn segment_run_appends_single_style_run() {
+        let seg = Segment::new("47% / 89%")
+            .run(StyleRun::new(0, 3, Color::SystemRed))
+            .run(StyleRun::new(6, 3, Color::SystemGreen));
+        assert_eq!(seg.runs.len(), 2);
+        assert_eq!(seg.runs[0].color, Color::SystemRed);
+        assert_eq!(seg.runs[1].color, Color::SystemGreen);
+    }
+
+    #[test]
+    fn row_label_value_produces_grow_and_right_segments() {
+        let row = Row::info().label_value("me@example.com", "Active");
+        assert_eq!(row.segments.len(), 2);
+        assert_eq!(row.segments[0].text, "me@example.com");
+        assert_eq!(row.segments[0].flex, Flex::Grow);
+        assert_eq!(row.segments[1].text, "Active");
+        assert_eq!(row.segments[1].align, Align::Right);
+    }
+
+    #[test]
+    fn style_run_from_byte_range_ascii() {
+        let text = "47% / 89%";
+        // "89%" starts at byte 6, len 3 — pure ASCII, so byte offsets == UTF-16 units.
+        let run = StyleRun::from_byte_range(text, 6..9, Color::SystemRed);
+        assert_eq!(run.start, 6);
+        assert_eq!(run.len, 3);
+    }
+
+    #[test]
+    fn style_run_from_byte_range_multibyte() {
+        // "café" — 'é' is a 2-byte UTF-8 char but a single UTF-16 unit, so byte
+        // offset 4 (start of 'é') is UTF-16 offset 3, and its byte length 2
+        // is UTF-16 length 1.
+        let text = "café";
+        let run = StyleRun::from_byte_range(text, 4..6, Color::SystemRed);
+        assert_eq!(run.start, 3);
+        assert_eq!(run.len, 1);
+
+        // Emoji (4-byte UTF-8, but 2 UTF-16 code units — a surrogate pair).
+        let text = "hi 🎉!";
+        let emoji_byte_start = text.find('🎉').unwrap();
+        let emoji_byte_len = '🎉'.len_utf8();
+        let run = StyleRun::from_byte_range(
+            text,
+            emoji_byte_start..emoji_byte_start + emoji_byte_len,
+            Color::SystemRed,
+        );
+        assert_eq!(run.start, "hi ".encode_utf16().count());
+        assert_eq!(run.len, 2);
+    }
+
+    #[test]
+    fn style_run_from_byte_range_clamps_to_char_boundary() {
+        // Range that lands mid-codepoint (byte 3 is inside 'é' which spans
+        // bytes 3..5 in "café") should snap inward rather than panicking.
+        let text = "café";
+        let run = StyleRun::from_byte_range(text, 3..text.len() + 10, Color::SystemRed);
+        // Start snaps back to the nearest boundary at or before byte 3 (byte 3
+        // itself is not a boundary, so it snaps to byte 3's preceding boundary).
+        assert!(run.start <= text.encode_utf16().count());
+        // End clamps to the string's own byte length.
+        assert_eq!(run.start + run.len, text.encode_utf16().count());
+    }
+
+    // Issue #50 — Row::label_only makes the MenuId/checked discard explicit.
+    #[test]
+    fn row_label_only_has_no_id_and_no_checked() {
+        let row = Row::label_only("Section");
+        assert!(row.id.is_none());
+        assert_eq!(row.checked, None);
+        assert_eq!(row.accessible_name(), "Section");
+        assert!(row.enabled);
     }
 }

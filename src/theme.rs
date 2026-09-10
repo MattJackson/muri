@@ -27,6 +27,59 @@ pub enum OsFamily {
     Gnome,
 }
 
+impl OsFamily {
+    /// The target OS's real UI font family names, most-preferred first.
+    ///
+    /// This is a **target** face list, not a host-resolution list: it names
+    /// what the *forced* platform look (issue #54) should actually render in
+    /// — Segoe UI for Windows, SF Pro (or the private `.AppleSystemUIFont`) for
+    /// macOS, Cantarell/Ubuntu for GNOME — regardless of which OS muri is
+    /// currently running on.
+    ///
+    /// Segoe UI and SF Pro are proprietary, not redistributable, and not
+    /// installed on every host, so this list is only ever *tried first*
+    /// against whatever fonts the host actually has (see
+    /// [`crate::render::RasterDrawer::with_forced_theme`]); when absent, the
+    /// renderer falls back to [`OsFamily::fallback_font_families`] rather than
+    /// silently substituting the host's own native UI font. Pixel-perfect
+    /// parity therefore requires the real target face to be installed; muri's
+    /// job is to never lie about it by drawing the wrong OS's font instead.
+    pub fn ui_font_families(&self) -> &'static [&'static str] {
+        match self {
+            OsFamily::MacOs => &[
+                "SF Pro Text",
+                "SF Pro",
+                ".AppleSystemUIFont",
+                "Helvetica Neue",
+            ],
+            OsFamily::Windows => &["Segoe UI"],
+            OsFamily::Gnome => &["Cantarell", "Ubuntu"],
+        }
+    }
+
+    /// Free, freely-redistributable-or-broadly-preinstalled families to try, in
+    /// order, when none of [`ui_font_families`](OsFamily::ui_font_families) is
+    /// installed on the host — used only by a **forced** theme, which must
+    /// never fall back to the host's own native UI font (that would silently
+    /// reproduce issue #54: a Windows-forced menu rendering in SF Pro on a
+    /// Mac).
+    ///
+    /// Honesty note: none of these are metrically identical to Segoe UI or SF
+    /// Pro — muri does not claim Segoe/SF metrics it can't achieve. GNOME's
+    /// own Cantarell/Ubuntu are freely available and already listed in
+    /// [`ui_font_families`](OsFamily::ui_font_families) for the GNOME case, so
+    /// only macOS/Windows need a distinct, more broadly-available fallback
+    /// here (DejaVu Sans / Liberation Sans, both common on Linux and often
+    /// present wherever muri's own headless fonts are vendored from).
+    pub fn fallback_font_families(&self) -> &'static [&'static str] {
+        match self {
+            OsFamily::MacOs => &["DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial"],
+            OsFamily::Windows => &["Liberation Sans", "DejaVu Sans", "Noto Sans", "Arial"],
+            OsFamily::Gnome => &["Cantarell", "Ubuntu", "DejaVu Sans", "Liberation Sans"],
+        }
+    }
+}
+
 /// Light/dark selection for a themed OS look. `Auto` follows the host OS
 /// appearance; `Light`/`Dark` force it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -167,6 +220,28 @@ impl ThemeSource {
     /// custom themes render exactly as authored.
     pub fn injects_system(&self) -> bool {
         matches!(self, ThemeSource::System(_))
+    }
+
+    /// The [`OsFamily`] this source **forces**, if any — `Some` only for
+    /// [`MacOs`](ThemeSource::MacOs) / [`Windows`](ThemeSource::Windows) /
+    /// [`Gnome`](ThemeSource::Gnome); `None` for `System`/`Preset`/`Custom`,
+    /// none of which force a specific platform look.
+    ///
+    /// This is the seam a platform backend uses to pick the right drawer
+    /// constructor (issue #54): when `Some(family)`, the popup must build its
+    /// [`crate::render::RasterDrawer`] with
+    /// [`RasterDrawer::with_forced_theme`](crate::render::RasterDrawer::with_forced_theme)
+    /// (which pins the *target* OS's UI font family, never the host's) instead
+    /// of [`RasterDrawer::new_native`](crate::render::RasterDrawer::new_native)
+    /// (which pins the *host's* native menu font — correct only for
+    /// `System(..)`).
+    pub fn forced_family(&self) -> Option<OsFamily> {
+        match self {
+            ThemeSource::MacOs(_) => Some(OsFamily::MacOs),
+            ThemeSource::Windows(_) => Some(OsFamily::Windows),
+            ThemeSource::Gnome(_) => Some(OsFamily::Gnome),
+            ThemeSource::System(_) | ThemeSource::Preset(_) | ThemeSource::Custom(_) => None,
+        }
     }
 
     /// Resolve to a concrete [`Theme`], given the **host** OS family and its live
@@ -310,13 +385,15 @@ impl Theme {
                 Color::Rgba(246, 246, 246, 209)
             },
             corner_radius: 6.0,
-            // Roomier than a tight list to match the native menu's vertical
-            // rhythm (DEVICE-VERIFY against NSMenu).
-            row_height: 24.0,
-            padding: Insets::symmetric(10.0, 5.0),
-            column_gap: 10.0,
-            row_font: Font::system(13.5, Weight::Regular),
-            header_font: Font::system(13.5, Weight::Bold),
+            // Matched to the macOS menu's rhythm: item height ~22, ~14pt of
+            // horizontal inset, 13pt SF. #41: earlier builds read looser (rows
+            // too tall / gaps wide); these are tighter. All metrics are public
+            // `Theme` fields — override for exact pixel matching. DEVICE-VERIFY.
+            row_height: 22.0,
+            padding: Insets::symmetric(14.0, 4.0),
+            column_gap: 8.0,
+            row_font: Font::system(13.0, Weight::Regular),
+            header_font: Font::system(13.0, Weight::Bold),
             ..base
         }
     }
@@ -440,6 +517,21 @@ fn literal(color: Color, fallback: Rgba) -> Rgba {
     }
 }
 
+/// How the popup reserves the leading (checkmark/icon) gutter (#43).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GutterPolicy {
+    /// Reserve the shared gutter only when the menu has checkmarks, so checked and
+    /// unchecked rows align (native `NSMenu`); an icon-only menu stays inline. The
+    /// OEM default.
+    #[default]
+    Auto,
+    /// Always reserve the gutter (every row's text aligns past it).
+    Always,
+    /// Never reserve a gutter — leading icons/checkmarks are per-row inline and
+    /// only offset their own row.
+    Never,
+}
+
 /// Tunable popup options layered on top of the [`Theme`].
 #[derive(Clone, Debug, Default)]
 pub struct MenuOptions {
@@ -449,6 +541,63 @@ pub struct MenuOptions {
     pub max_width: Option<f32>,
     /// Theme source.
     pub theme: ThemeSource,
+    /// Leading-gutter reservation policy (#43). Defaults to
+    /// [`GutterPolicy::Auto`] — the OEM-native behavior.
+    pub gutter: GutterPolicy,
+}
+
+impl MenuOptions {
+    /// Set the theme source.
+    pub fn theme(mut self, t: ThemeSource) -> Self {
+        self.theme = t;
+        self
+    }
+
+    /// Set the leading-gutter reservation policy.
+    pub fn gutter(mut self, g: GutterPolicy) -> Self {
+        self.gutter = g;
+        self
+    }
+
+    /// Set the minimum popup width, in logical points.
+    ///
+    /// `w` is clamped to be non-negative and non-`NaN`: a `NaN` input leaves
+    /// `min_width` unset, and a negative input is clamped up to `0.0`. If a
+    /// `max_width` is already set and `w` would exceed it, `max_width` is
+    /// raised to match `w` so `min <= max` always holds.
+    pub fn min_width(mut self, w: f32) -> Self {
+        if w.is_nan() {
+            return self;
+        }
+        let w = w.max(0.0);
+        self.min_width = Some(w);
+        if let Some(max) = self.max_width {
+            if max < w {
+                self.max_width = Some(w);
+            }
+        }
+        self
+    }
+
+    /// Set the maximum popup width, in logical points.
+    ///
+    /// `w` is clamped to be non-negative and non-`NaN`: a `NaN` input leaves
+    /// `max_width` unset, and a negative input is clamped up to `0.0`. If a
+    /// `min_width` is already set and exceeds `w`, `w` is raised to match
+    /// `min_width` so `min <= max` always holds.
+    pub fn max_width(mut self, w: f32) -> Self {
+        if w.is_nan() {
+            return self;
+        }
+        let mut w = w.max(0.0);
+        if let Some(min) = self.min_width {
+            if w < min {
+                w = min;
+            }
+        }
+        self.max_width = Some(w);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -651,5 +800,111 @@ mod tests {
         assert!(matches!(term.background, Color::Rgba(0, 0, 0, 255)));
         let nord = Preset::Nord.theme();
         assert_ne!(nord.resolve(Color::Label), term.resolve(Color::Label));
+    }
+
+    #[test]
+    fn menu_options_builder_sets_theme_and_gutter() {
+        let opts = MenuOptions::default()
+            .theme(ThemeSource::Preset(Preset::Nord))
+            .gutter(GutterPolicy::Always);
+        assert!(matches!(opts.theme, ThemeSource::Preset(Preset::Nord)));
+        assert!(matches!(opts.gutter, GutterPolicy::Always));
+    }
+
+    #[test]
+    fn menu_options_width_clamps_negative() {
+        let opts = MenuOptions::default().min_width(-5.0).max_width(-1.0);
+        assert_eq!(opts.min_width, Some(0.0));
+        assert_eq!(opts.max_width, Some(0.0));
+    }
+
+    #[test]
+    fn menu_options_width_rejects_nan() {
+        let opts = MenuOptions::default()
+            .min_width(f32::NAN)
+            .max_width(f32::NAN);
+        assert_eq!(opts.min_width, None);
+        assert_eq!(opts.max_width, None);
+    }
+
+    #[test]
+    fn menu_options_max_below_min_is_raised_to_min() {
+        // max_width set first, then a larger min_width raises it.
+        let opts = MenuOptions::default().max_width(50.0).min_width(100.0);
+        assert_eq!(opts.min_width, Some(100.0));
+        assert_eq!(opts.max_width, Some(100.0));
+    }
+
+    #[test]
+    fn menu_options_min_above_existing_max_raises_max() {
+        // min_width set first with a larger value, then max_width set smaller
+        // gets raised back up to min.
+        let opts = MenuOptions::default().min_width(80.0).max_width(20.0);
+        assert_eq!(opts.min_width, Some(80.0));
+        assert_eq!(opts.max_width, Some(80.0));
+    }
+
+    #[test]
+    fn menu_options_normal_widths_pass_through() {
+        let opts = MenuOptions::default().min_width(100.0).max_width(300.0);
+        assert_eq!(opts.min_width, Some(100.0));
+        assert_eq!(opts.max_width, Some(300.0));
+    }
+
+    /// Issue #54: each forced OS family names its own real UI font first —
+    /// Segoe UI for Windows, an SF-Pro-family face for macOS, Cantarell/Ubuntu
+    /// for GNOME — never the host's face.
+    #[test]
+    fn os_family_ui_font_families_name_the_target_os_font() {
+        assert_eq!(OsFamily::Windows.ui_font_families(), &["Segoe UI"]);
+        assert_eq!(
+            OsFamily::MacOs.ui_font_families(),
+            &[
+                "SF Pro Text",
+                "SF Pro",
+                ".AppleSystemUIFont",
+                "Helvetica Neue"
+            ]
+        );
+        assert_eq!(OsFamily::Gnome.ui_font_families(), &["Cantarell", "Ubuntu"]);
+
+        // Every family's fallback list is non-empty (there is always something
+        // to try before giving up and leaving `FontFamily::System` unpinned).
+        assert!(!OsFamily::MacOs.fallback_font_families().is_empty());
+        assert!(!OsFamily::Windows.fallback_font_families().is_empty());
+        assert!(!OsFamily::Gnome.fallback_font_families().is_empty());
+    }
+
+    /// `forced_family` is the platform-backend wiring seam: `Some` only for
+    /// the three OS-forcing sources, `None` for everything else.
+    #[test]
+    fn forced_family_identifies_only_the_os_forcing_sources() {
+        assert_eq!(
+            ThemeSource::MacOs(ThemeMode::Auto).forced_family(),
+            Some(OsFamily::MacOs)
+        );
+        assert_eq!(
+            ThemeSource::Windows(ThemeMode::Auto).forced_family(),
+            Some(OsFamily::Windows)
+        );
+        assert_eq!(
+            ThemeSource::Gnome(ThemeMode::Auto).forced_family(),
+            Some(OsFamily::Gnome)
+        );
+        assert_eq!(ThemeSource::System(ThemeMode::Auto).forced_family(), None);
+        assert_eq!(ThemeSource::Preset(Preset::Nord).forced_family(), None);
+        assert_eq!(ThemeSource::Custom(Box::default()).forced_family(), None);
+    }
+
+    #[test]
+    fn menu_options_struct_literal_still_compiles() {
+        // Backward compatibility: bare struct-literal construction must still work.
+        let opts = MenuOptions {
+            min_width: Some(10.0),
+            max_width: Some(20.0),
+            theme: ThemeSource::default(),
+            gutter: GutterPolicy::Never,
+        };
+        assert_eq!(opts.min_width, Some(10.0));
     }
 }

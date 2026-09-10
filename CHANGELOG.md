@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-09-10
+
+A large correctness + API-ergonomics wave: gamma-correct text rendering, genuine
+per-OS forced themes (with the target OS font), a rich-content-row layout
+primitive, runtime theme swapping, per-surface event correlation, and a broad set
+of compat-facade and native-API ergonomics fixes.
+
+### Added
+
+- **#44 — rich content rows.** New additive layout primitive — `Stack` (with
+  `Axis`, `Content`, `TextContent`, `Spacer`) and `Item::Content(Stack)` /
+  `Menu::content` — for visually rich, still-OEM menus (an Apple-Weather-extra
+  hourly strip, dashboards). Default text rows are unchanged; rich rows are
+  non-interactive display stacks with a recursive measure/paint pass.
+- **#54 — forced themes render the TARGET OS font.** `ThemeSource::MacOs/Windows/
+  Gnome` now resolve their target UI family (Segoe UI / SF Pro / Cantarell), with
+  a free metric-compatible fallback, and **never** silently use the host's own UI
+  font. Proprietary faces still need to be installed for pixel parity (documented).
+- **#45 — compat escape hatch + runtime theme swap.** `Menu::as_native`,
+  `Menu::open_custom_with_options`, `TrayIconBuilder::with_options/with_theme`, and
+  live `TrayHandle::set_theme`/`set_options` (+ compat `TrayIcon::set_theme/
+  set_options`) — enables an in-menu "Preview theme" switcher and single-machine
+  cross-OS theme preview.
+- **#46 — `MainThreadMarker`.** `Tray::run`/`spawn` now take a `!Send` main-thread
+  marker, turning the macOS `NSStatusItem` affinity from a doc note into a
+  compile-time contract.
+- **#47 — `TrayHandle` auto-removal.** `TrayHandle` now implements `Drop`, posting
+  `Shutdown` when the last handle of a family drops (matching `tray-icon`).
+- **#48 — anchor-rect accessors.** `Tray::anchor_rect` and best-effort cross-thread
+  `TrayHandle::anchor_rect`; compat `TrayIcon::rect()` now returns the real native
+  rect (was `None` on every platform).
+- **#49/#50 — row-build ergonomics.** `Segment::grow/trailing_value/run`,
+  `Row::label_value`, `StyleRun::from_byte_range`, and `Row::label_only` (plus
+  doc notes that a submenu/section-header label's id & checked state are ignored).
+- **#51 — per-surface event correlation.** `MenuEvent` gains a `source: SurfaceId`;
+  `Tray`/`ContextMenu`/`Popup` expose `surface_id()` so multi-surface consumers can
+  tell a tray activation from a context-menu one on the global channel.
+- **#52 — `MenuOptions` builder.** `.theme()/.min_width()/.max_width()/.gutter()`
+  with NaN/negative/`min>max` clamping.
+- **#53 — compat ergonomics.** `Icon::data() -> IconData` (PNG-backed icons no
+  longer report a zero-size RGBA), and a `MuriRowExt` trait grouping the
+  muri-extension row setters.
+- **#55 — cross-OS theme conformity goldens.** Host-independent golden images pin
+  that each forced theme renders its target-OS metrics on any CI runner.
+
+### Fixed
+
+- **#42 — gamma-correct text rendering.** Glyph/edge compositing now blends in
+  linear light instead of directly on sRGB-encoded bytes. Naive sRGB blending left
+  anti-aliased edges too dark, so dark-on-light menu text read noticeably heavier
+  than a native CoreText/Quartz menu; text now matches the native weight. (A minor
+  size-dependent tracking difference from CoreText remains and is documented.)
+- **#33 — Windows nested popup sessions no longer conflate events.** Each popup
+  session gets a unique id (packed into `GWLP_USERDATA`) and drains only its own
+  tagged events, so a tray handler that opens a nested context menu can't steal the
+  outer popup's hover/click events. (Device-verify pending on real Windows.)
+- **#35 (carried), #38 — Linux** popup device-coordinate clamping and tray
+  re-install cleanup (from prior waves, verified in this suite).
+
+### Hardening (pre-release audit)
+
+- **Check-column reservation** now fires for any *checkable* row
+  (`checked.is_some()`), matching the documented "`Some(true/false)` shows a check
+  column" contract — a menu whose checkable rows were all currently unchecked
+  previously reserved no gutter, so its text jumped right the instant one toggled on.
+- **`TrayHandle` shutdown-on-last-drop is now race-free.** The "last clone" signal
+  moved from an `Arc::strong_count == 1` check (which two final clones dropping
+  concurrently could both skip, leaking the tray) to an `Arc<HandleFamily>` drop
+  guard that fires exactly once.
+- **Gamma-correct blend uses a lookup table** instead of a per-pixel `powf`, with
+  an exact fast path for fully-opaque blits — removing the hot-path cost the #42
+  change would otherwise have added to every popup open.
+
+### Changed
+
+- **#21 — X11 popup path is feature-gated.** The `x11-popup` feature (default-on)
+  guards the `x11rb` dependency, so a tray-only Linux consumer can build
+  `default-features = false` and drop `x11rb` + `x11rb-protocol` + `gethostname`.
+- **#20 — `ksni`** builds with `default-features = false` + `async-io`, dropping an
+  unused `tokio` runtime.
+- **#39 — dependency-skew notes** for the `a11y` Windows `windows`/objc2 0.5 stack.
+- **#41 — macOS theme metrics** nudged closer to native `NSMenu` (row height 22,
+  padding, column gap, 13pt system font).
+- **#43 — configurable gutter policy** (`GutterPolicy::Auto/Always/Never`) via
+  `MenuOptions.gutter`.
+- **#25–#32 — compat-facade correctness** (per-span value colors, bold/checkmark
+  decoupling, submenu leading icons, `CheckMenuItem` extensions, `init_for_*` /
+  `show_context_menu_for_*` fixes, GTK signatures) — from the compat wave.
+
 ## [0.10.4] - 2026-09-10
 
 ### Fixed

@@ -181,6 +181,22 @@ fn build_level(menu: &Menu, next: &mut u64) -> Vec<AxNode> {
                 item_index: Some(i),
                 children: Vec::new(),
             },
+            // A rich content row (#44) is a non-interactive display stack with no
+            // single accessible label; expose it like a section header/group so
+            // the tree stays well-formed without inventing a name.
+            Item::Content(_) => AxNode {
+                id,
+                role: AxRole::GroupLabel,
+                name: String::new(),
+                enabled: false,
+                checked: None,
+                has_popup: false,
+                expanded: None,
+                pos_in_set: None,
+                set_size: None,
+                item_index: Some(i),
+                children: Vec::new(),
+            },
             Item::Row(row) => AxNode {
                 id,
                 role: if row.checked.is_some() {
@@ -462,6 +478,25 @@ mod tests {
         let tree = build_tree(&menu());
         assert_eq!(tree.root.role, AxRole::Menu);
         assert_eq!(tree.root.children.len(), 7);
+    }
+
+    #[test]
+    fn content_row_maps_to_a_noninteractive_group_label() {
+        use crate::menu::{Content, Stack, TextContent};
+        let menu = Menu::new()
+            .row(Row::new("a").label("Alpha"))
+            .content(Stack::vertical(2.0).child(Content::Text(TextContent::new("12"))));
+        let tree = build_tree(&menu);
+        let c = &tree.root.children;
+        assert_eq!(c.len(), 2);
+        // The Item::Content row (#44) is a non-interactive display stack: mapped to
+        // a GroupLabel with no accessible name and no children, and it must not be
+        // counted as a focusable sibling (no pos_in_set).
+        assert_eq!(c[1].role, AxRole::GroupLabel);
+        assert_eq!(c[1].name, "");
+        assert!(!c[1].enabled);
+        assert!(c[1].children.is_empty());
+        assert_eq!(c[1].pos_in_set, None);
     }
 
     #[test]

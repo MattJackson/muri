@@ -235,6 +235,9 @@ fn print_menu(menu: &Menu, depth: usize) {
                 print_row(label, "> ", &pad);
                 print_menu(menu, depth + 1);
             }
+            // A rich content row (#44) is a display-only layout stack, not a
+            // labelled row; this text dump just marks its presence.
+            Item::Content(_) => println!("{pad}[content]"),
         }
     }
 }

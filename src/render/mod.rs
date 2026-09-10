@@ -86,6 +86,7 @@ type IconCacheEntry = (Arc<[u8]>, DecodedIcon);
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
 use crate::platform::{Platform, SystemFont, SystemFontSource};
 use crate::style::{Font, FontFamily, Rgba, Weight};
+use crate::theme::OsFamily;
 
 /// A shaped run of text to blit, with its resolved color and weight. The layout
 /// stage produces these from a [`Segment`](crate::Segment)'s text and style
@@ -268,6 +269,40 @@ impl RasterDrawer {
         let ui_family = system
             .and_then(|sf| register_system_font(&mut db, sf.source))
             .or_else(|| resolve_ui_family(&db));
+        Self::from_parts(scale, db, ui_family)
+    }
+
+    /// Create a raster drawer for a **forced** OS theme
+    /// ([`ThemeSource::MacOs`](crate::theme::ThemeSource::MacOs) /
+    /// [`Windows`](crate::theme::ThemeSource::Windows) /
+    /// [`Gnome`](crate::theme::ThemeSource::Gnome), i.e. whenever
+    /// [`ThemeSource::forced_family`](crate::theme::ThemeSource::forced_family)
+    /// returns `Some`), pinning `FontFamily::System` to the *target* OS's UI
+    /// font rather than the host's (issue #54).
+    ///
+    /// [`RasterDrawer::new_native`] is correct only for `System(..)`: it pins
+    /// whatever native menu font [`Platform::system_menu_font`] reports for
+    /// the **host** OS. A forced theme must render in the *target* OS's font
+    /// on *any* host — a `Windows`-forced menu must use Segoe UI even when
+    /// running on macOS — so this constructor resolves against
+    /// [`OsFamily::ui_font_families`] / [`OsFamily::fallback_font_families`]
+    /// instead of the host-native path, and — the honest limit this issue is
+    /// about — **never** falls back to the host's resolved native UI family
+    /// (`resolve_ui_family`). See `resolve_forced_ui_family` for the exact
+    /// three-step resolution and the caveat about proprietary target faces
+    /// (Segoe UI / SF Pro) not being redistributable.
+    ///
+    /// Platform-backend wiring note: a popup's construction site should choose
+    /// between this and [`RasterDrawer::new_native`] based on
+    /// `theme_source.forced_family()` — `Some(family)` calls this,
+    /// `None` calls `new_native`.
+    pub fn with_forced_theme(scale: f32, family: OsFamily) -> Self {
+        let db = cached_system_fonts_db();
+        let ui_family = resolve_forced_ui_family(
+            &db,
+            family.ui_font_families(),
+            family.fallback_font_families(),
+        );
         Self::from_parts(scale, db, ui_family)
     }
 
@@ -774,6 +809,40 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
     query_face(db, DbFamily::Name(&name), 400).map(|_| name)
 }
 
+/// Resolve the UI family to pin for a **forced** OS theme (issue #54):
+/// [`RasterDrawer::with_forced_theme`]'s pure resolution step.
+///
+/// Tries, in order, each name in `target_families` (the target OS's real UI
+/// font, e.g. `["Segoe UI"]`), then each name in `fallback_families` (a free
+/// face broadly available regardless of host OS), returning the first that is
+/// actually installed in `db` (a plain family-query hit, at weight 400 — a
+/// forced theme's font doesn't need the regular/bold-distinct-face invariant
+/// [`resolve_ui_family`] enforces, since it's naming one specific real family
+/// rather than discovering *some* usable UI face).
+///
+/// Deliberately does **not** call [`resolve_ui_family`] (the *host's* native
+/// UI font resolver) as a last resort: doing so is exactly the bug issue #54
+/// reports — a forced Windows theme silently rendering in the host's SF Pro on
+/// macOS. Returns `None` when neither list has an installed hit, in which
+/// case the caller leaves `FontFamily::System` unpinned (falling through to
+/// `fontdb`'s own generic `SansSerif` family, not to a host-specific pin).
+///
+/// Honesty caveat: Segoe UI and SF Pro are proprietary and not bundled by
+/// muri, so `target_families` only wins when the real target font happens to
+/// be installed on this host; otherwise the free `fallback_families` face is
+/// used, which is *not* metrically identical to the target font.
+pub(crate) fn resolve_forced_ui_family(
+    db: &Database,
+    target_families: &[&str],
+    fallback_families: &[&str],
+) -> Option<String> {
+    target_families
+        .iter()
+        .chain(fallback_families.iter())
+        .find(|name| query_face(db, DbFamily::Name(name), 400).is_some())
+        .map(|name| name.to_string())
+}
+
 /// Resolve a concrete UI font family whose **regular and bold are distinct,
 /// real faces within that same family**, so a bold section header and a regular
 /// row read as one typeface at two weights.
@@ -1141,6 +1210,86 @@ mod tests {
         let runs = d.fonts.segment_faces("hi", None, 400);
         assert_eq!(runs.len(), 1, "expected one run, got {runs:?}");
         assert_eq!(runs[0].1, "hi");
+    }
+
+    /// Build a db containing only the vendored DejaVu Sans faces — used as a
+    /// stand-in "installed target family" for [`resolve_forced_ui_family`]
+    /// tests, since we can't rename a real font's family table entry to
+    /// literally read "Segoe UI" for a unit test.
+    fn dejavu_only_db() -> Database {
+        const DEJAVU_SANS: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        const DEJAVU_SANS_BOLD: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans-Bold.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU_SANS.to_vec());
+        db.load_font_data(DEJAVU_SANS_BOLD.to_vec());
+        db
+    }
+
+    /// Issue #54, step (a): when the target family is actually installed on
+    /// the host db, it wins over every fallback.
+    #[test]
+    fn resolve_forced_ui_family_picks_the_target_family_when_installed() {
+        let db = dejavu_only_db();
+        // Stand in for "Segoe UI is installed": the target list's first hit
+        // ("DejaVu Sans" here) must be returned, not a later fallback entry.
+        let resolved = resolve_forced_ui_family(&db, &["DejaVu Sans"], &["Liberation Sans"]);
+        assert_eq!(resolved.as_deref(), Some("DejaVu Sans"));
+    }
+
+    /// Issue #54, step (b): when the target family isn't installed, resolution
+    /// falls through to the free fallback list — not to nothing.
+    #[test]
+    fn resolve_forced_ui_family_falls_back_to_the_free_face_when_target_is_absent() {
+        let db = dejavu_only_db();
+        let resolved =
+            resolve_forced_ui_family(&db, &["Segoe UI"], &["DejaVu Sans", "Liberation Sans"]);
+        assert_eq!(resolved.as_deref(), Some("DejaVu Sans"));
+    }
+
+    /// Issue #54, step (c) — the core requirement this issue is about: when
+    /// NEITHER the target family NOR any free fallback is installed, the
+    /// resolver returns `None` rather than ever reaching for the HOST's
+    /// resolved native UI family. This is what `resolve_ui_family` itself
+    /// *would* return on this same db (it happily resolves "DejaVu Sans" as a
+    /// usable host UI family) — proving `resolve_forced_ui_family` never
+    /// silently substitutes it.
+    #[test]
+    fn resolve_forced_ui_family_never_falls_back_to_the_host_ui_family() {
+        let db = dejavu_only_db();
+
+        // Sanity: the host-native resolver *would* find a usable UI family on
+        // this db (DejaVu Sans qualifies for both weights).
+        assert_eq!(resolve_ui_family(&db).as_deref(), Some("DejaVu Sans"));
+
+        // But when a forced theme's own target + fallback lists both miss,
+        // the forced resolver must NOT reach for that host family.
+        let resolved = resolve_forced_ui_family(&db, &["Segoe UI"], &["Nonexistent Free Face"]);
+        assert_eq!(resolved, None);
+        assert_ne!(resolved, resolve_ui_family(&db));
+    }
+
+    /// Each [`OsFamily`]'s target family list is what actually gets tried
+    /// first end-to-end through `with_forced_theme`'s resolution helper.
+    #[test]
+    fn os_family_target_lists_are_tried_before_their_fallbacks() {
+        let db = dejavu_only_db();
+        // None of Windows/macOS/GNOME's real target families are the
+        // vendored DejaVu Sans, so on this db every forced family must miss
+        // its target list and land on its OWN fallback list's DejaVu Sans
+        // entry (Windows/macOS list it; GNOME's list also includes it) —
+        // never on some unrelated host pin.
+        for family in [OsFamily::MacOs, OsFamily::Windows, OsFamily::Gnome] {
+            let resolved = resolve_forced_ui_family(
+                &db,
+                family.ui_font_families(),
+                family.fallback_font_families(),
+            );
+            assert_eq!(
+                resolved.as_deref(),
+                Some("DejaVu Sans"),
+                "{family:?} should land on its free fallback face on a DejaVu-only db"
+            );
+        }
     }
 
     fn solid_png(color: Rgba) -> Arc<[u8]> {

@@ -59,6 +59,7 @@ use crate::theme::MenuOptions;
 use crate::{Tray, TrayCommand};
 
 mod sni;
+#[cfg(feature = "x11-popup")]
 mod x11;
 
 use ksni::blocking::{Handle, TrayMethods};
@@ -140,6 +141,14 @@ impl Platform for LinuxPlatform {
         }
         .spawn()
         .map_err(|e| Error::Platform(format!("SNI/StatusNotifierItem registration failed: {e}")))?;
+        // Re-install: shut the prior ksni service down before replacing it (#35).
+        // ksni's blocking `Handle` has no `Drop` that unregisters, so simply
+        // overwriting `self.service` would leak the old D-Bus service + thread and
+        // leave a stale, unremovable tray icon. The new handle spawned first, so a
+        // failed re-install leaves the existing icon intact.
+        if let Some(old) = self.service.take() {
+            old.shutdown().wait();
+        }
         self.service = Some(handle);
         Ok(())
     }
@@ -193,11 +202,23 @@ impl Platform for LinuxPlatform {
         anchor: LogicalRect,
         edge: Edge,
     ) -> Result<()> {
-        if x11::is_available() {
-            let dark = self.appearance().is_dark();
-            x11::open_popup_session(menu, options, on_click, anchor, edge, dark)
-        } else {
-            Err(x11::wayland_unsupported())
+        #[cfg(feature = "x11-popup")]
+        {
+            if x11::is_available() {
+                let dark = self.appearance().is_dark();
+                x11::open_popup_session(menu, options, on_click, anchor, edge, dark)
+            } else {
+                Err(x11::wayland_unsupported())
+            }
+        }
+        // Tray-only build (`default-features = false`, no `x11-popup`): the styled
+        // pointer-anchored popup is compiled out, so report the same honest
+        // protocol limit a Wayland-only session gets — the caller can still use the
+        // SNI tray + native dbusmenu (Path 1).
+        #[cfg(not(feature = "x11-popup"))]
+        {
+            let _ = (menu, options, on_click, anchor, edge);
+            Err(Error::Unsupported(Unsupported::ClientPositioning))
         }
     }
 }
@@ -320,6 +341,17 @@ fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
             "TrayCommand::Shutdown must be intercepted by run_sni_loop's drain, \
              not routed through apply_command"
         ),
+        // The persistent Linux tray is a native `dbusmenu` the SNI host renders,
+        // so muri's theme/options don't apply to it — they govern only the styled
+        // `ContextMenu::open_at` popups, which read `MenuOptions` per call. Honest
+        // no-op on the tray; the payloads are consumed (and dropped) here (issue #45).
+        TrayCommand::SetTheme(theme) => drop(theme),
+        TrayCommand::SetOptions(options) => drop(options),
+        // The SNI host never exposes the icon's geometry (spec 22 §1), so there is
+        // no anchor rectangle to report — reply `None` (issue #48).
+        TrayCommand::QueryAnchorRect(reply) => {
+            let _ = reply.send(None);
+        }
     }
 }
 
@@ -384,6 +416,12 @@ fn system_menu_font() -> Option<crate::platform::SystemFont> {
 /// accent-color` (GNOME 47+, a named accent), mapped to the libadwaita accent
 /// RGB, or `None` if unavailable/unrecognized. Injected into `Color::Accent`
 /// (#14). Best-effort.
+///
+/// Only the styled X11 popup path reads the accent (the SNI tray defers all
+/// styling to the host's dbusmenu renderer), so this is gated to the
+/// `x11-popup` feature — a tray-only build (`default-features = false`) compiles
+/// neither the `x11` submodule nor this reader (#21).
+#[cfg(feature = "x11-popup")]
 pub(super) fn system_accent() -> Option<(u8, u8, u8, u8)> {
     let out = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "accent-color"])

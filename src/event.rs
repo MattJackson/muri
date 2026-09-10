@@ -89,8 +89,8 @@ impl MenuEvent {
 /// `on_click` closure has run (spec `03` §3: closure first, then channel). Inert
 /// [`MenuId::none`](crate::MenuId::none) ids are filtered out by the callers, so
 /// this is only ever reached with an addressable id.
-pub(crate) fn emit(id: MenuId) {
-    let event = MenuEvent { id };
+pub(crate) fn emit(id: MenuId, source: crate::SurfaceId) {
+    let event = MenuEvent { id, source };
     // Channel first (the muda-compat door), then the optional forwarding handler.
     let _ = channel().sender.send(event.clone());
     // Clone the `Arc` handler out **while holding the lock**, then release the
@@ -135,11 +135,29 @@ mod tests {
     fn emit_places_event_on_the_global_channel() {
         let _guard = super::test_lock();
         let _ = drain_prefixed("event_emit_");
-        emit(MenuId::from("event_emit_alpha"));
-        emit(MenuId::from("event_emit_beta"));
+        emit(MenuId::from("event_emit_alpha"), crate::SurfaceId::next());
+        emit(MenuId::from("event_emit_beta"), crate::SurfaceId::next());
         let seen = drain_prefixed("event_emit_");
         assert!(seen.contains(&"event_emit_alpha".to_string()));
         assert!(seen.contains(&"event_emit_beta".to_string()));
+    }
+
+    #[test]
+    fn emit_carries_the_source_surface_id() {
+        // Per-surface correlation (#51): the event on the global channel carries
+        // the SurfaceId of the surface that dispatched it.
+        let _guard = super::test_lock();
+        let rx = MenuEvent::receiver();
+        while rx.try_recv().is_ok() {}
+        let source = crate::SurfaceId::next();
+        emit(MenuId::from("event_source_probe"), source);
+        let mut found = None;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.id.0 == "event_source_probe" {
+                found = Some(ev.source);
+            }
+        }
+        assert_eq!(found, Some(source));
     }
 
     #[test]
@@ -157,7 +175,10 @@ mod tests {
             }
         }));
 
-        emit(MenuId::from("event_handler_probe"));
+        emit(
+            MenuId::from("event_handler_probe"),
+            crate::SurfaceId::next(),
+        );
         // Clear before asserting so a failure can't leave a dangling global.
         MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
 
@@ -187,7 +208,10 @@ mod tests {
         }));
 
         // If the lock were held across the callback this call would never return.
-        emit(MenuId::from("event_reentrant_probe"));
+        emit(
+            MenuId::from("event_reentrant_probe"),
+            crate::SurfaceId::next(),
+        );
 
         // The handler cleared itself; make sure it ran exactly once.
         assert_eq!(hits.load(Ordering::SeqCst), 1);

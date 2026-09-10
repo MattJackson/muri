@@ -311,7 +311,12 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
     // -- placement / open ----------------------------------------------------
 
     fn open_popup(&mut self, anchor: LogicalRect) -> Result<()> {
-        let mut drawer = RasterDrawer::new_native(SCALE);
+        // Forced-OS themes render the TARGET OS font, not the host's (#54); the
+        // native drawer is kept for `System`/`Preset`/`Custom`.
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(SCALE, family),
+            None => RasterDrawer::new_native(SCALE),
+        };
         let laid = render_menu(&mut drawer, &self.menu, &self.theme, &self.options, None);
         let origin =
             crate::anchor::place_popup(anchor, laid.size, self.env.work_area, self.edge, POPUP_GAP);
@@ -602,7 +607,12 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             (pp.origin, pp.laid.size, rect)
         };
 
-        let mut drawer = RasterDrawer::new_native(SCALE);
+        // Forced-OS themes render the TARGET OS font, not the host's (#54); the
+        // native drawer is kept for `System`/`Preset`/`Custom`.
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(SCALE, family),
+            None => RasterDrawer::new_native(SCALE),
+        };
         let child_laid = render_menu(&mut drawer, &child, &self.theme, &self.options, None);
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
         let placement = place_flyout(parent_rect, row_rect, child_laid.size, self.env.work_area);
@@ -736,7 +746,14 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
 
     /// X11 device coordinates from a logical screen origin.
     fn to_device(&self, p: LogicalPoint) -> (i16, i16) {
-        ((p.x * SCALE).round() as i16, (p.y * SCALE).round() as i16)
+        // X11 window position is protocol INT16, so a very wide multi-monitor
+        // virtual desktop (device x > 32767) would silently mis-cast with a bare
+        // `as i16`. Saturate (NaN-safe) so the popup pins to the reachable edge
+        // instead of wrapping to a wrong/negative position (#38).
+        fn to_i16(v: f32) -> i16 {
+            v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        }
+        (to_i16(p.x * SCALE), to_i16(p.y * SCALE))
     }
 
     /// Pack a straight-alpha color into the visual's pixel value (opaque).

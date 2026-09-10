@@ -822,7 +822,14 @@ impl PopupSession<'_> {
         // This same drawer becomes the panel's drawer (below) so its warm
         // shaping/glyph caches carry into the first paint — the menu is not shaped
         // a second time with a cold drawer (#23).
-        let mut drawer = RasterDrawer::new_native(scale);
+        // A forced-OS theme (`ThemeSource::MacOs/Windows/Gnome`) must render the
+        // TARGET OS's UI font, not this host's — so it gets a drawer that resolves
+        // the target family (with a free metric-compatible fallback), never the
+        // host system font. `System`/`Preset`/`Custom` keep the native drawer (#54).
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(scale, family),
+            None => RasterDrawer::new_native(scale),
+        };
         let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
         let origin = place_popup(
@@ -929,7 +936,14 @@ impl PopupSession<'_> {
             return;
         };
         // Reuse this measuring drawer as the flyout's drawer (#23).
-        let mut drawer = RasterDrawer::new_native(scale);
+        // A forced-OS theme (`ThemeSource::MacOs/Windows/Gnome`) must render the
+        // TARGET OS's UI font, not this host's — so it gets a drawer that resolves
+        // the target family (with a free metric-compatible fallback), never the
+        // host system font. `System`/`Preset`/`Custom` keep the native drawer (#54).
+        let mut drawer = match self.options.theme.forced_family() {
+            Some(family) => RasterDrawer::with_forced_theme(scale, family),
+            None => RasterDrawer::new_native(scale),
+        };
         let child_laid = render_menu(&mut drawer, &child, &theme, &self.options, None);
 
         let parent_rect = LogicalRect::new(parent_origin, parent_size);
@@ -1524,6 +1538,31 @@ impl AppState {
                     a.remove();
                 }
             }
+            TrayCommand::SetTheme(theme) => {
+                self.session.options.theme = theme;
+                self.repaint_open_popup();
+            }
+            TrayCommand::SetOptions(options) => {
+                self.session.options = options;
+                self.repaint_open_popup();
+            }
+            TrayCommand::QueryAnchorRect(reply) => {
+                let rect = match &self.session.anchor {
+                    Anchor::Tray(a) => a.anchor_rect().ok(),
+                    _ => None,
+                };
+                let _ = reply.send(rect);
+            }
+        }
+    }
+
+    /// Repaint an already-open popup after a live theme/options swap (#45), so an
+    /// in-menu theme switcher redraws instantly instead of only on next open.
+    fn repaint_open_popup(&mut self) {
+        if self.session.popup.is_some() {
+            self.session.truncate_flyouts(0);
+            self.session.redraw(WindowKind::Popup);
+            self.session.sync_a11y();
         }
     }
 
@@ -1712,12 +1751,13 @@ fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
     // `MenuEvent` channel — the muda-compat door has no `on_click` and consumes
     // clicks via `MenuEvent::receiver()`, so without the `emit` every facade menu
     // item is inert on macOS (#13). Mirrors the Windows pump (spec 03 §3).
+    let surface = tray.surface_id;
     let dispatch: Box<dyn Fn(&MenuId) + 'static> = match tray.on_click.take() {
         Some(handler) => Box::new(move |id| {
             handler(id);
-            crate::event::emit(id.clone());
+            crate::event::emit(id.clone(), surface);
         }),
-        None => Box::new(|id| crate::event::emit(id.clone())),
+        None => Box::new(move |id| crate::event::emit(id.clone(), surface)),
     };
     let session = PopupSession {
         mtm,
