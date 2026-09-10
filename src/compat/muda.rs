@@ -22,7 +22,9 @@
 //!   custom surface: the RGBA is encoded to PNG
 //!   ([`render::encode_rgba_png`](crate::render)) and carried as an
 //!   [`Icon::Png`](crate::menu::Icon::Png) — the same bridge the tray icon uses
-//!   (issue #9). A `NativeIcon` maps to
+//!   (issue #9). A PNG-backed icon ([`Icon::from_png`]) keeps its encoded bytes
+//!   and uses the native `Icon::Png` path directly (no decode/re-encode; #24). A
+//!   `NativeIcon` maps to
 //!   [`Icon::Symbol`](crate::menu::Icon::Symbol).
 //! - `Accelerator` is displayed only (spec `02` §5, divergence D5); the facade
 //!   parses a useful subset of muda's `Code`/`Modifiers`.
@@ -40,6 +42,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use crate::menu::{
     Align, Flex, Item as MuriItem, Menu as MuriMenu, Row as MuriRow, Segment as MuriSegment,
@@ -145,11 +148,14 @@ fn resolve_id(id: Option<MenuId>) -> MenuId {
 // Icons (spec 02 §4.5, §4.7)
 // =============================================================================
 
-/// A menu/tray icon built from **raw RGBA** bytes, mirroring muda/`tray-icon`'s
-/// `Icon::from_rgba`. muri's own [`Icon`](crate::menu::Icon) carries *encoded*
-/// bytes, so the raw RGBA is encoded to PNG
-/// ([`render::encode_rgba_png`](crate::render)) and handed to the tray icon and
-/// to menu-item leading icons as an [`Icon::Png`](crate::menu::Icon::Png).
+/// A menu/tray icon built from **raw RGBA** ([`from_rgba`](Icon::from_rgba)) or
+/// **encoded PNG** ([`from_png`](Icon::from_png)) bytes, mirroring muda/`tray-icon`'s
+/// `Icon`. Raw RGBA is encoded to PNG
+/// ([`render::encode_rgba_png`](crate::render)) and carried as an
+/// [`Icon::Png`](crate::menu::Icon::Png) (issue #9); PNG bytes keep their encoded
+/// representation and use the native `Icon::Png` path directly, with no
+/// decode/re-encode cycle (#24). Both feed the tray icon and menu-item leading
+/// icons.
 #[derive(Clone, Debug)]
 pub struct Icon {
     /// Straight-alpha RGBA pixels, row-major, 4 bytes per pixel.
@@ -158,6 +164,11 @@ pub struct Icon {
     pub width: u32,
     /// Pixel height.
     pub height: u32,
+    /// Encoded PNG bytes, when this icon was built with [`Icon::from_png`].
+    ///
+    /// This is kept private so callers continue to use the compatibility
+    /// constructors rather than depending on the storage representation.
+    png: Option<Arc<[u8]>>,
 }
 
 impl Icon {
@@ -186,6 +197,7 @@ impl Icon {
                 rgba,
                 width,
                 height,
+                png: None,
             }),
             Some(expected) => Err(BadIcon(format!(
                 "expected {expected} bytes for {width}x{height} RGBA, got {}",
@@ -195,6 +207,24 @@ impl Icon {
                 "icon dimensions {width}x{height} overflow the addressable buffer size"
             ))),
         }
+    }
+
+    /// Build an icon from encoded PNG bytes (issue #24).
+    ///
+    /// The bytes are retained **without decoding** and used for muri's native
+    /// [`Icon::Png`](crate::menu::Icon::Png) path — no decode-into-RGBA then
+    /// re-encode cycle. This is the muda/`tray-icon` `Icon::from_path`-style
+    /// convenience for callers that already hold PNG asset bytes.
+    pub fn from_png(bytes: &[u8]) -> std::result::Result<Self, BadIcon> {
+        if bytes.is_empty() {
+            return Err(BadIcon("PNG icon bytes are empty".to_owned()));
+        }
+        Ok(Icon {
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+            png: Some(Arc::from(bytes)),
+        })
     }
 }
 
@@ -311,17 +341,24 @@ impl MenuItemKind {
                     s.value_color,
                 );
                 match &s.icon {
-                    // A raw-RGBA icon is encoded to PNG and rendered as the row's
+                    // A PNG-backed icon uses its encoded bytes directly (#24); a
+                    // raw-RGBA icon is encoded to PNG and rendered as the row's
                     // leading image — the same bridge the tray icon uses
-                    // (`render::encode_rgba_png` → `Icon::Png`), extended to menu
-                    // items so a provider logo on a header row draws (issue #9).
+                    // (`render::encode_rgba_png` → `Icon::Png`), so a provider logo
+                    // on a header row draws (issue #9).
                     Some(IconSource::Rgba(icon)) => {
-                        // Cached encode: `to_muri` re-runs on every `set_menu`, so
-                        // encoding an unchanged logo each tick would waste CPU and
-                        // defeat the render decode cache (issue: fresh Arc per
-                        // frame). The cache returns a stable Arc for identical RGBA.
-                        if let Some(png) =
-                            super::encode_rgba_cached(&icon.rgba, icon.width, icon.height)
+                        if let Some(png) = &icon.png {
+                            row = row.leading(MuriIcon::Png(png.clone()));
+                        } else if let Some(png) =
+                            // Cached encode: `to_muri` re-runs on every `set_menu`,
+                            // so encoding an unchanged logo each tick would waste
+                            // CPU and defeat the render decode cache. The cache
+                            // returns a stable Arc for identical RGBA.
+                            super::encode_rgba_cached(
+                                &icon.rgba,
+                                icon.width,
+                                icon.height,
+                            )
                         {
                             row = row.leading(MuriIcon::Png(png));
                         }
@@ -656,8 +693,9 @@ impl IsMenuItem for CheckMenuItem {
 // =============================================================================
 
 enum IconSource {
-    /// A raw-RGBA icon ([`Icon::from_rgba`]); encoded to PNG and rendered as the
-    /// row's leading image in the custom surface (issue #9).
+    /// An image icon — raw RGBA ([`Icon::from_rgba`], encoded to PNG) or already
+    /// PNG-encoded ([`Icon::from_png`]) — rendered as the row's leading image in
+    /// the custom surface (issue #9 / #24).
     Rgba(Icon),
     /// A stock icon mapped to a named muri [`Symbol`](MuriIcon::Symbol).
     Native(NativeIcon),
@@ -687,7 +725,7 @@ pub struct IconMenuItem {
 }
 
 impl IconMenuItem {
-    /// A new icon item (raw-RGBA icon) with an auto-generated id.
+    /// A new icon item with an auto-generated id.
     pub fn new(
         text: impl AsRef<str>,
         enabled: bool,
@@ -697,7 +735,7 @@ impl IconMenuItem {
         Self::build(None, text, enabled, icon.map(IconSource::Rgba), accelerator)
     }
 
-    /// A new icon item (raw-RGBA icon) with an explicit id.
+    /// A new icon item with an explicit id.
     pub fn with_id(
         id: impl Into<MenuId>,
         text: impl AsRef<str>,
@@ -786,7 +824,7 @@ impl IconMenuItem {
         self.inner.borrow_mut().enabled = enabled;
     }
 
-    /// Replace the leading icon (raw-RGBA form).
+    /// Replace the leading icon.
     pub fn set_icon(&self, icon: Option<Icon>) {
         self.inner.borrow_mut().icon = icon.map(IconSource::Rgba);
     }
@@ -1584,6 +1622,27 @@ mod tests {
             row.segments[1].runs.is_empty(),
             "no bold runs when not active"
         );
+    }
+
+    /// #24: a PNG-backed compat icon passes its encoded bytes straight through to
+    /// muri's native `Icon::Png` — no decode/re-encode round-trip.
+    #[test]
+    fn png_icon_translates_to_native_png_without_reencoding() {
+        use crate::menu::{Icon as MuriIcon, Item};
+        let png = crate::render::encode_rgba_png(&[10, 20, 30, 255], 1, 1).unwrap();
+        let icon = Icon::from_png(&png).expect("PNG icon constructor succeeds");
+        let item = IconMenuItem::with_id("png", "PNG", true, Some(icon), None);
+        let menu = Menu::new();
+        menu.append(&item).unwrap();
+
+        let muri = menu.to_muri_menu();
+        let Item::Row(row) = &muri.items[0] else {
+            panic!("expected an icon row");
+        };
+        match &row.leading {
+            Some(MuriIcon::Png(bytes)) => assert_eq!(bytes.as_ref(), png.as_slice()),
+            other => panic!("expected a native PNG icon, got {other:?}"),
+        }
     }
 
     #[test]
