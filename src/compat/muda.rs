@@ -1352,6 +1352,61 @@ mod tests {
         assert!(Icon::from_rgba(Vec::new(), 8, 0).is_err());
     }
 
+    /// Issue #15 diagnosis: prove the muda→muri conversion already produces the
+    /// correct structure — a disabled `IconMenuItem` becomes a `Row` with a
+    /// *leading* icon, and a `Submenu` with a `label\tvalue` text becomes a
+    /// label row whose segments are `[Grow, Right-aligned]`. muri's painter
+    /// (`render::paint`) draws both correctly (see its `issue15_*` test); the
+    /// on-device GNOME discrepancy is in the SNI/AppIndicator *native* menu
+    /// path, which GNOME Shell renders (lib.rs OS matrix), not muri's painter.
+    #[test]
+    fn icon_header_and_tab_submenu_convert_to_leading_icon_and_flex_segments() {
+        use crate::menu::{Align, Flex, Icon as MuriIcon};
+
+        let menu = Menu::new();
+        let icon = Icon::from_rgba(vec![0u8; 4], 1, 1).expect("valid RGBA");
+        // A disabled section-header IconMenuItem carrying a provider logo.
+        let header = IconMenuItem::with_id("hdr:claude", "Claude", false, Some(icon), None);
+        // An account Submenu whose label is `email\tvalue`.
+        let acct = Submenu::with_id("acct:me", "me@example.com\t47% / 52%", true);
+        menu.append(&header).unwrap();
+        menu.append(&acct).unwrap();
+
+        let muri = menu.to_muri_menu();
+
+        // The header row carries a LEADING png icon (never trailing).
+        let Item::Row(row) = &muri.items[0] else {
+            panic!(
+                "IconMenuItem must convert to Item::Row, got {:?}",
+                muri.items[0]
+            );
+        };
+        assert!(
+            matches!(row.leading, Some(MuriIcon::Png(_))),
+            "provider logo must be the row's leading icon"
+        );
+        assert!(
+            row.trailing.is_none(),
+            "the logo must not be a trailing icon"
+        );
+
+        // The submenu label splits at the TAB into a growing lead + right value.
+        let Item::Submenu { label, .. } = &muri.items[1] else {
+            panic!("Submenu must convert to Item::Submenu");
+        };
+        assert_eq!(
+            label.segments.len(),
+            2,
+            "label\\tvalue splits into two segments"
+        );
+        assert_eq!(label.segments[0].flex, Flex::Grow, "lead segment grows");
+        assert_eq!(
+            label.segments[1].align,
+            Align::Right,
+            "value segment is right-aligned"
+        );
+    }
+
     #[test]
     fn init_for_nsapp_tags_menu_bar_passthrough() {
         let menu = Menu::new();
