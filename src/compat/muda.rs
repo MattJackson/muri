@@ -155,18 +155,28 @@ impl Icon {
     /// Build an icon from raw RGBA bytes, erroring if the length does not match
     /// `width * height * 4` (mirrors muda's `Icon::from_rgba`).
     pub fn from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> std::result::Result<Self, BadIcon> {
-        let expected = width as usize * height as usize * 4;
-        if rgba.len() != expected {
-            return Err(BadIcon(format!(
+        // Checked arithmetic: `width`/`height` may come from untrusted image
+        // metadata, and `w * h * 4` overflows `usize` for pathological dimensions
+        // (e.g. u32::MAX x u32::MAX) — which panics under the default debug
+        // overflow checks *before* the length guard runs, and silently wraps to a
+        // wrong `expected` in release. Overflow is itself a rejected icon.
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4));
+        match expected {
+            Some(expected) if rgba.len() == expected => Ok(Icon {
+                rgba,
+                width,
+                height,
+            }),
+            Some(expected) => Err(BadIcon(format!(
                 "expected {expected} bytes for {width}x{height} RGBA, got {}",
                 rgba.len()
-            )));
+            ))),
+            None => Err(BadIcon(format!(
+                "icon dimensions {width}x{height} overflow the addressable buffer size"
+            ))),
         }
-        Ok(Icon {
-            rgba,
-            width,
-            height,
-        })
     }
 }
 
@@ -1274,6 +1284,20 @@ mod tests {
     fn explicit_id_is_used_verbatim() {
         let item = MenuItem::with_id("open", "Open", true, None);
         assert_eq!(item.id(), MenuId::from("open"));
+    }
+
+    #[test]
+    fn from_rgba_rejects_overflowing_dimensions_without_panicking() {
+        // width*height*4 overflows usize; before the checked-arithmetic fix this
+        // panicked under debug overflow checks (the default test profile) before
+        // the length guard ran. It must return a BadIcon error instead.
+        let err = Icon::from_rgba(Vec::new(), u32::MAX, u32::MAX);
+        assert!(err.is_err(), "overflowing dimensions must error, not panic");
+
+        // A normal well-formed icon still succeeds, and a plain length mismatch
+        // still errors (the guard the function exists for is intact).
+        assert!(Icon::from_rgba(vec![0; 4], 1, 1).is_ok());
+        assert!(Icon::from_rgba(vec![0; 3], 1, 1).is_err());
     }
 
     #[test]

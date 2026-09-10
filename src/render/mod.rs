@@ -57,7 +57,11 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::{FontRef, GlyphId};
 
-pub use raster::{decode_png, encode_rgba_png, Framebuffer};
+pub use raster::{decode_png, Framebuffer};
+// Crate-internal only: the compat facade encodes its raw-RGBA tray icon to PNG
+// through this. Not part of muri's public raster surface (unlike `decode_png`,
+// which platform backends call on caller-supplied icon bytes).
+pub(crate) use raster::encode_rgba_png;
 
 /// A decoded PNG icon: straight-alpha RGBA bytes plus its `(width, height)`.
 type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;

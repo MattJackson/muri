@@ -379,6 +379,17 @@ impl MacosAnchor {
         }
     }
 
+    /// Remove the status item from the menu bar now (the `Shutdown` command).
+    /// `Drop` alone can't be relied on here: the spawned-tray path parks the
+    /// owning `AppState` in the `MAIN_APP` thread-local for the life of the
+    /// process, so its `Drop` never fires. Takes the item so `Drop` won't try to
+    /// remove it a second time.
+    fn remove(&mut self) {
+        if let Some(item) = self.status_item.take() {
+            NSStatusBar::systemStatusBar().removeStatusItem(&item);
+        }
+    }
+
     /// Resolve the status item's geometry against the button's own screen.
     fn geometry(&self) -> Option<AnchorGeometry> {
         let item = self.status_item.as_ref()?;
@@ -1205,6 +1216,15 @@ impl AppState {
                 }
             }
             TrayCommand::Close => self.session.close_popup(),
+            TrayCommand::Shutdown => {
+                // Remove the status item explicitly: the spawned-tray AppState is
+                // parked in MAIN_APP for the process lifetime, so MacosAnchor::Drop
+                // never runs. Also dismiss any open popup.
+                self.session.close_popup();
+                if let Anchor::Tray(a) = &mut self.session.anchor {
+                    a.remove();
+                }
+            }
         }
     }
 

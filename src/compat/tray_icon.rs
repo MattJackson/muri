@@ -18,9 +18,11 @@
 //! - The tray icon is carried as raw RGBA in the facade [`Icon`]. It is encoded
 //!   to PNG and handed to the muri [`Tray`](crate::Tray) as
 //!   [`Icon::Png`](crate::menu::Icon::Png) at build time (and on
-//!   [`TrayIcon::set_icon`]), so the pixels reach the drawn tray — closing the
-//!   original divergence D6 (spec `02` §4.5). On Linux this populates the SNI
-//!   `icon_pixmap` GNOME's appindicator extension needs (issue #6); the
+//!   [`TrayIcon::set_icon`]), so the pixels reach the drawn tray. (Previously the
+//!   facade left the tray on a placeholder symbol and the RGBA never reached it —
+//!   a facade-specific gap, distinct from the spec's `NativeIcon`/`Icon::Symbol`
+//!   divergence D6, which is about menu-item glyphs.) On Linux this populates the
+//!   SNI `icon_pixmap` GNOME's appindicator extension needs (issue #6); the
 //!   placeholder symbol is used only when no icon is configured.
 
 use std::cell::RefCell;
@@ -242,7 +244,7 @@ impl TrayIconBuilder {
         self
     }
 
-    /// Set the tray icon image (raw RGBA; see the module D6 note).
+    /// Set the tray icon image (raw RGBA; see the module note on icon encoding).
     pub fn with_icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
@@ -362,9 +364,9 @@ impl TrayIcon {
     /// falsely claimed success).
     ///
     /// The facade's raw RGBA is encoded to PNG and posted to the live muri
-    /// [`Tray`](crate::Tray) (closing divergence D6): the new pixels reach the
-    /// drawn tray — on Linux the SNI `icon_pixmap` is re-registered, on Windows
-    /// the `HICON` is replaced. A `None` icon (or RGBA that fails to encode)
+    /// [`Tray`](crate::Tray): the new pixels reach the drawn tray — on Linux the
+    /// SNI `icon_pixmap` is re-registered, on Windows the `HICON` is replaced. A
+    /// `None` icon (or RGBA that fails to encode)
     /// clears the facade record and reverts the tray to the placeholder symbol.
     pub fn set_icon(&self, icon: Option<Icon>) -> super::muda::Result<()> {
         if let Some(handle) = &self.handle {
@@ -422,6 +424,20 @@ impl TrayIcon {
     /// signature is `Option<Rect>`.
     pub fn rect(&self) -> Option<Rect> {
         None
+    }
+}
+
+impl Drop for TrayIcon {
+    /// Remove the OS tray icon and stop its backend when the facade handle is
+    /// dropped — matching `tray-icon`'s `TrayIcon`, which deletes its icon on
+    /// `Drop`. Without this, the spawned `muri-tray` thread and its live
+    /// `Shell_NotifyIcon` / SNI item would leak until process exit. Best-effort
+    /// and asynchronous (the removal runs on the backend's UI thread); a no-op
+    /// when no live tray was spawned (headless / off the macOS main thread).
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.shutdown();
+        }
     }
 }
 
@@ -565,7 +581,7 @@ mod tests {
     #[test]
     fn icon_to_muri_encodes_rgba_as_a_decodable_png() {
         // A 2x2 opaque RGBA icon → muri `Icon::Png` whose bytes round-trip back
-        // to the same pixels. This is the D6 closure that feeds the Linux SNI
+        // to the same pixels. This encoded icon feeds the Linux SNI
         // `icon_pixmap` (#6) and the Windows `HICON` (#7); before the fix the
         // facade left the tray on the placeholder Symbol and the item was dropped.
         let rgba = vec![
@@ -613,5 +629,45 @@ mod tests {
 
         tray.set_title(None::<String>);
         assert!(tray.title.borrow().is_none());
+    }
+
+    #[test]
+    fn facade_setters_and_drop_post_the_matching_commands_to_the_live_handle() {
+        // The facade setters only reach a live tray through `self.handle`, but
+        // build() spawns best-effort and leaves `handle: None` headlessly — so
+        // the other facade tests never exercise that branch. Build a TrayIcon
+        // around a known handle directly and assert each setter (and Drop) posts
+        // the *right* TrayCommand. A swap (set_title -> SetTooltip, or Drop not
+        // posting Shutdown) would fail here.
+        use crate::TrayCommand;
+        let native = crate::Tray::new(MuriIcon::Symbol("tray"));
+        let handle = native.handle();
+        let tray = TrayIcon {
+            id: TrayIconId("t".into()),
+            icon: RefCell::new(None),
+            tooltip: RefCell::new(None),
+            title: RefCell::new(None),
+            handle: Some(handle.clone()),
+        };
+
+        tray.set_icon(Some(Icon::from_rgba(vec![1, 2, 3, 4], 1, 1).unwrap()))
+            .unwrap();
+        tray.set_title(Some("9%"));
+        tray.set_tooltip(Some("tip")).unwrap();
+        tray.set_menu(None);
+        tray.set_visible(false).unwrap();
+        drop(tray); // Drop must post Shutdown.
+
+        let posted = handle.take_posted();
+        assert!(matches!(&posted[0], TrayCommand::SetIcon(_)));
+        assert!(matches!(&posted[1], TrayCommand::SetTitle(Some(s)) if s == "9%"));
+        assert!(matches!(&posted[2], TrayCommand::SetTooltip(Some(s)) if s == "tip"));
+        assert!(matches!(&posted[3], TrayCommand::SetMenu(_)));
+        assert!(matches!(&posted[4], TrayCommand::SetVisible(false)));
+        assert!(
+            matches!(&posted[5], TrayCommand::Shutdown),
+            "Drop must post Shutdown so the OS icon is removed; got {:?}",
+            posted.get(5)
+        );
     }
 }
