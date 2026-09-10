@@ -156,6 +156,10 @@ impl Platform for LinuxPlatform {
         system_appearance()
     }
 
+    fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
+        system_menu_font()
+    }
+
     fn work_area(&self) -> LogicalRect {
         // No portable, portal-free query for the work area exists on Linux; the
         // SNI host owns placement anyway, so a sensible default is enough here.
@@ -325,6 +329,57 @@ fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
 /// unavailable — a headless/CI environment always takes the fallback.
 ///
 /// DEVICE-VERIFY(0.9.0): the live portal read against a real desktop session.
+/// The GNOME UI font from gsettings `org.gnome.desktop.interface font-name`
+/// (a Pango `"Family [Styles] Size"` spec, e.g. `"Cantarell 11"`), as a
+/// [`SystemFont`](crate::platform::SystemFont) the renderer pins by family name
+/// (fontdb already has the installed desktop font). Best-effort: `None` when
+/// gsettings is absent/fails or the value can't be parsed (#10, #14).
+fn system_menu_font() -> Option<crate::platform::SystemFont> {
+    use crate::platform::{SystemFont, SystemFontSource};
+    const STYLES: &[&str] = &[
+        "Bold",
+        "Italic",
+        "Oblique",
+        "Light",
+        "Medium",
+        "Regular",
+        "Thin",
+        "Black",
+        "Semilight",
+        "Semibold",
+        "Heavy",
+        "Condensed",
+    ];
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "font-name"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let spec = raw.trim().trim_matches(['\'', '"']).trim();
+    let mut parts: Vec<&str> = spec.split_whitespace().collect();
+    let point_size = parts.last().and_then(|s| s.parse::<f32>().ok());
+    if point_size.is_some() {
+        parts.pop();
+    }
+    while parts
+        .last()
+        .is_some_and(|w| STYLES.iter().any(|s| s.eq_ignore_ascii_case(w)))
+    {
+        parts.pop();
+    }
+    let family = parts.join(" ");
+    if family.is_empty() {
+        return None;
+    }
+    Some(SystemFont {
+        source: SystemFontSource::Family(family),
+        point_size: point_size.unwrap_or(0.0),
+    })
+}
+
 fn system_appearance() -> Appearance {
     portal_color_scheme_is_dark()
         .map(Appearance::from_is_dark)

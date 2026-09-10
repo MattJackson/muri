@@ -50,7 +50,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fontdb::{
-    Database, Family as DbFamily, Query, Style as DbStyle, Weight as DbWeight, ID as FaceId,
+    Database, Family as DbFamily, Query, Source as DbSource, Style as DbStyle, Weight as DbWeight,
+    ID as FaceId,
 };
 use harfrust::{FontRef as HbFontRef, ShapeOptions, ShaperData, UnicodeBuffer};
 use swash::scale::image::Content;
@@ -76,6 +77,7 @@ type ShapeKey = (String, Option<FaceId>, u16, u32);
 type IconCacheEntry = (Arc<[u8]>, DecodedIcon);
 
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
+use crate::platform::{Platform, SystemFont, SystemFontSource};
 use crate::style::{Font, FontFamily, Rgba, Weight};
 
 /// A shaped run of text to blit, with its resolved color and weight. The layout
@@ -225,9 +227,30 @@ impl RasterDrawer {
     /// ([`fontdb::Database::load_system_fonts`]). The backing pixmap starts at
     /// 1×1 and is reallocated by [`SceneDrawer::begin_frame`].
     pub fn new(scale: f32) -> Self {
+        Self::with_system_font(scale, None)
+    }
+
+    /// Like [`RasterDrawer::new`], but pins [`FontFamily::System`] to the host's
+    /// **native menu font** from the per-OS
+    /// [`Platform::system_menu_font`](crate::platform::Platform::system_menu_font)
+    /// — SF Pro on macOS, Segoe UI on Windows, the GNOME UI family on Linux (#10).
+    /// The live popup panels use this so the menu renders in the true OS UI face,
+    /// which `fontdb`'s generic discovery can't reach on macOS. Falls back to
+    /// installed-font discovery when the platform returns `None` or the face
+    /// can't be registered — so it never regresses [`RasterDrawer::new`].
+    pub fn new_native(scale: f32) -> Self {
+        Self::with_system_font(scale, crate::platform::current().system_menu_font())
+    }
+
+    /// Construct a drawer, optionally pinning `FontFamily::System` to a supplied
+    /// system font (its face registered into the database). `None` — or a face
+    /// that fails to register — falls back to installed-font discovery.
+    pub fn with_system_font(scale: f32, system: Option<SystemFont>) -> Self {
         let mut db = Database::new();
         db.load_system_fonts();
-        let ui_family = resolve_ui_family(&db);
+        let ui_family = system
+            .and_then(|sf| register_system_font(&mut db, sf.source))
+            .or_else(|| resolve_ui_family(&db));
         Self::from_parts(scale, db, ui_family)
     }
 
@@ -686,6 +709,37 @@ fn query_face(db: &Database, family: DbFamily, ot_weight: u16) -> Option<FaceId>
     })
 }
 
+/// Register the host's native menu font into `db` and return the family name
+/// [`FontFamily::System`] should pin to, or `None` if it couldn't be made
+/// resolvable (so the caller falls back to [`resolve_ui_family`]).
+///
+/// The OS-agnostic consumer of the per-OS
+/// [`SystemFont`](crate::platform::SystemFont): it loads bytes or a file into
+/// the database (or, for an already-installed family, validates the name) and
+/// returns the concrete family to pin. Unlike [`resolve_ui_family`] it does not
+/// require regular/bold to be two distinct faces — the OS menu font is
+/// authoritative even when it is a single variable face (macOS SF Pro).
+fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<String> {
+    let loaded: Option<FaceId> = match source {
+        SystemFontSource::Family(name) => {
+            // Already installed (Segoe UI, a Linux UI family): pin by name iff the
+            // db actually has a face for it; nothing to load.
+            return query_face(db, DbFamily::Name(&name), 400).map(|_| name);
+        }
+        SystemFontSource::Path(path) => db.load_font_source(DbSource::File(path)).first().copied(),
+        SystemFontSource::Data(data) => db
+            .load_font_source(DbSource::Binary(Arc::new(data)))
+            .first()
+            .copied(),
+    };
+    // Pin the registered face's family only if it is resolvable by that name (so
+    // a malformed face falls back).
+    let name = db
+        .face(loaded?)
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()))?;
+    query_face(db, DbFamily::Name(&name), 400).map(|_| name)
+}
+
 /// Resolve a concrete UI font family whose **regular and bold are distinct,
 /// real faces within that same family**, so a bold section header and a regular
 /// row read as one typeface at two weights.
@@ -970,6 +1024,30 @@ fn blit_glyph(
 mod tests {
     use super::*;
     use crate::style::FontFamily;
+
+    #[test]
+    fn register_system_font_pins_present_family_data_and_falls_back() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU.to_vec());
+        // A family present in the db (#10 Windows/Linux path) pins by name.
+        assert_eq!(
+            register_system_font(&mut db, SystemFontSource::Family("DejaVu Sans".into()))
+                .as_deref(),
+            Some("DejaVu Sans")
+        );
+        // An absent family falls back (None) so the caller keeps its discovered face.
+        assert!(register_system_font(
+            &mut db,
+            SystemFontSource::Family("No Such Family 9x".into())
+        )
+        .is_none());
+        // Raw font bytes (the macOS Data path) register and pin their family.
+        assert_eq!(
+            register_system_font(&mut db, SystemFontSource::Data(DEJAVU.to_vec())).as_deref(),
+            Some("DejaVu Sans")
+        );
+    }
 
     /// spec §7.1's font-fallback layer: when a primary face is pinned but has
     /// no glyph for a codepoint, and the headless (DejaVu-only) db has no
