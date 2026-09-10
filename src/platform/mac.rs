@@ -63,7 +63,7 @@ use crate::platform::{Appearance, Platform};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
 use crate::style::Color;
-use crate::theme::{MenuOptions, Theme, ThemeSource};
+use crate::theme::{MenuOptions, OsFamily, Theme};
 use crate::{Tray, TrayCommand};
 
 use window::{make_panel, MuriView, MuriWindowDelegate};
@@ -81,6 +81,36 @@ extern "C" {
         context: *mut c_void,
         work: extern "C" fn(*mut c_void),
     );
+}
+
+// CoreText FFI for resolving the real on-disk file behind the system UI font.
+// `NSFont*` is toll-free bridged to `CTFontRef`, and the `CFURL` returned for
+// `kCTFontURLAttribute` is toll-free bridged to `NSURL` — so we can hand fontdb
+// the actual SF NS file (`/System/Library/Fonts/…`) instead of a family name it
+// cannot load (SF Pro lives in a protected file), which otherwise falls back to
+// the bundled UI face. CoreText is linked explicitly so the symbols resolve.
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    /// `CTFontCopyAttribute(font, attribute)` → a `+1` `CFTypeRef` (or NULL).
+    fn CTFontCopyAttribute(font: *const c_void, attribute: *const c_void) -> *const c_void;
+    /// The `kCTFontURLAttribute` `CFStringRef` key (value is the font's file URL).
+    static kCTFontURLAttribute: *const c_void;
+}
+
+/// The filesystem path of the file backing `font`, via CoreText's URL attribute.
+/// `None` when the font has no on-disk URL (e.g. a synthesized/in-memory face).
+fn system_ui_font_path(font: &objc2_app_kit::NSFont) -> Option<String> {
+    // `NSFont*` is toll-free bridged to `CTFontRef`: the object pointer *is* the
+    // `CTFontRef`. `CTFontCopyAttribute` follows the Copy rule (+1 on the result).
+    let ct_font: *const c_void = (font as *const objc2_app_kit::NSFont).cast();
+    let url: *const c_void = unsafe { CTFontCopyAttribute(ct_font, kCTFontURLAttribute) };
+    if url.is_null() {
+        return None;
+    }
+    // The `CFURLRef` is toll-free bridged to `NSURL`; take ownership of the +1.
+    let nsurl: Retained<objc2_foundation::NSURL> =
+        unsafe { Retained::from_raw(url as *mut objc2_foundation::NSURL)? };
+    nsurl.path().map(|p| p.to_string())
 }
 
 /// The GCD callback: drain the queued UI events + tray commands on the main
@@ -174,6 +204,13 @@ pub(super) enum UiEvent {
         x: f64,
         /// Y in the panel's logical points.
         y: f64,
+    },
+    /// The pointer left a panel's tracking area. Drives submenu collapse + hover
+    /// clear when the pointer leaves the menu onto the desktop (the native menu
+    /// closes its open submenu when you move away).
+    MouseExited {
+        /// Which panel the pointer left.
+        kind: WindowKind,
     },
     /// A navigation key was pressed on the key panel.
     Key(NavKey),
@@ -702,11 +739,24 @@ impl PopupSession<'_> {
     /// The resolved theme for the current appearance, with the live OS accent
     /// injected (spec 20 §4c) so `Color::Accent` follows the system.
     fn theme(&self) -> Theme {
-        let dark = self.options.theme.wants_dark(system_is_dark);
-        let mut theme = self.options.theme.resolve_theme(dark);
-        if matches!(self.options.theme, ThemeSource::FollowSystem) {
+        // The source resolves against the host family (macOS) + live appearance;
+        // only a `System(..)` source gets the live OS accent, menu colors, SF
+        // face/size, and opaque-when-transparency-disabled treatment. Explicit
+        // family / preset / custom themes render exactly as authored.
+        let mut theme = self
+            .options
+            .theme
+            .resolve(OsFamily::MacOs, system_is_dark());
+        if self.options.theme.injects_system() {
             if let Some((r, g, b, a)) = system_accent(self.mtm) {
                 theme.accent = Color::Rgba(r, g, b, a);
+            }
+            read_system_palette().apply_to(&mut theme);
+            if let Some(font) = read_system_menu_font() {
+                font.apply_size_to(&mut theme);
+            }
+            if !transparency_enabled() {
+                theme.make_opaque();
             }
         }
         theme
@@ -1056,6 +1106,35 @@ impl PopupSession<'_> {
         self.sync_a11y();
     }
 
+    /// The pointer left a panel's tracking area. If it merely crossed into
+    /// another open panel (e.g. into a child flyout), that panel's own tracking
+    /// takes over — do nothing, so we never race-close a submenu we're entering.
+    /// If it left every panel (onto the desktop), collapse all submenu flyouts
+    /// and clear the row highlight; the popup itself stays open (dismissal is the
+    /// click-away / focus-loss path), matching native `NSMenu` behavior.
+    fn on_exit(&mut self, _kind: WindowKind) {
+        if self.popup.is_none() {
+            return;
+        }
+        // Current global pointer location (AppKit bottom-left screen coords, the
+        // same space as `panel_screen_frames`).
+        let loc = NSEvent::mouseLocation();
+        let frames = self.panel_screen_frames();
+        if !point_outside_all(&frames, loc.x, loc.y) {
+            return;
+        }
+        self.truncate_flyouts(0);
+        let cleared = self
+            .popup
+            .as_mut()
+            .map(|p| p.hovered.take().is_some())
+            .unwrap_or(false);
+        if cleared {
+            self.redraw(WindowKind::Popup);
+        }
+        self.sync_a11y();
+    }
+
     fn on_click(&mut self, kind: WindowKind) {
         let level = kind.menu_level();
         let Some(menu) = self.menu_at_level(level) else {
@@ -1282,6 +1361,7 @@ impl PopupSession<'_> {
             UiEvent::MouseMoved { kind, x, y } => {
                 self.on_cursor(kind, LogicalPoint::new(x as f32, y as f32));
             }
+            UiEvent::MouseExited { kind } => self.on_exit(kind),
             UiEvent::MouseDown { kind, x, y } => {
                 if let Some(p) = self.panel_mut(kind) {
                     p.cursor = LogicalPoint::new(x as f32, y as f32);
@@ -1533,24 +1613,15 @@ impl Platform for MacPlatform {
     }
 
     fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
-        use crate::platform::{SystemFont, SystemFontSource};
-        // The system menu font (`+[NSFont menuFontOfSize:0]`). Requires the main
-        // thread (AppKit); off it we return None and the renderer keeps its
-        // discovered UI face. Best-effort: SF Pro lives in a protected file
-        // `fontdb` can't load by name, so the family may not resolve — the point
-        // size still applies, and the face falls back cleanly. (Loading the real
-        // SF Pro file via CoreText's URL attribute is future work.)
         self.require_mtm().ok()?;
-        let font = objc2_app_kit::NSFont::menuFontOfSize(0.0);
-        let family = font.familyName()?.to_string();
-        if family.is_empty() {
-            return None;
+        read_system_menu_font()
+    }
+
+    fn system_palette(&self) -> crate::platform::SystemPalette {
+        if self.require_mtm().is_err() {
+            return crate::platform::SystemPalette::default();
         }
-        let point_size = font.pointSize() as f32;
-        Some(SystemFont {
-            source: SystemFontSource::Family(family),
-            point_size,
-        })
+        read_system_palette()
     }
 
     fn work_area(&self) -> LogicalRect {
@@ -1747,6 +1818,56 @@ fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     crate::render::encode_rgba_png(&rgba, w, h)
 }
 
+/// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],
+/// resolving the real SF file via CoreText's URL attribute so fontdb loads the
+/// actual system face (falling back to the family name if the file has no URL).
+/// `None` off the main thread or when neither a file nor a family resolves.
+/// Callers must already be on the main thread (AppKit).
+fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
+    use crate::platform::{SystemFont, SystemFontSource};
+    MainThreadMarker::new()?;
+    let font = objc2_app_kit::NSFont::menuFontOfSize(0.0);
+    let point_size = font.pointSize() as f32;
+    let source = match system_ui_font_path(&font) {
+        Some(path) => SystemFontSource::Path(std::path::PathBuf::from(path)),
+        None => {
+            let family = font.familyName()?.to_string();
+            if family.is_empty() {
+                return None;
+            }
+            SystemFontSource::Family(family)
+        }
+    };
+    Some(SystemFont { source, point_size })
+}
+
+/// Read the live macOS menu text colors (`labelColor`/`secondaryLabelColor`/
+/// `separatorColor`) under the current appearance. Background is left unset so
+/// the theme's vibrancy translucency is preserved. Empty off the main thread.
+fn read_system_palette() -> crate::platform::SystemPalette {
+    let mut pal = crate::platform::SystemPalette::default();
+    if MainThreadMarker::new().is_none() {
+        return pal;
+    }
+    pal.label = nscolor_srgba(&NSColor::labelColor());
+    pal.secondary_label = nscolor_srgba(&NSColor::secondaryLabelColor());
+    pal.separator = nscolor_srgba(&NSColor::separatorColor());
+    pal
+}
+
+/// Convert an `NSColor` to straight-alpha sRGB `(r, g, b, a)`, or `None` if it
+/// can't be represented in sRGB. Shared by the palette reads.
+fn nscolor_srgba(color: &NSColor) -> Option<(u8, u8, u8, u8)> {
+    let srgb = color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+    let to_u8 = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some((
+        to_u8(srgb.redComponent()),
+        to_u8(srgb.greenComponent()),
+        to_u8(srgb.blueComponent()),
+        to_u8(srgb.alphaComponent()),
+    ))
+}
+
 fn system_is_dark() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
@@ -1754,6 +1875,19 @@ fn system_is_dark() -> bool {
     let app = NSApplication::sharedApplication(mtm);
     let name = app.effectiveAppearance().name();
     name.to_string().to_lowercase().contains("dark")
+}
+
+/// Whether OS transparency/vibrancy is enabled — i.e. the "Reduce transparency"
+/// accessibility setting is **off**. When it's on, macOS menus render opaque, so
+/// the theme drops its translucent background to match. `NSWorkspace`'s
+/// `accessibilityDisplayShouldReduceTransparency` is the canonical source.
+fn transparency_enabled() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    if MainThreadMarker::new().is_none() {
+        return true;
+    }
+    let ws = NSWorkspace::sharedWorkspace();
+    !ws.accessibilityDisplayShouldReduceTransparency()
 }
 
 /// Query the live OS accent color as straight-alpha RGBA, or `None` if it can't
@@ -1769,6 +1903,57 @@ fn system_accent(_mtm: MainThreadMarker) -> Option<(u8, u8, u8, u8)> {
         to_u8(srgb.blueComponent()),
         to_u8(srgb.alphaComponent()),
     ))
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::system_ui_font_path;
+
+    /// On macOS the system menu font must resolve to a real on-disk file via
+    /// CoreText's URL attribute (so fontdb loads the actual SF face instead of
+    /// falling back to the bundled UI font). The file is under a system font
+    /// directory and is a real font container.
+    #[test]
+    fn system_menu_font_resolves_to_a_real_sf_file() {
+        let font = objc2_app_kit::NSFont::menuFontOfSize(0.0);
+        let path =
+            system_ui_font_path(&font).expect("the macOS system menu font has an on-disk URL");
+        assert!(
+            path.starts_with("/System/") || path.starts_with("/Library/"),
+            "expected a system font path, got {path}"
+        );
+        let lower = path.to_ascii_lowercase();
+        assert!(
+            lower.ends_with(".ttf")
+                || lower.ends_with(".ttc")
+                || lower.ends_with(".otf")
+                || lower.ends_with(".otc"),
+            "expected a font-file extension, got {path}"
+        );
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "resolved font file must exist on disk: {path}"
+        );
+    }
+
+    /// The live macOS menu palette read resolves the primary text color on this
+    /// host (proving the `NSColor` → sRGB path works). Runs on whatever thread
+    /// the test harness uses; if that isn't the main thread the read yields an
+    /// empty palette, which we tolerate rather than assert a false negative.
+    #[test]
+    fn system_palette_reads_label_when_on_main_thread() {
+        use objc2::MainThreadMarker;
+        let pal = super::read_system_palette();
+        if MainThreadMarker::new().is_some() {
+            assert!(
+                pal.label.is_some(),
+                "on the main thread the label color must resolve"
+            );
+            // A fully-opaque or translucent color, but a real sRGB triple.
+            let (_r, _g, _b, a) = pal.label.unwrap();
+            assert!(a > 0, "label color must not be fully transparent");
+        }
+    }
 }
 
 #[cfg(test)]

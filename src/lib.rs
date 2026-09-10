@@ -155,7 +155,7 @@ pub use menu::{
 };
 pub use platform::{Appearance, Platform, PlatformEvent};
 pub use style::{Color, Font, FontFamily, Rgba, Weight};
-pub use theme::{MenuOptions, Theme, ThemeSource};
+pub use theme::{MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
 
 // =============================================================================
 // Tray
@@ -674,11 +674,14 @@ mod tests {
             .tooltip("usagio")
             .title("45%")
             .menu(Menu::new().row(Row::new("quit").label("Quit")))
-            .theme(ThemeSource::Dark);
+            .theme(ThemeSource::System(ThemeMode::Dark));
         assert_eq!(tray.tooltip_text(), Some("usagio"));
         assert_eq!(tray.title_text(), Some("45%"));
         assert_eq!(tray.current_menu().len(), 1);
-        assert!(matches!(tray.menu_options().theme, ThemeSource::Dark));
+        assert!(matches!(
+            tray.menu_options().theme,
+            ThemeSource::System(ThemeMode::Dark)
+        ));
     }
 
     #[test]

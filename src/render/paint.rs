@@ -114,7 +114,6 @@ impl LaidMenu {
 
 const SEPARATOR_HEIGHT: f32 = 11.0;
 const ICON_SIZE: f32 = 16.0;
-const LEADING_COLUMN: f32 = 20.0;
 const TRAILING_COLUMN: f32 = 14.0;
 const DEFAULT_MIN_WIDTH: f32 = 200.0;
 const DEFAULT_MAX_WIDTH: f32 = 380.0;
@@ -123,13 +122,18 @@ fn is_submenu(item: &Item) -> bool {
     matches!(item, Item::Submenu { .. })
 }
 
-/// Whether any item needs a leading column (icon or check state).
-fn needs_leading(menu: &Menu) -> bool {
-    menu.items.iter().any(|it| match it {
-        Item::Row(r) | Item::SectionHeader(r) => r.leading.is_some() || r.checked.is_some(),
-        Item::Submenu { label, .. } => label.leading.is_some() || label.checked.is_some(),
-        Item::Separator => false,
-    })
+/// The inline leading advance a row consumes for its own icon/checkmark before
+/// its text: `ICON_SIZE + gap` when the row carries a leading icon or is checked,
+/// else `0`. This is **per-row** and never reserved globally — every row's
+/// content starts at the same left x; an icon row simply draws its image first
+/// and pushes only *its own* text right (issue #16). A caller wanting a shared
+/// checkmark/icon column adds it explicitly.
+fn row_leading_width(row: &Row, gap: f32) -> f32 {
+    if row.leading.is_some() || row.checked == Some(true) {
+        ICON_SIZE + gap
+    } else {
+        0.0
+    }
 }
 
 fn row_font(row: &Row, seg: &Segment, base: &Font) -> Font {
@@ -291,11 +295,6 @@ pub fn render_menu<D: SceneDrawer>(
     let gap = theme.column_gap;
     let base_font = theme.row_font.clone();
 
-    let leading_w = if needs_leading(menu) {
-        LEADING_COLUMN
-    } else {
-        0.0
-    };
     let trailing_w = if menu.items.iter().any(is_submenu) {
         TRAILING_COLUMN
     } else {
@@ -322,25 +321,32 @@ pub fn render_menu<D: SceneDrawer>(
             } else {
                 theme.resolve(theme.label)
             };
-            max_content = max_content.max(row_intrinsic(
-                drawer,
-                &mut measure_cache,
-                row,
-                font,
-                base_color,
-                theme,
-                gap,
-            ));
+            // The row's own content width is its inline leading (icon/check, or
+            // 0) plus its segments — never a globally reserved gutter (#16).
+            let content = row_leading_width(row, gap)
+                + row_intrinsic(
+                    drawer,
+                    &mut measure_cache,
+                    row,
+                    font,
+                    base_color,
+                    theme,
+                    gap,
+                );
+            max_content = max_content.max(content);
         }
     }
 
     let min_w = opts.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
     let max_w = opts.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
-    let desired = pad.left + leading_w + max_content + trailing_w + pad.right;
+    let desired = pad.left + max_content + trailing_w + pad.right;
     let width = desired.clamp(min_w, max_w);
 
-    let band_x = pad.left + leading_w;
-    let band_w = (width - pad.right - trailing_w - band_x).max(1.0);
+    // Every row's content starts at the same left x (`content_left`); a row with a
+    // leading icon draws it here and offsets only its own text. `band_right` is
+    // the shared right edge segments right-align to (before the submenu column).
+    let content_left = pad.left;
+    let band_right = width - pad.right - trailing_w;
 
     let mut y = pad.top;
     let mut rows: Vec<LaidRow> = Vec::new();
@@ -385,9 +391,8 @@ pub fn render_menu<D: SceneDrawer>(
                     row,
                     theme,
                     &theme.header_font,
-                    band_x,
-                    band_w,
-                    leading_w,
+                    content_left,
+                    band_right,
                     ry,
                     rh,
                     false,
@@ -425,9 +430,8 @@ pub fn render_menu<D: SceneDrawer>(
                     row,
                     theme,
                     &base_font,
-                    band_x,
-                    band_w,
-                    leading_w,
+                    content_left,
+                    band_right,
                     ry,
                     rh,
                     submenu,
@@ -454,22 +458,23 @@ fn draw_row_content<D: SceneDrawer>(
     row: &Row,
     theme: &Theme,
     base_font: &Font,
-    band_x: f32,
-    band_w: f32,
-    leading_w: f32,
+    content_left: f32,
+    band_right: f32,
     ry: f32,
     rh: f32,
     submenu: bool,
     highlighted: bool,
     base_color: Rgba,
 ) {
-    // Leading icon / checkmark column.
-    if leading_w > 0.0 {
+    // Per-row inline leading: an icon/checkmark draws at the shared left x and
+    // offsets only this row's own segments (#16). Rows without one start their
+    // text at `content_left` — no globally reserved gutter.
+    let lead = row_leading_width(row, theme.column_gap);
+    let band_x = content_left + lead;
+    let band_w = (band_right - band_x).max(1.0);
+    if lead > 0.0 {
         let icon_rect = LogicalRect::new(
-            LogicalPoint::new(
-                theme.padding.left + (LEADING_COLUMN - ICON_SIZE) / 2.0,
-                ry + (rh - ICON_SIZE) / 2.0,
-            ),
+            LogicalPoint::new(content_left, ry + (rh - ICON_SIZE) / 2.0),
             LogicalSize::new(ICON_SIZE, ICON_SIZE),
         );
         match &row.leading {
@@ -871,6 +876,67 @@ mod tests {
             .find(|(t, ..)| t == needle)
             .unwrap_or_else(|| panic!("no draw_text for {needle:?}; got {:?}", d.texts));
         x + t.chars().count() as f32 * 7.0
+    }
+
+    /// Regression for #16: no global leading gutter. A menu mixing an icon row
+    /// with plain text rows must start every row's content at the SAME left x —
+    /// the icon sits at that x (inline) and plain rows are NOT indented past it.
+    #[test]
+    fn issue16_no_global_leading_gutter_shared_left_x() {
+        use std::sync::Arc;
+        let logo: Arc<[u8]> = Arc::from(vec![0u8; 8]);
+        let menu = Menu::new()
+            .row(
+                Row::new("hdr")
+                    .leading(Icon::Png(logo.clone()))
+                    .label("Claude")
+                    .enabled(false),
+            )
+            .row(Row::new("acct").label("matthew@example.com"))
+            .row(Row::new("quit").label("Quit"));
+
+        let mut d = RecordingDrawer::default();
+        let _ = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        // The icon is drawn at the shared left x.
+        assert_eq!(d.images.len(), 1, "one inline icon");
+        let icon_x = d.images[0].origin.x;
+
+        // Plain rows' text starts at the same left x as the icon — NOT indented
+        // past a reserved gutter.
+        let acct_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "matthew@example.com")
+            .map(|(_, x, _)| *x)
+            .expect("account row text");
+        let quit_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "Quit")
+            .map(|(_, x, _)| *x)
+            .expect("quit row text");
+
+        assert!(
+            (acct_x - icon_x).abs() < 0.5,
+            "plain row must start at the icon's left x, not indented: icon={icon_x} acct={acct_x}"
+        );
+        assert!(
+            (quit_x - icon_x).abs() < 0.5,
+            "every plain row shares the same left x: icon={icon_x} quit={quit_x}"
+        );
+
+        // The icon row's OWN label is offset past its icon (inline content).
+        let hdr_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "Claude")
+            .map(|(_, x, _)| *x)
+            .expect("header text");
+        assert!(
+            hdr_x > icon_x + 8.0,
+            "the icon row's text follows its icon inline: icon={icon_x} hdr={hdr_x}"
+        );
     }
 
     /// Regression for #15: a menu mixing icon-bearing section headers with

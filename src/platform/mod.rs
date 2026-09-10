@@ -66,6 +66,54 @@ pub struct SystemFont {
     pub point_size: f32,
 }
 
+impl SystemFont {
+    /// Apply the OS menu point size to a theme's row + header fonts (preserving
+    /// their weights). A non-positive size is ignored (keeps the theme default).
+    pub fn apply_size_to(&self, theme: &mut crate::theme::Theme) {
+        if self.point_size > 0.0 {
+            theme.row_font.size = self.point_size;
+            theme.header_font.size = self.point_size;
+        }
+    }
+}
+
+/// The host's live menu colors, each an optional straight-alpha `(r, g, b, a)`.
+/// Acquired OS-specifically ([`Platform::system_palette`]) and applied over a
+/// theme's per-OS base; an unset field leaves the base value in place. Kept as
+/// tuples (not [`Color`](crate::style::Color)) so the seam carries no OS handle.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPalette {
+    /// Primary menu text color (e.g. macOS `labelColor`, Win32 `COLOR_MENUTEXT`).
+    pub label: Option<(u8, u8, u8, u8)>,
+    /// De-emphasized text (macOS `secondaryLabelColor`, Win32 `COLOR_GRAYTEXT`).
+    pub secondary_label: Option<(u8, u8, u8, u8)>,
+    /// Separator hairline color (macOS `separatorColor`, Win32 `COLOR_3DSHADOW`).
+    pub separator: Option<(u8, u8, u8, u8)>,
+    /// Opaque menu background, for backends without a vibrancy backdrop. Left
+    /// `None` on macOS/Windows so the translucent theme background is preserved.
+    pub background: Option<(u8, u8, u8, u8)>,
+}
+
+impl SystemPalette {
+    /// Apply the set fields of this palette onto `theme` (each unset field leaves
+    /// the theme's base value). Shared by every backend's `theme()`.
+    pub fn apply_to(&self, theme: &mut crate::theme::Theme) {
+        use crate::style::Color;
+        if let Some((r, g, b, a)) = self.label {
+            theme.label = Color::Rgba(r, g, b, a);
+        }
+        if let Some((r, g, b, a)) = self.secondary_label {
+            theme.secondary_label = Color::Rgba(r, g, b, a);
+        }
+        if let Some((r, g, b, a)) = self.separator {
+            theme.separator = Color::Rgba(r, g, b, a);
+        }
+        if let Some((r, g, b, a)) = self.background {
+            theme.background = Color::Rgba(r, g, b, a);
+        }
+    }
+}
+
 /// The host's current light/dark appearance, used by the engine to resolve the
 /// [`Theme`](crate::Theme) without ever touching an OS appearance API directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +205,18 @@ pub trait Platform {
     /// `None` for any platform that does not override it.
     fn system_menu_font(&self) -> Option<SystemFont> {
         None
+    }
+
+    /// The host's live menu palette — label / secondary-label / separator (and,
+    /// where meaningful, background) colors read from the OS at draw time, so the
+    /// custom surface tracks the exact native menu colors, not just hardcoded
+    /// defaults. Each field is optional: a platform fills what it can read and
+    /// leaves the rest `None`, and the theme keeps its per-OS base value for any
+    /// unread field. The default returns an empty palette (no overrides).
+    ///
+    /// Must never panic: an acquisition failure returns `None` per field.
+    fn system_palette(&self) -> SystemPalette {
+        SystemPalette::default()
     }
 
     /// The logical work area (screen minus reserved bars) of the monitor the

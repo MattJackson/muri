@@ -20,7 +20,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSPopUpMenuWindowLevel, NSTrackingArea,
+    NSBackingStoreType, NSColor, NSCursor, NSPanel, NSPopUpMenuWindowLevel, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
     NSVisualEffectState, NSVisualEffectView, NSWindowDelegate, NSWindowStyleMask,
 };
@@ -52,6 +52,19 @@ define_class!(
             true
         }
 
+        // The popup is a `NonactivatingPanel` with `becomesKeyOnlyIfNeeded(true)`,
+        // so it becomes key only if its first responder says it's needed. Return
+        // true so `makeKeyAndOrderFront` actually makes the panel key **without
+        // activating the app** — which revives `windowDidResignKey`, the signal
+        // that dismisses the menu when focus is lost to Spotlight, an in-app
+        // search field, another app, or another (OEM) menu (#17). Flyouts use
+        // `orderFrontRegardless` (they never take key), so opening a submenu does
+        // not resign the popup — no self-dismiss race. DEVICE-VERIFY.
+        #[unsafe(method(needsPanelToBecomeKey))]
+        fn needs_panel_to_become_key(&self) -> bool {
+            true
+        }
+
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&objc2_app_kit::NSEvent>) -> bool {
             true
@@ -59,12 +72,25 @@ define_class!(
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &objc2_app_kit::NSEvent) {
+            // Force the arrow cursor: a borderless popup otherwise inherits the
+            // I-beam from whatever view last set it, so the pointer shows a text
+            // caret over the menu. `resetCursorRects` covers the static case;
+            // setting it here guarantees the arrow while the pointer is moving.
+            NSCursor::arrowCursor().set();
             let (x, y) = view_point(self, event);
             super::push_event(UiEvent::MouseMoved {
                 kind: *self.ivars(),
                 x,
                 y,
             });
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            // Establish the arrow cursor over the whole view so the menu never
+            // shows the text I-beam.
+            let bounds = self.bounds();
+            self.addCursorRect_cursor(bounds, &NSCursor::arrowCursor());
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -74,6 +100,15 @@ define_class!(
                 kind: *self.ivars(),
                 x,
                 y,
+            });
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &objc2_app_kit::NSEvent) {
+            // The pointer left this panel; the drain decides (by global cursor
+            // geometry) whether to collapse submenus + clear the highlight.
+            super::push_event(UiEvent::MouseExited {
+                kind: *self.ivars(),
             });
         }
 
