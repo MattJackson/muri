@@ -161,6 +161,37 @@ impl Framebuffer {
     }
 }
 
+/// Encode straight-alpha RGBA8 pixels (row-major, 4 bytes per pixel) as PNG
+/// bytes. Returns `None` when the dimensions are zero or `rgba.len()` does not
+/// equal `width * height * 4`.
+///
+/// This is the bridge that lets the compat facade's raw-RGBA tray icon
+/// ([`Icon::from_rgba`](crate::compat::muda::Icon::from_rgba)) reach muri's
+/// encoded-bytes [`Icon::Png`](crate::menu::Icon::Png): the Linux SNI backend
+/// (`icon_pixmap`) and the macOS/Windows image paths all consume encoded bytes,
+/// so without this the facade icon never reaches the drawn tray (divergence D6)
+/// and, on GNOME, the appindicator extension drops an item with an empty pixmap.
+pub fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if rgba.len() != expected {
+        return None;
+    }
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+    }
+    Some(out)
+}
+
 /// Blend a straight-alpha source color, scaled by coverage `a`, over one
 /// premultiplied destination pixel at byte offset `off`. This is the exact
 /// `over` arithmetic the previous `tiny-skia`-backed path used for glyph and
@@ -421,6 +452,37 @@ mod tests {
         assert_eq!((w, h), (2, 2));
         assert_eq!(rgba.len(), 2 * 2 * 4);
         assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn encode_rgba_png_roundtrips_through_decode() {
+        // A 2x2 straight-alpha image with distinct, partly-transparent pixels.
+        let rgba = vec![
+            255, 0, 0, 255, // opaque red
+            0, 255, 0, 128, // half-alpha green
+            0, 0, 255, 255, // opaque blue
+            9, 8, 7, 0, // fully transparent
+        ];
+        let png = encode_rgba_png(&rgba, 2, 2).expect("valid RGBA encodes");
+        let (decoded, w, h) = decode_png(&png).expect("the encoded PNG decodes");
+        assert_eq!((w, h), (2, 2));
+        // A fully-transparent pixel's color channels are not preserved by PNG's
+        // straight-alpha storage in every codec path, so compare only the pixels
+        // with alpha, plus every alpha channel.
+        assert_eq!(&decoded[0..8], &rgba[0..8]);
+        assert_eq!(&decoded[8..12], &rgba[8..12]);
+        assert_eq!(decoded[15], 0, "the transparent pixel stays transparent");
+    }
+
+    #[test]
+    fn encode_rgba_png_rejects_bad_dimensions_and_lengths() {
+        // Zero dimensions.
+        assert!(encode_rgba_png(&[0, 0, 0, 0], 0, 1).is_none());
+        assert!(encode_rgba_png(&[0, 0, 0, 0], 1, 0).is_none());
+        // Length mismatch: 1x1 needs 4 bytes, not 3.
+        assert!(encode_rgba_png(&[0, 0, 0], 1, 1).is_none());
+        // Length mismatch: 2x2 needs 16 bytes, not 4.
+        assert!(encode_rgba_png(&[0, 0, 0, 0], 2, 2).is_none());
     }
 
     #[test]

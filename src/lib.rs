@@ -346,6 +346,12 @@ impl Tray {
         self.menu = menu;
     }
 
+    /// Replace the status-bar icon at runtime (re-published on next backend
+    /// update; on Linux this re-registers the SNI `icon_pixmap`).
+    pub fn set_icon(&mut self, icon: Icon) {
+        self.icon = icon;
+    }
+
     /// The tooltip, if set.
     pub fn tooltip_text(&self) -> Option<&str> {
         self.tooltip.as_deref()

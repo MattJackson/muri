@@ -12,9 +12,13 @@
 //! - `TrayIconEvent` is emitted on macOS/Windows and **not on Linux** (matching
 //!   tray-icon's own contract — the SNI host never delivers the click). The
 //!   facade never fabricates Linux events.
-//! - The tray icon is carried as raw RGBA in the facade [`Icon`]; the muri
-//!   [`Tray`](crate::Tray) is built with a placeholder symbol until the backend's
-//!   image path consumes the RGBA (divergence D6, spec `02` §4.5).
+//! - The tray icon is carried as raw RGBA in the facade [`Icon`]. It is encoded
+//!   to PNG and handed to the muri [`Tray`](crate::Tray) as
+//!   [`Icon::Png`](crate::menu::Icon::Png) at build time (and on
+//!   [`TrayIcon::set_icon`]), so the pixels reach the drawn tray — closing the
+//!   original divergence D6 (spec `02` §4.5). On Linux this populates the SNI
+//!   `icon_pixmap` GNOME's appindicator extension needs (issue #6); the
+//!   placeholder symbol is used only when no icon is configured.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -266,8 +270,6 @@ impl TrayIconBuilder {
     /// Build the tray icon. Returns immediately (passive model, spec `02` §2.1);
     /// it does **not** enter an event loop.
     pub fn build(self) -> super::muda::Result<TrayIcon> {
-        // The muri Tray owns the icon; the facade's raw RGBA is carried until the
-        // backend image path consumes it, so build with a placeholder symbol.
         let muri_menu = if let Some(menu) = &self.menu {
             // Route to a muri custom surface (marks the menu Custom).
             menu.build_custom_surface().menu().clone()
@@ -275,7 +277,12 @@ impl TrayIconBuilder {
             crate::Menu::new()
         };
 
-        let mut tray = crate::Tray::new(MuriIcon::Symbol("tray")).menu(muri_menu);
+        // Encode the facade's raw RGBA into muri's own `Icon::Png` so the pixels
+        // actually reach the drawn tray — on Linux this populates the SNI
+        // `icon_pixmap`, which GNOME's appindicator extension needs to render the
+        // item (issue #6). Falls back to the placeholder symbol only when no icon
+        // was configured or the RGBA is malformed.
+        let mut tray = crate::Tray::new(icon_to_muri(&self.icon)).menu(muri_menu);
         if let Some(tooltip) = &self.tooltip {
             tray = tray.tooltip(tooltip.clone());
         }
@@ -289,6 +296,18 @@ impl TrayIconBuilder {
             _tray: RefCell::new(tray),
         })
     }
+}
+
+/// Convert a facade [`Icon`] (raw straight-alpha RGBA) into a muri
+/// [`Icon`](crate::menu::Icon) by encoding it to PNG — the form every muri
+/// backend consumes (the Linux SNI `icon_pixmap`, the macOS/Windows image
+/// paths). Returns the placeholder tray symbol when there is no icon or the
+/// RGBA cannot be encoded, so the tray is never left with an empty pixmap.
+fn icon_to_muri(icon: &Option<Icon>) -> MuriIcon {
+    icon.as_ref()
+        .and_then(|i| crate::render::encode_rgba_png(&i.rgba, i.width, i.height))
+        .map(|png| MuriIcon::Png(png.into()))
+        .unwrap_or(MuriIcon::Symbol("tray"))
 }
 
 fn next_tray_id() -> String {
@@ -319,14 +338,13 @@ impl TrayIcon {
     /// silently discarded and `Ok(())` returned unconditionally — a no-op that
     /// falsely claimed success).
     ///
-    /// **Divergence D6 (spec `02` §4.5):** the facade carries the icon as raw
-    /// RGBA, but muri's own [`Icon`](crate::menu::Icon) has no raw-RGBA variant —
-    /// it holds *encoded* bytes / symbols — so the pixels cannot yet be handed to
-    /// the live muri [`Tray`](crate::Tray); the on-screen glyph stays the
-    /// placeholder symbol until the backend image path consumes the RGBA. The
-    /// facade therefore truthfully records the requested icon rather than
-    /// pretending it was applied to the drawn tray.
+    /// The facade's raw RGBA is encoded to PNG and applied to the live muri
+    /// [`Tray`](crate::Tray) (closing divergence D6): the new pixels reach the
+    /// drawn tray — on Linux, the SNI `icon_pixmap` is re-registered. A `None`
+    /// icon (or RGBA that fails to encode) clears the facade record and reverts
+    /// the tray to the placeholder symbol.
     pub fn set_icon(&self, icon: Option<Icon>) -> super::muda::Result<()> {
+        self._tray.borrow_mut().set_icon(icon_to_muri(&icon));
         *self.icon.borrow_mut() = icon;
         Ok(())
     }
@@ -500,6 +518,77 @@ mod tests {
         assert!(
             tray.icon.borrow().is_none(),
             "set_icon(None) clears the icon"
+        );
+    }
+
+    #[test]
+    fn build_encodes_the_icon_onto_the_live_tray() {
+        // A 2x2 opaque RGBA icon.
+        let rgba = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 255, 255, // white
+        ];
+        let icon = Icon::from_rgba(rgba.clone(), 2, 2).expect("valid RGBA");
+
+        let tray = TrayIconBuilder::new()
+            .with_icon(icon)
+            .build()
+            .expect("tray builds");
+
+        // The facade's raw RGBA reached the drawn muri Tray as encoded PNG bytes
+        // (issue #6: previously it was left as the placeholder Symbol, so the
+        // Linux SNI pixmap was empty and GNOME dropped the item).
+        let live = tray._tray.borrow();
+        match live.icon() {
+            MuriIcon::Png(bytes) => {
+                let (decoded, w, h) =
+                    crate::render::decode_png(bytes).expect("tray icon PNG decodes");
+                assert_eq!((w, h), (2, 2));
+                assert_eq!(decoded, rgba, "the pixels round-trip through the tray icon");
+            }
+            other => panic!("expected an encoded PNG tray icon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_without_an_icon_uses_the_placeholder_symbol() {
+        let tray = TrayIconBuilder::new().build().expect("tray builds");
+        let live = tray._tray.borrow();
+        assert!(
+            matches!(live.icon(), MuriIcon::Symbol("tray")),
+            "no configured icon falls back to the placeholder symbol"
+        );
+    }
+
+    #[test]
+    fn set_icon_updates_the_live_tray_pixmap() {
+        let tray = TrayIconBuilder::new().build().expect("tray builds");
+        assert!(matches!(
+            tray._tray.borrow().icon(),
+            MuriIcon::Symbol("tray")
+        ));
+
+        let rgba = vec![10, 20, 30, 255];
+        let icon = Icon::from_rgba(rgba.clone(), 1, 1).expect("valid RGBA");
+        tray.set_icon(Some(icon)).expect("set_icon succeeds");
+
+        match tray._tray.borrow().icon() {
+            MuriIcon::Png(bytes) => {
+                let (decoded, w, h) =
+                    crate::render::decode_png(bytes).expect("tray icon PNG decodes");
+                assert_eq!((w, h), (1, 1));
+                assert_eq!(decoded, rgba);
+            }
+            other => panic!("expected an encoded PNG tray icon, got {other:?}"),
+        }
+
+        // Clearing reverts the drawn icon to the placeholder symbol.
+        tray.set_icon(None).expect("clearing succeeds");
+        assert!(
+            matches!(tray._tray.borrow().icon(), MuriIcon::Symbol("tray")),
+            "set_icon(None) reverts the live tray to the placeholder symbol"
         );
     }
 }

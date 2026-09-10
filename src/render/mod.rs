@@ -57,7 +57,7 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::{FontRef, GlyphId};
 
-pub use raster::{decode_png, Framebuffer};
+pub use raster::{decode_png, encode_rgba_png, Framebuffer};
 
 /// A decoded PNG icon: straight-alpha RGBA bytes plus its `(width, height)`.
 type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;
