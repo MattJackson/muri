@@ -1399,10 +1399,17 @@ fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
     }
 
     // Move the click handler into the session's dispatch sink (owned for the
-    // whole run loop, hence `'static`).
+    // whole run loop, hence `'static`). Preserve `Tray::dispatch`'s behavior:
+    // run the per-surface handler, then project the activation onto the global
+    // `MenuEvent` channel — the muda-compat door has no `on_click` and consumes
+    // clicks via `MenuEvent::receiver()`, so without the `emit` every facade menu
+    // item is inert on macOS (#13). Mirrors the Windows pump (spec 03 §3).
     let dispatch: Box<dyn Fn(&MenuId) + 'static> = match tray.on_click.take() {
-        Some(handler) => Box::new(move |id| handler(id)),
-        None => Box::new(|_| {}),
+        Some(handler) => Box::new(move |id| {
+            handler(id);
+            crate::event::emit(id.clone());
+        }),
+        None => Box::new(|id| crate::event::emit(id.clone())),
     };
     let session = PopupSession {
         mtm,

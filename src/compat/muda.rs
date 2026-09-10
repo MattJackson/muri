@@ -41,7 +41,9 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::menu::{Item as MuriItem, Menu as MuriMenu, Row as MuriRow};
+use crate::menu::{
+    Align, Flex, Item as MuriItem, Menu as MuriMenu, Row as MuriRow, Segment as MuriSegment,
+};
 
 pub use crate::event::MenuEventReceiver;
 pub use crate::menu::{Icon as MuriIcon, MenuEvent, MenuId};
@@ -276,26 +278,26 @@ impl MenuItemKind {
         match self {
             MenuItemKind::MenuItem(i) => {
                 let s = i.inner.borrow();
-                MuriItem::Row(
-                    MuriRow::new(s.id.clone())
-                        .label(s.text.clone())
-                        .enabled(s.enabled),
-                )
+                MuriItem::Row(apply_label(
+                    MuriRow::new(s.id.clone()).enabled(s.enabled),
+                    &s.text,
+                ))
             }
             MenuItemKind::Check(i) => {
                 let s = i.inner.borrow();
-                MuriItem::Row(
-                    MuriRow::new(s.id.clone())
-                        .label(s.text.clone())
-                        .enabled(s.enabled)
-                        .checked(s.checked),
-                )
+                let mut row = MuriRow::new(s.id.clone())
+                    .enabled(s.enabled)
+                    .checked(s.checked);
+                // A checked item gets the native menu's leading checkmark (#12);
+                // muri's checkmark draws in the leading gutter.
+                if s.checked {
+                    row = row.leading(MuriIcon::Checkmark);
+                }
+                MuriItem::Row(apply_label(row, &s.text))
             }
             MenuItemKind::Icon(i) => {
                 let s = i.inner.borrow();
-                let mut row = MuriRow::new(s.id.clone())
-                    .label(s.text.clone())
-                    .enabled(s.enabled);
+                let mut row = apply_label(MuriRow::new(s.id.clone()).enabled(s.enabled), &s.text);
                 match &s.icon {
                     // A raw-RGBA icon is encoded to PNG and rendered as the row's
                     // leading image — the same bridge the tray icon uses
@@ -322,9 +324,7 @@ impl MenuItemKind {
             }
             MenuItemKind::Submenu(i) => {
                 let s = i.inner.borrow();
-                let label = MuriRow::new(s.id.clone())
-                    .label(s.text.clone())
-                    .enabled(s.enabled);
+                let label = apply_label(MuriRow::new(s.id.clone()).enabled(s.enabled), &s.text);
                 MuriItem::Submenu {
                     label,
                     menu: kinds_to_muri_menu(&s.items),
@@ -355,6 +355,20 @@ fn kinds_to_muri_menu(items: &[MenuItemKind]) -> MuriMenu {
         menu.items.push(kind.to_muri());
     }
     menu
+}
+
+/// Apply a muda item's label text to a muri row, honoring a TAB tab-stop so the
+/// native `label\tvalue` two-column layout is preserved (#12): the text before
+/// the first TAB grows to fill the row and the trailing text is flush-right,
+/// matching muda's NSMenu tab-stop column. Text without a TAB is a single label.
+fn apply_label(row: MuriRow, text: &str) -> MuriRow {
+    match text.split_once('\t') {
+        Some((lead, tail)) => row.segments(vec![
+            MuriSegment::new(lead.trim_end()).flex(Flex::Grow),
+            MuriSegment::new(tail.trim_start()).align(Align::Right),
+        ]),
+        None => row.label(text.to_owned()),
+    }
 }
 
 // =============================================================================
@@ -1418,6 +1432,40 @@ mod tests {
                 assert_eq!(menu.items.len(), 1);
             }
             _ => panic!("expected a Submenu"),
+        }
+    }
+
+    #[test]
+    fn tab_label_becomes_two_columns_and_checked_shows_a_checkmark() {
+        // #12: a `label\tvalue` tab-stop splits into a Grow left segment + a
+        // right-aligned trailing column (muda's NSMenu tab stop), and a checked
+        // CheckMenuItem gets the leading native checkmark.
+        let menu = Menu::new();
+        menu.append(&MenuItem::with_id("a", "Account\t47% / 89%", true, None))
+            .unwrap();
+        menu.append(&CheckMenuItem::with_id("b", "Active", true, true, None))
+            .unwrap();
+        let muri = menu.to_muri_menu();
+
+        match &muri.items[0] {
+            Item::Row(r) => {
+                assert_eq!(r.segments.len(), 2, "tab splits into two segments");
+                assert_eq!(r.segments[0].text, "Account");
+                assert!(matches!(r.segments[0].flex, Flex::Grow));
+                assert_eq!(r.segments[1].text, "47% / 89%");
+                assert!(matches!(r.segments[1].align, Align::Right));
+            }
+            _ => panic!("expected a two-column Row"),
+        }
+        match &muri.items[1] {
+            Item::Row(r) => {
+                assert_eq!(r.checked, Some(true));
+                assert!(
+                    matches!(r.leading, Some(MuriIcon::Checkmark)),
+                    "a checked item shows the leading checkmark"
+                );
+            }
+            _ => panic!("expected a checked Row"),
         }
     }
 
