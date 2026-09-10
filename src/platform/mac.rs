@@ -1287,6 +1287,20 @@ impl Platform for MacPlatform {
         run_event_loop(tray)
     }
 
+    fn spawn_tray(self, tray: Tray) -> Result<()> {
+        // Best-effort (spec: the `tray-icon` facade contract). AppKit's status
+        // item must live on the main thread and be serviced by an
+        // `NSApplication` run loop, and a background thread cannot own either —
+        // so install on the main thread and hand the loop back to the host
+        // (which a real GUI app already runs). Unlike `run_tray` this neither
+        // calls `app.run()` nor forces the Accessory activation policy, so it
+        // composes with the host's existing app. If called off the main thread
+        // there is nothing safe to do, so the main-thread requirement is
+        // surfaced as an error.
+        let mtm = self.require_mtm()?;
+        install_tray_session(tray, mtm)
+    }
+
     fn open_popup_session(
         &mut self,
         menu: Menu,
@@ -1303,7 +1317,7 @@ impl Platform for MacPlatform {
 /// Install the tray icon and run the native `NSApplication` loop, opening the
 /// styled popup on click and dispatching row clicks to the tray's handler.
 /// Consumes the [`Tray`]; returns when the loop exits.
-fn run_event_loop(mut tray: Tray) -> Result<()> {
+fn run_event_loop(tray: Tray) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| Error::Platform("Tray::run must be called on the main thread".into()))?;
 
@@ -1312,6 +1326,23 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    install_tray_session(tray, mtm)?;
+
+    app.run();
+    Ok(())
+}
+
+/// Install the status item, wire the click dispatch + [`TrayHandle`] waker, and
+/// publish the retained [`AppState`] into the thread-local `MAIN_APP` slot —
+/// everything [`run_event_loop`] does *except* owning the run loop
+/// (`NSApplication::run`) and setting the activation policy.
+///
+/// Split out so the non-blocking [`Platform::spawn_tray`] path can install the
+/// tray on the main thread and hand the run loop back to the host (the
+/// `tray-icon` facade contract), while [`run_event_loop`] keeps driving the loop
+/// itself. The retained `AppState` lives in the `MAIN_APP` thread-local (the main
+/// thread lives for the process), so the status item persists after this returns.
+fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker) -> Result<()> {
     let mut anchor = MacosAnchor::new(mtm);
     anchor.install(tray.tooltip.as_deref())?;
     anchor.set_icon(&tray.icon, tray.tooltip.as_deref());
@@ -1346,7 +1377,6 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
     // Apply any commands a handle posted before the loop came up.
     defer_drain();
 
-    app.run();
     Ok(())
 }
 

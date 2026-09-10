@@ -133,6 +133,33 @@ pub trait Platform {
     where
         Self: Sized;
 
+    /// Install the tray and begin driving it **without blocking the caller**,
+    /// returning once the icon is (best-effort) live. The non-blocking
+    /// counterpart to [`run_tray`](Platform::run_tray), for hosts that own their
+    /// own event loop or want only a passive handle — notably the `tray-icon`
+    /// compatibility facade, whose `TrayIconBuilder::build()` must return
+    /// immediately.
+    ///
+    /// - **Windows / Linux** run the tray's native UI pump on a dedicated
+    ///   background thread; a [`TrayHandle`](crate::TrayHandle) obtained before
+    ///   the call drives it cross-thread (the existing command/waker path).
+    /// - **macOS** is best-effort: AppKit's `NSStatusItem` must live on the main
+    ///   thread, so this must be called from the main thread and relies on the
+    ///   host's existing `NSApplication` run loop to service the item — it does
+    ///   **not** call `app.run()` and does not change the app's activation policy.
+    ///
+    /// The default reports the capability as unavailable; every per-OS backend
+    /// overrides it.
+    fn spawn_tray(self, tray: Tray) -> Result<()>
+    where
+        Self: Sized,
+    {
+        let _ = tray;
+        Err(crate::error::Error::Platform(
+            "spawning a non-blocking tray is not implemented on this platform".into(),
+        ))
+    }
+
     /// Open a pointer/rect-anchored styled popup session — the shared backend for
     /// [`ContextMenu::open_at`](crate::ContextMenu::open_at) and
     /// [`Popup::anchored_to`](crate::Popup::anchored_to) — and block until it

@@ -411,6 +411,23 @@ impl Tray {
         // One seam: the per-OS backend selected once in `platform::current()`.
         platform::current().run_tray(self)
     }
+
+    /// Install the tray icon and begin driving it **without blocking**, returning
+    /// a [`TrayHandle`] to mutate it (swap the menu/icon, show/hide the popup)
+    /// from any thread. The non-blocking counterpart to [`Tray::run`], for hosts
+    /// that own their own event loop — notably the `tray-icon` compatibility
+    /// facade.
+    ///
+    /// On Windows and Linux the tray's native UI pump runs on a dedicated
+    /// background thread. On macOS this is **best-effort**: AppKit's status item
+    /// must live on the main thread, so `spawn` must be called from the main
+    /// thread and relies on the host's existing `NSApplication` run loop to
+    /// service the icon (see [`Platform::spawn_tray`]).
+    pub fn spawn(self) -> Result<TrayHandle> {
+        let handle = self.handle();
+        platform::current().spawn_tray(self)?;
+        Ok(handle)
+    }
 }
 
 // =============================================================================

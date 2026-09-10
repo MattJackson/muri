@@ -1983,6 +1983,24 @@ impl Platform for WindowsPlatform {
         run_event_loop(tray)
     }
 
+    fn spawn_tray(self, tray: Tray) -> Result<()> {
+        // The tray's HWND, message pump and thread-local state all live on the
+        // thread that runs `run_event_loop`, so a dedicated background thread is
+        // fully self-consistent; a `TrayHandle` drives it cross-thread by
+        // `PostMessageW`-ing the (thread-safe) owner window. build() has already
+        // returned by the time this thread installs, so an install failure is
+        // reported on stderr rather than swallowed.
+        std::thread::Builder::new()
+            .name("muri-tray".to_owned())
+            .spawn(move || {
+                if let Err(e) = run_event_loop(tray) {
+                    eprintln!("muri: tray thread exited with error: {e}");
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| Error::Platform(format!("failed to spawn muri tray thread: {e}")))
+    }
+
     fn open_popup_session(
         &mut self,
         menu: Menu,

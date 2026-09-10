@@ -168,6 +168,23 @@ impl Platform for LinuxPlatform {
         run_sni_loop(tray)
     }
 
+    fn spawn_tray(self, tray: Tray) -> Result<()> {
+        // `ksni` already runs its D-Bus service on its own thread; `run_sni_loop`
+        // only parks draining `TrayHandle` commands, so hosting that drain on a
+        // dedicated background thread is self-consistent and lets build() return
+        // immediately. build() has returned before this thread registers, so an
+        // SNI registration failure is reported on stderr rather than swallowed.
+        std::thread::Builder::new()
+            .name("muri-tray".to_owned())
+            .spawn(move || {
+                if let Err(e) = run_sni_loop(tray) {
+                    eprintln!("muri: tray thread exited with error: {e}");
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| Error::Platform(format!("failed to spawn muri tray thread: {e}")))
+    }
+
     /// Open the styled, pointer-anchored `ContextMenu::open_at` popup (spec 22 §2
     /// Path 2). On X11 (incl. XWayland) this draws muri's own surface at the
     /// pointer via an override-redirect window (the `x11` submodule); on a Wayland-only session
