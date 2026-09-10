@@ -14,17 +14,17 @@ menus.
 
 ## Install
 
-muri is pre-1.0 and **not yet released on crates.io** (a `0.0.0` placeholder may
-exist as the name is reserved). Depend on it from git until the first real
-release:
+muri is published on crates.io. It is **pre-1.0** (`0.9.x`), so the public API may
+still change between releases until the Windows backend is device-verified and the
+surface stabilizes — pin an exact version:
 
 ```toml
 [dependencies]
-# Pre-1.0 / not yet released on crates.io — use a git dependency:
-muri = { git = "https://github.com/MattJackson/muri" }
-# (with accessibility) muri = { git = "https://github.com/MattJackson/muri", features = ["a11y"] }
-# Once published on crates.io:
-# muri = "0.1"
+muri = "0.9"
+# with accessibility:            muri = { version = "0.9", features = ["a11y"] }
+# migrating from muda/tray-icon: muri = { version = "0.9", features = ["muda-compat"] }
+# or track the latest unreleased work from git:
+# muri = { git = "https://github.com/MattJackson/muri" }
 ```
 
 > **Status: macOS-first WIP.** On **macOS** the crate draws a real styled popup:
@@ -37,13 +37,17 @@ muri = { git = "https://github.com/MattJackson/muri" }
 > set-position, and (behind the `a11y` feature) attaches an `accesskit_winit`
 > adapter to the popup window so that tree is exposed to NSAccessibility /
 > VoiceOver (a live screen-reader validation pass is the remaining human hop). The
-> **Windows** backend so far installs the notification-area icon and reports its
-> anchor rectangle (compile-verified for `x86_64-pc-windows-msvc`); its popup
-> event loop is next. The **Linux** tray/anchor path is a deliberate fallback
-> (see below), not a styled tray popup.
+> **Windows** backend is **code-complete** as of 0.9.0 — `Shell_NotifyIcon` tray, a
+> `WS_EX_NOACTIVATE` layered popup with DWM acrylic, a Win32 message pump,
+> `WH_MOUSE_LL`/`WH_KEYBOARD_LL` hooks for outside-click dismiss + keyboard, and
+> NVDA/Narrator via `accesskit_windows` (compile-verified for
+> `x86_64-pc-windows-msvc`; on-device verification is the 0.9.x cycle's job). The
+> **Linux** tray/anchor path is a deliberate fallback (see below), not a styled
+> tray popup.
 >
-> **Pre-1.0:** muri is `0.0.x`. The public API may change between releases until
-> the Windows backend lands and the surface stabilizes; pin an exact version.
+> **Pre-1.0:** muri is `0.9.x`. The public API may change between releases until
+> the Windows backend is device-verified and the surface stabilizes; pin an exact
+> version.
 
 ## Why muri exists
 
@@ -80,14 +84,13 @@ platform. That single owned surface is what makes these possible:
 
 ## Feature flags
 
-muri keeps its default surface minimal; optional integrations sit behind flags.
-Only `a11y` ships today — the rest are on the roadmap and are marked honestly.
+muri keeps its default surface minimal (`default = []`); optional integrations sit
+behind flags. Both flags below ship today.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `a11y` | off | AccessKit screen-reader bridge over the raster backend (NSAccessibility / UIA / AT-SPI). Ships today; **planned to be on-by-default at 1.0**. |
-| `muda-compat` | off | A `muda` / `tray-icon` drop-in compatibility facade so existing callers can migrate with minimal churn. **Planned — lands at M3.** |
-| `serde` | off | Optional `serde` derives on the menu data model (`Menu`, `Row`, `Segment`, …). **Planned / optional** — not yet wired. |
+| `muda-compat` | off | A `muda` / `tray-icon` drop-in compatibility facade (`compat::muda` / `compat::tray_icon`) so existing callers can migrate with minimal churn. Maps entirely onto muri's native model — it does **not** pull in the real `muda` / `tray-icon` crates. Ships today (see [Migrating from muda](#migrating-from-muda)). |
 
 ## Quick example
 
@@ -114,7 +117,7 @@ let tray = Tray::new(Icon::from_png_bytes(include_bytes!("icon.png").as_slice())
     .menu(menu)
     .on_click(|id| handle_click(id.as_str()));
 
-// tray.run()?; // installs the tray icon + runs the event loop (works on macOS today; Windows/Linux WIP)
+// tray.run()?; // installs the tray icon + runs the event loop (live on macOS; Windows code-complete/device-verify pending; Linux uses the fallback)
 ```
 
 See [`examples/usagio_menu.rs`](examples/usagio_menu.rs) for usagio's full real
