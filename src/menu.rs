@@ -230,6 +230,11 @@ pub struct Row {
     pub background: Option<Color>,
     /// Optional minimum row height in logical points (else the theme default).
     pub min_height: Option<f32>,
+    /// Optional override for the accessible name announced by screen readers,
+    /// used in place of [`Row::accessible_name`]. Needed for icon-only rows
+    /// (no segments), whose derived name would otherwise be empty and silent
+    /// to an assistive technology (spec 30 §1.4).
+    pub accessibility_label: Option<String>,
 }
 
 impl Default for Row {
@@ -243,6 +248,7 @@ impl Default for Row {
             checked: None,
             background: None,
             min_height: None,
+            accessibility_label: None,
         }
     }
 }
@@ -316,6 +322,14 @@ impl Row {
         self
     }
 
+    /// Override the accessible name announced by screen readers, in place of
+    /// [`Row::accessible_name`]. Required for icon-only rows (no segments),
+    /// whose derived name would otherwise be empty (spec 30 §1.4).
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+
     /// The row's accessible name: its segment texts concatenated with spaces.
     /// This is what screen readers announce for the row (see the design's a11y
     /// section).
@@ -361,6 +375,24 @@ impl Item {
             Item::Separator | Item::SectionHeader(_) => false,
         }
     }
+}
+
+/// Descend `root` through a chain of `parent` indices, following one
+/// [`Item::Submenu`] per step, and borrow the menu at the end of the path
+/// (`root` itself for an empty chain). Returns `None` if any index is out of
+/// range or does not name a submenu.
+///
+/// Shared by every platform backend's flyout stack (macOS/Windows/X11) so the
+/// open-submenu path is resolved by borrowing, never cloning, the nested menus.
+pub(crate) fn descend(root: &Menu, parents: impl IntoIterator<Item = usize>) -> Option<&Menu> {
+    let mut menu = root;
+    for parent in parents {
+        menu = match menu.items.get(parent) {
+            Some(Item::Submenu { menu, .. }) => menu,
+            _ => return None,
+        };
+    }
+    Some(menu)
 }
 
 /// A declarative menu: an ordered list of [`Item`]s. Build it with the fluent
@@ -490,6 +522,14 @@ mod tests {
         assert!(row.enabled);
         assert_eq!(row.checked, None);
         assert!(row.leading.is_none());
+    }
+
+    #[test]
+    fn accessibility_label_defaults_to_none_and_is_settable() {
+        let row = Row::new("x");
+        assert_eq!(row.accessibility_label, None);
+        let labeled = Row::new("x").accessibility_label("Custom name");
+        assert_eq!(labeled.accessibility_label.as_deref(), Some("Custom name"));
     }
 
     // The usagio `RowStyle` → muri mapping from the design doc, exercised as a

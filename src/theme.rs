@@ -43,11 +43,14 @@ impl ThemeSource {
     /// appearance; the pure layer passes a fixed value).
     pub fn resolve_theme(&self, system_is_dark: bool) -> Theme {
         match self {
+            // 1.0-change: FollowSystem tracks the native translucent theme
+            // (spec 01 §4 / 10 §11, locked decision #6) rather than the opaque
+            // built-in palette, so the default look is OS vibrancy.
             ThemeSource::FollowSystem => {
                 if system_is_dark {
-                    Theme::dark()
+                    Theme::native_dark()
                 } else {
-                    Theme::light()
+                    Theme::native()
                 }
             }
             ThemeSource::Light => Theme::light(),
@@ -125,6 +128,37 @@ impl Theme {
             secondary_label: Color::rgb(150, 150, 150),
             separator: Color::rgb(70, 70, 70),
             ..Theme::light()
+        }
+    }
+
+    /// The native light theme: [`light()`](Theme::light) with a **translucent**
+    /// background so OS vibrancy shows through.
+    ///
+    /// The platform present path composites the raster surface over a native
+    /// effect backdrop (`NSVisualEffectView` on macOS, DWM acrylic on Windows)
+    /// using per-pixel alpha (spec `10-rendering-layout.md` §11, locked decision
+    /// #6). Setting `background` to a reduced-alpha [`Color::Rgba`] — rather
+    /// than the opaque literal `light()` uses — is what lets that backdrop blur
+    /// through the panel; every other field stays the same opaque/semantic
+    /// value as `light()`. The alpha here is a fixed **~82%** (`209 / 255`), a
+    /// reasonable approximation of the macOS menu vibrancy material.
+    pub fn native() -> Self {
+        Theme {
+            background: Color::Rgba(246, 246, 246, 209),
+            ..Theme::light()
+        }
+    }
+
+    /// The native dark theme: [`dark()`](Theme::dark) with a **translucent**
+    /// background so OS vibrancy shows through.
+    ///
+    /// See [`native()`](Theme::native) for the mechanism. The alpha here is a
+    /// fixed **~80%** (`204 / 255`), a reasonable approximation of the macOS
+    /// dark menu vibrancy material.
+    pub fn native_dark() -> Self {
+        Theme {
+            background: Color::Rgba(40, 40, 40, 204),
+            ..Theme::dark()
         }
     }
 
@@ -216,6 +250,65 @@ mod tests {
         let mut theme = Theme::light();
         theme.accent = Color::rgb(200, 0, 100);
         assert_eq!(theme.resolve(Color::Accent), Rgba::opaque(200, 0, 100));
+    }
+
+    /// Extract the alpha channel of a theme's `background` field, panicking if
+    /// it isn't a literal `Rgba` (all of `light()`/`dark()`/`native()`/
+    /// `native_dark()` set a literal background).
+    fn background_alpha(theme: &Theme) -> u8 {
+        match theme.background {
+            Color::Rgba(_, _, _, a) => a,
+            other => panic!("expected a literal Rgba background, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn light_and_dark_backgrounds_are_opaque() {
+        assert_eq!(background_alpha(&Theme::light()), 255);
+        assert_eq!(background_alpha(&Theme::dark()), 255);
+    }
+
+    #[test]
+    fn native_backgrounds_are_translucent() {
+        assert!(background_alpha(&Theme::native()) < 255);
+        assert!(background_alpha(&Theme::native_dark()) < 255);
+    }
+
+    #[test]
+    fn native_mirrors_light_and_dark_for_non_background_fields() {
+        // Only `background` should differ from light()/dark(); every other
+        // field (label/accent/separator/fonts/metrics) stays the same
+        // semantic/opaque value.
+        let light = Theme::light();
+        let native = Theme::native();
+        assert_eq!(native.label, light.label);
+        assert_eq!(native.accent, light.accent);
+        assert_eq!(native.separator, light.separator);
+        assert_eq!(native.row_highlight, light.row_highlight);
+        assert_eq!(native.row_font, light.row_font);
+        assert_eq!(native.corner_radius, light.corner_radius);
+
+        let dark = Theme::dark();
+        let native_dark = Theme::native_dark();
+        assert_eq!(native_dark.label, dark.label);
+        assert_eq!(native_dark.separator, dark.separator);
+    }
+
+    #[test]
+    fn follow_system_resolves_to_native_variant() {
+        let resolved_dark = ThemeSource::FollowSystem.resolve_theme(true);
+        assert_eq!(
+            background_alpha(&resolved_dark),
+            background_alpha(&Theme::native_dark())
+        );
+        assert_eq!(resolved_dark.resolve(Color::Label), Rgba::WHITE);
+
+        let resolved_light = ThemeSource::FollowSystem.resolve_theme(false);
+        assert_eq!(
+            background_alpha(&resolved_light),
+            background_alpha(&Theme::native())
+        );
+        assert_eq!(resolved_light.resolve(Color::Label), Rgba::BLACK);
     }
 
     #[test]

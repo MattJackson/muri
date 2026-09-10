@@ -185,4 +185,78 @@ mod tests {
         assert_eq!(p.x, 0.0);
         assert_eq!(p.y, 0.0);
     }
+
+    // Multi-monitor cases: a secondary monitor whose work area does NOT start at
+    // (0, 0) — here one placed up and to the left of the primary, at
+    // (-1920, -1080), 1920x1080. If `place_popup` ever implicitly assumed a
+    // primary-origin work area, these would place the popup relative to (0, 0)
+    // instead of the given `work_area`'s own bounds.
+    fn secondary_monitor_up_left() -> LogicalRect {
+        LogicalRect::new(
+            LogicalPoint::new(-1920.0, -1080.0),
+            LogicalSize::new(1920.0, 1080.0),
+        )
+    }
+
+    #[test]
+    fn bottom_edge_places_correctly_on_an_offset_monitor() {
+        let work = secondary_monitor_up_left();
+        // Anchor near the top-left of the secondary monitor.
+        let anchor = LogicalRect::new(
+            LogicalPoint::new(-1820.0, -1080.0),
+            LogicalSize::new(24.0, 24.0),
+        );
+        let p = place_popup(
+            anchor,
+            LogicalSize::new(200.0, 300.0),
+            work,
+            Edge::Bottom,
+            2.0,
+        );
+        // Left-aligned to the anchor, opens below it — both relative to the
+        // secondary monitor's own coordinates, not the primary's.
+        assert_eq!(p.x, -1820.0);
+        assert_eq!(p.y, -1054.0); // -1080 + 24 + 2 gap
+    }
+
+    #[test]
+    fn bottom_edge_flips_above_when_spilling_off_an_offset_monitor() {
+        let work = secondary_monitor_up_left();
+        // Anchor near the bottom of the secondary monitor (whose bottom edge is
+        // at y = -1080 + 1080 = 0).
+        let anchor = LogicalRect::new(
+            LogicalPoint::new(-1820.0, -230.0),
+            LogicalSize::new(24.0, 24.0),
+        );
+        let p = place_popup(
+            anchor,
+            LogicalSize::new(200.0, 300.0),
+            work,
+            Edge::Bottom,
+            2.0,
+        );
+        // Below would be -230 + 24 + 2 + 300 = 96, past the monitor's max_y (0),
+        // so it flips above: -230 - 2 - 300 = -532.
+        assert_eq!(p.y, -532.0);
+    }
+
+    #[test]
+    fn x_is_clamped_against_an_offset_monitors_far_edge() {
+        let work = secondary_monitor_up_left();
+        // Anchor near the right edge of the secondary monitor (max_x = 0).
+        let anchor = LogicalRect::new(
+            LogicalPoint::new(-20.0, -1080.0),
+            LogicalSize::new(24.0, 24.0),
+        );
+        let p = place_popup(
+            anchor,
+            LogicalSize::new(200.0, 300.0),
+            work,
+            Edge::Bottom,
+            2.0,
+        );
+        // Clamped to the secondary monitor's own far edge (0 - 200 = -200), not
+        // to the primary monitor's edge (which would clamp to 1440 - 200).
+        assert_eq!(p.x, -200.0);
+    }
 }
