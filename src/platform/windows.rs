@@ -90,7 +90,7 @@ use crate::platform::{Appearance, Platform};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
 use crate::style::Color;
-use crate::theme::{MenuOptions, Theme, ThemeSource};
+use crate::theme::{MenuOptions, OsFamily, Theme};
 use crate::{Tray, TrayCommand};
 
 /// The private window message the tray icon posts back to its owner window.
@@ -1086,13 +1086,25 @@ struct PopupSession<'a> {
 impl PopupSession<'_> {
     /// The resolved theme for the current appearance.
     fn theme(&self) -> Theme {
-        let dark = self.options.theme.wants_dark(system_is_dark);
-        let mut theme = self.options.theme.resolve_theme(dark);
-        // Inject the live OS accent so `Color::Accent` (selection/checkmarks)
-        // follows the Windows accent, matching the macOS path (#14).
-        if matches!(self.options.theme, ThemeSource::FollowSystem) {
+        // Resolve against the host family (Windows) + live appearance; a
+        // `System(..)` source additionally gets the live accent, the Segoe UI
+        // face/size, and opaque-when-transparency-disabled. Explicit family /
+        // preset / custom themes render as authored. (Live per-app menu text
+        // colors would need WinRT `UISettings`; the tuned Win11 base palette
+        // covers dark/light for now — noted follow-up.)
+        let mut theme = self
+            .options
+            .theme
+            .resolve(OsFamily::Windows, system_is_dark());
+        if self.options.theme.injects_system() {
             if let Some((r, g, b, a)) = system_accent() {
                 theme.accent = Color::Rgba(r, g, b, a);
+            }
+            if let Some(font) = read_system_menu_font() {
+                font.apply_size_to(&mut theme);
+            }
+            if !transparency_enabled() {
+                theme.make_opaque();
             }
         }
         theme
@@ -1941,6 +1953,52 @@ fn register_popup_class(hinstance: windows_sys::Win32::Foundation::HINSTANCE, cl
 /// colorization/accent color, `0xAARRGGBB`), or `None` if DWM composition is
 /// off. Injected into `Color::Accent` so the selection/checkmark follows the
 /// user's Windows accent (#14).
+/// Read the Windows menu font (`SPI_GETNONCLIENTMETRICS` → `lfMenuFont`, normally
+/// Segoe UI) as a [`SystemFont`](crate::platform::SystemFont). Free function so
+/// both the [`Platform`] impl and the popup `theme()` can call it.
+fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
+    use crate::platform::{SystemFont, SystemFontSource};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
+    };
+    unsafe {
+        let mut ncm: NONCLIENTMETRICSW = std::mem::zeroed();
+        ncm.cbSize = std::mem::size_of::<NONCLIENTMETRICSW>() as u32;
+        let ok = SystemParametersInfoW(
+            SPI_GETNONCLIENTMETRICS,
+            ncm.cbSize,
+            (&mut ncm as *mut NONCLIENTMETRICSW).cast(),
+            0,
+        );
+        if ok == 0 {
+            return None;
+        }
+        let lf = ncm.lfMenuFont;
+        // `lfFaceName` is a null-terminated UTF-16 buffer (typically Segoe UI,
+        // which fontdb resolves by name on Windows).
+        let len = lf
+            .lfFaceName
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(lf.lfFaceName.len());
+        let family = String::from_utf16_lossy(&lf.lfFaceName[..len]);
+        if family.is_empty() {
+            return None;
+        }
+        // lfHeight < 0 is the char height in device pixels; convert to points at
+        // the 96-DPI baseline (the size is a secondary refinement).
+        let point_size = if lf.lfHeight < 0 {
+            (-lf.lfHeight as f32) * 72.0 / 96.0
+        } else {
+            0.0
+        };
+        Some(SystemFont {
+            source: SystemFontSource::Family(family),
+            point_size,
+        })
+    }
+}
+
 fn system_accent() -> Option<(u8, u8, u8, u8)> {
     use windows_sys::Win32::Graphics::Dwm::DwmGetColorizationColor;
     unsafe {
@@ -1959,10 +2017,24 @@ fn system_accent() -> Option<(u8, u8, u8, u8)> {
 }
 
 fn system_is_dark() -> bool {
+    read_personalize_dword("AppsUseLightTheme", 1) == 0
+}
+
+/// Whether Windows transparency effects are enabled (Settings › Personalization ›
+/// Colors › Transparency effects, registry `EnableTransparency`). When off, Win11
+/// menus render opaque, so the theme drops its acrylic translucency to match.
+/// Defaults to enabled if the value is missing.
+fn transparency_enabled() -> bool {
+    read_personalize_dword("EnableTransparency", 1) != 0
+}
+
+/// Read a DWORD from `…\CurrentVersion\Themes\Personalize`, returning `default`
+/// if the value is absent/unreadable.
+fn read_personalize_dword(value_name: &str, default: u32) -> u32 {
     unsafe {
         let subkey = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-        let value = wide("AppsUseLightTheme");
-        let mut data: u32 = 1;
+        let value = wide(value_name);
+        let mut data: u32 = default;
         let mut size = std::mem::size_of::<u32>() as u32;
         let rc = RegGetValueW(
             HKEY_CURRENT_USER,
@@ -1973,7 +2045,11 @@ fn system_is_dark() -> bool {
             (&mut data as *mut u32).cast(),
             &mut size,
         );
-        rc == 0 && data == 0
+        if rc == 0 {
+            data
+        } else {
+            default
+        }
     }
 }
 
@@ -2019,46 +2095,7 @@ impl Platform for WindowsPlatform {
     }
 
     fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
-        use crate::platform::{SystemFont, SystemFontSource};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
-        };
-        unsafe {
-            let mut ncm: NONCLIENTMETRICSW = std::mem::zeroed();
-            ncm.cbSize = std::mem::size_of::<NONCLIENTMETRICSW>() as u32;
-            let ok = SystemParametersInfoW(
-                SPI_GETNONCLIENTMETRICS,
-                ncm.cbSize,
-                (&mut ncm as *mut NONCLIENTMETRICSW).cast(),
-                0,
-            );
-            if ok == 0 {
-                return None;
-            }
-            let lf = ncm.lfMenuFont;
-            // `lfFaceName` is a null-terminated UTF-16 buffer (typically Segoe UI,
-            // which fontdb resolves by name on Windows).
-            let len = lf
-                .lfFaceName
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(lf.lfFaceName.len());
-            let family = String::from_utf16_lossy(&lf.lfFaceName[..len]);
-            if family.is_empty() {
-                return None;
-            }
-            // lfHeight < 0 is the char height in device pixels; convert to points
-            // at the 96-DPI baseline (the size is a secondary refinement).
-            let point_size = if lf.lfHeight < 0 {
-                (-lf.lfHeight as f32) * 72.0 / 96.0
-            } else {
-                0.0
-            };
-            Some(SystemFont {
-                source: SystemFontSource::Family(family),
-                point_size,
-            })
-        }
+        read_system_menu_font()
     }
 
     fn work_area(&self) -> LogicalRect {

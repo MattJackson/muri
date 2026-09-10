@@ -834,8 +834,10 @@ impl SceneDrawer for RasterDrawer {
     fn begin_frame(&mut self, size: LogicalSize) {
         let w = ((size.width * self.scale).round() as u32).max(1);
         let h = ((size.height * self.scale).round() as u32).max(1);
-        // A fresh transparent framebuffer at the device size.
-        self.fb = Framebuffer::new(w, h);
+        // Reset to a transparent surface, reusing the existing buffer when the
+        // size is unchanged (the common per-hover repaint) instead of allocating
+        // a fresh framebuffer each frame.
+        self.fb.reset(w, h);
     }
 
     fn fill_round_rect(&mut self, rect: LogicalRect, corner_radius: f32, color: Rgba) {

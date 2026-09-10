@@ -17,6 +17,7 @@ use objc2_core_foundation::{CFData, CFRetained};
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
 };
+use objc2_quartz_core::CATransaction;
 
 use crate::render::Framebuffer;
 
@@ -62,8 +63,17 @@ pub(super) fn set_layer_contents(view: &NSView, image: &CGImage, scale: f32) {
     };
     // A `CGImageRef` is toll-free acceptable as `CALayer.contents`.
     let obj: *const AnyObject = (image as *const CGImage).cast();
+    // `contents` is an animatable CALayer property: assigning it outside a
+    // `drawRect:` cycle triggers Core Animation's DEFAULT implicit action — a
+    // ~0.25s cross-fade — on every swap. On hover that makes each highlight fade
+    // in mushily and feel laggy (the native menu highlights instantly). Wrap the
+    // update in a `CATransaction` with actions disabled so the contents swap is
+    // immediate, matching the OEM menu's instant highlight.
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
     unsafe {
         layer.setContents(Some(&*obj));
     }
     layer.setContentsScale(scale as f64);
+    CATransaction::commit();
 }

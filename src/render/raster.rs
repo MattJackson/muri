@@ -57,6 +57,24 @@ impl Framebuffer {
         }
     }
 
+    /// Reset the surface to fully transparent at `width × height`, **reusing the
+    /// existing pixel buffer** when the dimensions are unchanged (the common
+    /// per-frame case: the popup repaints at the same size on every hover). This
+    /// avoids a full-size heap alloc + free each frame — only a `memset` of the
+    /// existing buffer. Reallocates only when the size actually changes.
+    pub fn reset(&mut self, width: u32, height: u32) {
+        let (w, h) = (width.max(1), height.max(1));
+        let len = (w as usize) * (h as usize) * 4;
+        if self.width == w && self.height == h {
+            self.data.fill(0);
+        } else {
+            self.width = w;
+            self.height = h;
+            self.data.clear();
+            self.data.resize(len, 0);
+        }
+    }
+
     /// Width in device pixels.
     pub fn width(&self) -> u32 {
         self.width

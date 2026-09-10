@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-10
+
+### Fixed
+
+- **macOS hover latency (laggy highlight)** — the popup swapped its `CALayer`
+  contents with no `CATransaction`, so Core Animation ran its default ~0.25s
+  implicit cross-fade on every hover, making the highlight feel mushy/laggy. The
+  present path now wraps the contents update in a `CATransaction` with actions
+  disabled, so highlight changes are instant (matching the native menu). **The
+  headline fix.**
+- **macOS text-cursor over the menu (#issue)** — a borderless popup inherited the
+  I-beam cursor. `MuriView` now sets the arrow cursor (via `resetCursorRects` and
+  on `mouseMoved:`).
+- **Submenu didn't collapse when the pointer left the menu (onto the desktop)** —
+  added `mouseExited:` handling with a global-cursor geometry guard: leaving all
+  panels collapses open flyouts and clears the highlight (the popup stays open),
+  while crossing into a child flyout is preserved.
+- **#16 — no global leading gutter.** A single icon row no longer indents every
+  other row: the leading icon/checkmark is **per-row inline content** drawn at the
+  shared left x, so icon-less rows are not pushed right. (A shared checkmark
+  column becomes an explicit opt-in, not implicit.)
+- **#17 — mutual exclusion / focus-loss dismissal (macOS).** The non-activating
+  popup now becomes key (`needsPanelToBecomeKey`) **without activating the app**,
+  reviving `windowDidResignKey`-driven dismissal — the menu closes when focus is
+  lost to Spotlight, an in-app search field, another app, or another (OEM) menu.
+  Flyouts use `orderFrontRegardless` (never take key), so opening a submenu does
+  not resign the popup.
+
+### Added
+
+- **Per-OS themes + a richer [`ThemeSource`]** — three genuinely distinct native
+  looks (`Theme::macos` / `windows` / `gnome`, each dark/light with its own
+  metrics + palette) selectable independent of the host, plus built-in
+  [`Preset`]s. `ThemeSource` is now `System(ThemeMode)` (match the host OS — the
+  only source that receives live OS injection), `MacOs`/`Windows`/`Gnome(ThemeMode)`
+  (force a platform look on any host — a macOS app can render a Windows menu),
+  `Preset(Preset)` (`OldSchoolTerminal` / `HighContrast` / `Solarized` / `Nord`),
+  and `Custom(Box<Theme>)`. `ThemeMode` is `Auto` (follow OS light/dark) / `Light`
+  / `Dark`.
+  - **BREAKING:** the old `ThemeSource::{FollowSystem, Light, Dark}` /
+    `Custom(Theme)` variants are replaced. Migrate: `FollowSystem` →
+    `System(ThemeMode::Auto)` (the new `Default`), `Dark` →
+    `System(ThemeMode::Dark)`, `Light` → `System(ThemeMode::Light)`,
+    `Custom(t)` → `Custom(Box::new(t))`.
+- **Live macOS menu colors** — `System(..)` on macOS reads `labelColor` /
+  `secondaryLabelColor` / `separatorColor` from `NSColor` under the current
+  appearance (`Platform::system_palette`), on top of the live accent.
+- **Real macOS system font (SF)** — the system menu font is resolved to its
+  actual on-disk file via CoreText's `kCTFontURLAttribute`, so fontdb loads the
+  genuine SF face instead of the bundled fallback; the OS menu **point size** is
+  applied to the theme fonts.
+- **OS transparency awareness** — `Platform::transparency_enabled` (macOS
+  Reduce-Transparency accessibility flag; Windows `EnableTransparency`); when the
+  user disables transparency, a `System(..)` theme drops its translucent
+  background to a solid fill (`Theme::make_opaque`).
+
+### Performance
+
+- The raster framebuffer is **reused** across frames when the popup size is
+  unchanged (the common per-hover repaint) instead of reallocating a fresh buffer
+  each frame (`Framebuffer::reset`).
+
 ## [0.10.1] - 2026-09-10
 
 ### Documentation

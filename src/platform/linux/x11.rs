@@ -45,7 +45,7 @@ use crate::menu::{Item, Menu, MenuId};
 use crate::render::paint::{render_menu, LaidMenu};
 use crate::render::RasterDrawer;
 use crate::style::{Color, Rgba};
-use crate::theme::{MenuOptions, Theme, ThemeSource};
+use crate::theme::{MenuOptions, OsFamily, Theme};
 
 /// Device-scale factor the X11 popup rasterizes at.
 ///
@@ -948,10 +948,12 @@ fn present(
 /// Resolve the popup theme for the current appearance (mirrors the other
 /// backends' resolution; the Linux styled panel is opaque per spec 22 §6).
 fn resolve_theme(options: &MenuOptions, dark: bool) -> Theme {
-    let wants_dark = options.theme.wants_dark(|| dark);
-    let mut theme = options.theme.resolve_theme(wants_dark);
-    // Inject the live GNOME accent so `Color::Accent` follows the desktop (#14).
-    if matches!(options.theme, ThemeSource::FollowSystem) {
+    // Resolve against the host family (GNOME/Adwaita) + live appearance. Only a
+    // `System(..)` source gets the live GNOME accent injected; explicit family /
+    // preset / custom themes render as authored. The Adwaita base is flat/opaque
+    // (no Linux vibrancy), so there is no transparency toggle here.
+    let mut theme = options.theme.resolve(OsFamily::Gnome, dark);
+    if options.theme.injects_system() {
         if let Some((r, g, b, a)) = super::system_accent() {
             theme.accent = Color::Rgba(r, g, b, a);
         }
