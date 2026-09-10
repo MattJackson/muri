@@ -380,6 +380,34 @@ fn system_menu_font() -> Option<crate::platform::SystemFont> {
     })
 }
 
+/// The GNOME accent color from gsettings `org.gnome.desktop.interface
+/// accent-color` (GNOME 47+, a named accent), mapped to the libadwaita accent
+/// RGB, or `None` if unavailable/unrecognized. Injected into `Color::Accent`
+/// (#14). Best-effort.
+pub(super) fn system_accent() -> Option<(u8, u8, u8, u8)> {
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "accent-color"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let (r, g, b) = match raw.trim().trim_matches(['\'', '"']).trim() {
+        "blue" => (0x35, 0x84, 0xe4),
+        "teal" => (0x21, 0x90, 0xa4),
+        "green" => (0x3a, 0x94, 0x4a),
+        "yellow" => (0xc8, 0x88, 0x00),
+        "orange" => (0xed, 0x5b, 0x00),
+        "red" => (0xe6, 0x2d, 0x42),
+        "pink" => (0xd5, 0x61, 0x99),
+        "purple" => (0x91, 0x41, 0xac),
+        "slate" => (0x6f, 0x83, 0x96),
+        _ => return None,
+    };
+    Some((r, g, b, 255))
+}
+
 fn system_appearance() -> Appearance {
     portal_color_scheme_is_dark()
         .map(Appearance::from_is_dark)
