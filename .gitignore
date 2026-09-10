@@ -1,7 +1,9 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed: the golden-image snapshot tests are sensitive to the
+# exact glyph-rasterizer version (swash/skrifa), so pinning the resolution keeps
+# CI goldens + the MSRV deterministic. (Spec 50 §3.3.)
 
 # Editor / OS
 .DS_Store

@@ -13,7 +13,6 @@
 # advisory buried deep in a transitive of winit / cosmic-text / objc2 cannot
 # red-wall CI for something we cannot directly fix.
 unmaintained = "workspace"
-ignore = []
 
 [licenses]
 # Every license that appears as the *chosen* license of a resolved crate in

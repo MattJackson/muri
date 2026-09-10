@@ -2,7 +2,11 @@
 name = "muri"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.85"
+# MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
+# tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
+# which requires 1.87 — and a current, maintained D-Bus crate is the right choice
+# there, so the crate's honest floor is 1.87.
+rust-version = "1.87"
 license = "MIT"
 description = "Menu Utilities for Rust Interfaces — a cross-platform, fully-styleable tray-icon and popup-menu system (a custom-drawn muda/tray-icon replacement)."
 repository = "https://github.com/MattJackson/muri"
@@ -25,11 +29,45 @@ default-target = "x86_64-apple-darwin"
 targets = ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 
 [dependencies]
-# Portable CPU-raster scene drawer (all permissive-licensed). These draw the
-# menu identically on every OS and carry no windowing/GUI dependency, so the
-# offscreen render + snapshot test runs anywhere.
-tiny-skia = "0.11"
-cosmic-text = "0.12"
+# Icon/logo PNG decode + golden-image PNG encode for the muri-owned CPU raster
+# blitter (ADR-0001). muri draws the menu itself into an owned premultiplied-RGBA
+# `Framebuffer` (see `src/render/raster.rs`) — no general-purpose 2D crate — so
+# the only external raster dependency is this lean codec (the same one `tiny-skia`
+# used internally, now direct so `tiny-skia`'s own crates drop out of the tree).
+# All permissive-licensed; carries no windowing/GUI dependency, so the offscreen
+# render + snapshot test runs anywhere.
+png = "0.17"
+
+# Text stack — the deep engines used *directly* (ADR-0001), with muri owning the
+# thin shaping-glue + font-fallback layer in `src/render/mod.rs`:
+#   * `fontdb`    — in-memory font database + CSS-like family/weight queries
+#     (system-font discovery for `RasterDrawer::new`; a two-face vendored DejaVu
+#     db with discovery disabled for `RasterDrawer::new_headless`).
+#   * `harfrust`  — the HarfBuzz-project's Rust shaper (the actively-maintained
+#     successor to the now-unmaintained `rustybuzz`, RUSTSEC-2026-0206):
+#     complex-script shaping (clusters, kerning, ligatures) of a run against one
+#     face. MSRV 1.85, so muri's floor is unchanged.
+#   * `swash`     — glyph rasterizer: outline + color-emoji (`Content::Mask` /
+#     `SubpixelMask` / `Color`) rendering, blitted onto the raster framebuffer. Also
+#     supplies the cmap/metrics lookups the shaping glue needs (glyph coverage for
+#     font fallback, ascent/descent for line centering).
+# Together these replace `cosmic-text` (which bundled the same swash/shaper
+# engines behind a non-optional `unicode-segmentation` that pinned MSRV ≥ 1.85).
+fontdb = { version = "0.24", default-features = false, features = [
+    "std",
+    "fs",
+    "memmap",
+] }
+harfrust = "0.13"
+swash = "0.2"
+
+# The process-global `MenuEvent` channel (spec 03 §3) — the same crate muda uses,
+# for behavioral parity. Kept a NON-optional dependency (not `dep:`-gated behind
+# `muda-compat`) because `MenuEvent::receiver()` is part of the *native* crate
+# surface: muri emits its own events for every surface it draws, so a native
+# consumer can poll the global channel without enabling the compat facade. MSRV
+# stays ≤ 1.85 (crossbeam-channel's own MSRV is well below that).
+crossbeam-channel = "0.5"
 
 # Screen-reader bridge (optional, `a11y` feature). AccessKit's data model is a
 # pure, portable set of node/tree types; the muri `a11y` tree maps straight onto
@@ -41,16 +79,24 @@ accesskit = { version = "0.17", optional = true }
 # winit/softbuffer popup window the scene drawer paints into. Gated to macOS
 # because Phase 1 only implements the macOS anchoring/popup shim.
 [target.'cfg(target_os = "macos")'.dependencies]
-winit = "0.30"
-softbuffer = "0.4"
-raw-window-handle = "0.6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
-# macOS AccessKit platform adapter (optional, `a11y` feature): attaches the
-# already-built `a11y` tree to the winit popup window so VoiceOver can walk it.
-# 0.23 pairs with accesskit 0.17 + winit 0.30. Bridges to NSAccessibility.
-accesskit_winit = { version = "0.23", optional = true }
+# CALayer present path: build a CGImage from the raster RGBA framebuffer and set
+# it as the panel content view's layer contents (replaces softbuffer).
+objc2-quartz-core = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-foundation = "0.3"
+# macOS AccessKit platform adapter (optional, `a11y` feature): dynamically
+# subclasses the panel's content NSView so VoiceOver can walk the already-built
+# `a11y` tree. 0.18 pairs with accesskit 0.17. Bridges to NSAccessibility.
+#
+# NOTE: accesskit_macos has never migrated off objc2 0.5 (every published
+# version, incl. the latest, pins objc2 ^0.5.1 / objc2-app-kit ^0.2.0). So the
+# `a11y` feature unavoidably pulls a small objc2 0.5 subtree *for the accesskit
+# bridge only*. The default build carries none of it; winit's objc2 0.5 stack
+# (and winit/softbuffer/raw-window-handle/accesskit_winit) are fully gone.
+accesskit_macos = { version = "0.18", optional = true }
 
 # Windows backend: the notification-area tray icon + anchor rect via
 # `Shell_NotifyIcon` / `Shell_NotifyIconGetRect`. Only the tray shim is
@@ -62,9 +108,72 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
     "Win32_System_LibraryLoader",
+    # Required transitively: WNDCLASSW references GDI handle types (HBRUSH,
+    # HCURSOR, HICON), so RegisterClassW/WNDCLASSW fail to compile without it.
+    "Win32_Graphics_Gdi",
+    # Global outside-click dismiss + keyboard nav into the non-activating popup
+    # go through low-level `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks, whose
+    # `VIRTUAL_KEY` codes live here.
+    "Win32_UI_Input_KeyboardAndMouse",
+    # ACRYLIC/system-backdrop vibrancy for the popup (`DwmSetWindowAttribute`,
+    # decision #6).
+    "Win32_Graphics_Dwm",
+    # Light/dark appearance query (`AppsUseLightTheme` under HKCU) for
+    # `Platform::appearance`.
+    "Win32_System_Registry",
 ] }
+# Windows AccessKit platform adapter (optional, `a11y` feature): subclasses the
+# popup/flyout `HWND` so NVDA / Narrator can walk the already-built `a11y` tree
+# over UI Automation. 0.24 pairs with accesskit 0.17; it re-exports its own
+# `windows`-crate `HWND`, which never crosses the `Platform` seam. Mirrors how
+# `accesskit_macos` is wired on the macOS target.
+accesskit_windows = { version = "0.24", optional = true }
+
+# Linux backend (M5): the native-menu fallback (spec 22 §2, Path 1). Both crates
+# are **pure Rust** — `ksni` speaks StatusNotifierItem / `com.canonical.dbusmenu`
+# over `zbus`, which talks the D-Bus wire protocol directly, so the build needs
+# **no** system `libdbus`/GTK (only a session bus at *runtime*). The tray icon is
+# decoded to an ARGB32 pixmap with the already-shared `png` codec.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# StatusNotifierItem / AppIndicator over D-Bus. The `blocking` feature exposes the
+# synchronous `ksni::blocking` API (`TrayMethods::spawn` -> `Handle`) that
+# `run_tray` drives without pulling an async runtime into muri's public surface.
+ksni = { version = "0.3.6", features = ["blocking"] }
+# Direct, pure-Rust D-Bus for the best-effort `org.freedesktop.appearance`
+# color-scheme portal read (light/dark). Same major version `ksni` already uses.
+zbus = { version = "5", features = ["blocking-api"] }
+# X11 client for the styled, pointer-anchored `ContextMenu::open_at` path (spec 22
+# §2 Path 2 / §3): an override-redirect `_NET_WM_WINDOW_TYPE_POPUP_MENU` window
+# placed at the caller's absolute pointer coordinate, which X11 (unlike Wayland)
+# permits a client to do. `default-features = false` selects x11rb's **pure-Rust**
+# `RustConnection` — no `libxcb`/`allow-unsafe-code`, so the build needs no system
+# X libraries (only a running X server, incl. XWayland, at *runtime*). MSRV is well
+# below muri's 1.85 floor.
+x11rb = { version = "0.13", default-features = false }
 
 [features]
 default = []
 # Screen-reader integration via AccessKit on the raster backend (see README).
-a11y = ["dep:accesskit", "dep:accesskit_winit"]
+# On macOS this activates the `accesskit_macos` platform adapter; the `dep:`
+# reference to a target-specific optional dependency is inert on other targets.
+# `dep:accesskit_macos` / `dep:accesskit_windows` are the per-OS platform
+# adapters; each is a target-gated optional dependency, so referencing it here is
+# inert on the other targets.
+a11y = ["dep:accesskit", "dep:accesskit_macos", "dep:accesskit_windows"]
+# The muda + tray-icon compatibility facade (`compat::muda` / `compat::tray_icon`,
+# spec 02/60). It maps entirely onto muri's native model and does NOT pull in the
+# real `muda` / `tray-icon` crates (locked decision #5). The global `MenuEvent`
+# channel it re-exports lives in the always-compiled native surface, so this
+# feature needs no `dep:` additions of its own (crossbeam-channel is unconditional
+# above). Menu-bar passthrough routes through muri for 0.9.0 (divergence D3/D4).
+muda-compat = []
+
+# Speed-first release profile — a menu system's whole value is INSTANT popup open,
+# so we optimize for latency, not size. This governs muri's own examples/benches;
+# an embedding app sets its own profile (see the README "Performance" section for
+# the recommended settings to mirror).
+[profile.release]
+opt-level = 3      # fastest codegen (not "s"/"z" — size-tuning hurts open latency)
+lto = "fat"        # maximal cross-crate inlining across the raster/text hot path
+codegen-units = 1  # best optimization
+strip = true       # drop symbols (cosmetic; no runtime cost)
