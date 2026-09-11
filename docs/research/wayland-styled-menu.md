@@ -341,6 +341,39 @@ Everything else (blitting a framebuffer, keyboard nav, flyouts, theming *within 
 
 ---
 
+## 15. 0.11.0 implementation status + first device task (added for the feature branch)
+
+The 0.11.0 `feature/0.11-linux-styled-menu` branch lands the **presenter seam**
+(`LinuxMenuPresenter` + `detect_linux_presenter`), the **X11 custom-popup wiring**
+(SNI activate → `XQueryPointer` → the existing `x11::open_popup_session`), a
+dep-free **Wayland layer-shell scaffold** (`src/platform/linux/wayland.rs`, behind
+the off-by-default `wayland-styled` feature), and an **accessibility seam**
+(`src/platform/linux/a11y.rs`). See `docs/adr/0003-linux-styled-tray-menu.md` for
+the full design, the ksni-0.3.6 `ItemIsMenu`/`ContextMenu` caveat, and the phased
+device checklist. The macOS `--all-features` gate stays green because the Wayland
+client stack is **not** added yet.
+
+**First device task — add the Wayland deps and implement the renderer.** On a Linux
+session, add to `Cargo.toml`:
+
+```toml
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wayland-client         = { version = "0.31", optional = true }
+smithay-client-toolkit = { version = "0.21", optional = true, default-features = false }
+
+[features]
+wayland-styled = ["dep:wayland-client", "dep:smithay-client-toolkit"]
+```
+
+Then fill the `todo!("DEVICE-VERIFY: …")` bodies in `wayland.rs`
+(`layer_shell_available`, `open_popup_session`, `cursor_position`) using the §3/§12
+recipe: full-output overlay layer surface (all-edges anchor, `exclusive_zone(-1)`,
+`OnDemand` keyboard) → child `xdg_popup` at the pointer/SNI coordinate → blit the
+premultiplied RGBA framebuffer into a `wl_shm` `Argb8888` slot via the already-real
+`blit_argb8888` (R↔B swap, alpha unchanged) → seat-driven input reusing the shared
+`flyout`/`keynav` state machines. Confirm the macOS gate is unaffected (the deps are
+Linux-target-gated) and verify on sway/Hyprland + KWin at 100%/150% scale.
+
 ## Sources
 
 Protocols & specs:

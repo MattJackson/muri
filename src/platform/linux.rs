@@ -58,12 +58,138 @@ use crate::platform::{Appearance, Platform};
 use crate::theme::MenuOptions;
 use crate::{Tray, TrayCommand};
 
+mod a11y;
 mod sni;
+#[cfg(feature = "wayland-styled")]
+mod wayland;
 #[cfg(feature = "x11-popup")]
 mod x11;
 
 use ksni::blocking::{Handle, TrayMethods};
 use sni::MuriSni;
+
+/// Which presenter draws the tray/context menu on this Linux session — the
+/// runtime seam between the three Linux menu-presentation strategies (deliverable
+/// #1, research doc §10). Selected once by [`detect_linux_presenter`] and carried
+/// on the SNI adapter so a right-click / activate routes to the right surface.
+///
+/// - [`NativeDbusMenu`](LinuxMenuPresenter::NativeDbusMenu) — the SNI host draws a
+///   `com.canonical.dbusmenu` tree ([`sni`]). Universal baseline: every SNI host
+///   incl. GNOME, accessible for free over AT-SPI. Also the honest fallback
+///   anywhere the custom path isn't available.
+/// - [`X11Popup`](LinuxMenuPresenter::X11Popup) — muri's own override-redirect
+///   styled popup at the pointer ([`x11`]), on a real X11 session.
+/// - [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell) — muri's own
+///   `wlr-layer-shell` styled popup ([`wayland`]) on wlroots + KWin/Plasma.
+///   **Scaffold only** in 0.11.0 (see the `wayland` module).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `WaylandLayerShell` is only *constructed* under the off-by-default
+// `wayland-styled` feature; keep the variant present (and matched) unconditionally
+// so the seam type is stable, and silence the never-constructed lint on the
+// default Linux build.
+#[allow(dead_code)]
+pub(crate) enum LinuxMenuPresenter {
+    /// Native `com.canonical.dbusmenu`, host-drawn (GNOME + universal fallback).
+    NativeDbusMenu,
+    /// muri's own X11 override-redirect styled popup at the pointer.
+    X11Popup,
+    /// muri's own `wlr-layer-shell` styled popup (wlroots + KWin). Scaffold.
+    WaylandLayerShell,
+}
+
+/// Pick the Linux menu presenter for the current session from the environment
+/// (deliverable #2, research doc §10 "Runtime detection strategy"):
+///
+/// 1. `$WAYLAND_DISPLAY` set → **Wayland**. If the desktop is GNOME/Mutter (which
+///    refuses layer-shell — research doc §6) → [`NativeDbusMenu`]. Otherwise, when
+///    the `wayland-styled` scaffold is compiled *and* the env suggests a
+///    layer-shell compositor, prefer [`WaylandLayerShell`] (the live
+///    `zwlr_layer_shell_v1` registry bind, [`wayland::layer_shell_available`], is
+///    the device-side confirmation before a surface is actually created). Without
+///    the feature (today's default) Wayland always falls back to [`NativeDbusMenu`].
+/// 2. Else `$DISPLAY` set → real **X11** → [`X11Popup`] when the `x11-popup`
+///    feature is compiled, else [`NativeDbusMenu`].
+/// 3. Else (no display env: headless/CI) → [`NativeDbusMenu`].
+///
+/// This is the cheap, non-blocking, never-panicking env logic; it never opens a
+/// Wayland/X connection itself, so it is safe to call on the SNI service thread.
+///
+/// [`NativeDbusMenu`]: LinuxMenuPresenter::NativeDbusMenu
+/// [`X11Popup`]: LinuxMenuPresenter::X11Popup
+/// [`WaylandLayerShell`]: LinuxMenuPresenter::WaylandLayerShell
+pub(crate) fn detect_linux_presenter() -> LinuxMenuPresenter {
+    if wayland_display_present() {
+        if desktop_is_gnome() {
+            // Mutter refuses layer-shell as policy (research doc §6): the styled
+            // path is impossible for a client, so use the native dbusmenu.
+            return LinuxMenuPresenter::NativeDbusMenu;
+        }
+        #[cfg(feature = "wayland-styled")]
+        {
+            if wayland_env_suggests_layer_shell() {
+                return LinuxMenuPresenter::WaylandLayerShell;
+            }
+        }
+        // No layer-shell scaffold compiled (default), or the env doesn't look like
+        // a layer-shell compositor: the honest fallback is the native dbusmenu.
+        return LinuxMenuPresenter::NativeDbusMenu;
+    }
+
+    // No Wayland display: a real X server (incl. a pure-X11 session) allows the
+    // custom override-redirect popup where the `x11-popup` path is compiled.
+    #[cfg(feature = "x11-popup")]
+    {
+        if x11::is_available() {
+            return LinuxMenuPresenter::X11Popup;
+        }
+    }
+    LinuxMenuPresenter::NativeDbusMenu
+}
+
+/// Whether `$WAYLAND_DISPLAY` names a live Wayland session.
+fn wayland_display_present() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+}
+
+/// Whether the current desktop is GNOME/Mutter, via `$XDG_CURRENT_DESKTOP` /
+/// `$XDG_SESSION_DESKTOP` containing "GNOME" (case-insensitive). GNOME-Wayland is
+/// forced onto the native dbusmenu presenter (research doc §6).
+fn desktop_is_gnome() -> bool {
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .filter_map(|k| std::env::var(k).ok())
+    .any(|v| v.to_ascii_lowercase().contains("gnome"))
+}
+
+/// Cheap env heuristic for "this Wayland session is a layer-shell compositor"
+/// (wlroots family or KWin/Plasma), used to *pre-select*
+/// [`LinuxMenuPresenter::WaylandLayerShell`] before the authoritative live
+/// registry bind ([`wayland::layer_shell_available`]) runs device-side. GNOME is
+/// excluded by the caller before this is consulted.
+///
+/// Recognizes the common `$XDG_CURRENT_DESKTOP` / `$XDG_SESSION_DESKTOP` values
+/// for the layer-shell world (sway, Hyprland, river, Wayfire, labwc, cosmic, KDE).
+#[cfg(feature = "wayland-styled")]
+fn wayland_env_suggests_layer_shell() -> bool {
+    const LAYER_SHELL_DESKTOPS: &[&str] = &[
+        "sway", "hyprland", "river", "wayfire", "labwc", "cosmic", "kde", "plasma", "wlroots",
+    ];
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .filter_map(|k| std::env::var(k).ok())
+    .any(|v| {
+        let v = v.to_ascii_lowercase();
+        LAYER_SHELL_DESKTOPS.iter().any(|d| v.contains(d))
+    })
+}
 
 /// The Linux SNI/AppIndicator anchor. It registers an icon over D-Bus (via
 /// [`ksni`]) but, by design, cannot report an anchor rectangle: SNI hosts never
@@ -154,6 +280,7 @@ impl Platform for LinuxPlatform {
         let handle = MuriSni {
             tray,
             visible: true,
+            presenter: detect_linux_presenter(),
         }
         .spawn()
         .map_err(|e| {
@@ -262,6 +389,44 @@ impl Platform for LinuxPlatform {
     }
 }
 
+/// Open muri's OWN styled popup at the current pointer for the
+/// [`X11Popup`](LinuxMenuPresenter::X11Popup) presenter (deliverable #3): ignore
+/// any host-supplied SNI coordinate (unreliable / often `0,0`) and use
+/// [`x11::cursor_position`] (`XQueryPointer`) as the anchor, then route to the
+/// shared [`x11::open_popup_session`]. The menu, options and click dispatch come
+/// straight off the live [`Tray`], so the popup shows muri's exact styled rows and
+/// activations flow through the tray's `on_click` — the very path
+/// [`ContextMenu::open_at`](crate::ContextMenu::open_at) uses. Blocks the calling
+/// (SNI service) thread until the popup dismisses.
+///
+/// DEVICE-VERIFY(0.11.0): the end-to-end SNI-click → cursor read → styled popup on
+/// a real X11 session, including the ksni `ItemIsMenu`/`activate` interplay noted
+/// on `MuriSni::activate` (ksni 0.3.6 only calls `activate` when `ItemIsMenu` is
+/// false, and its `ContextMenu` right-click D-Bus method is a hard `UnknownMethod`
+/// — so a fully host-agnostic right-click hook needs an upstream ksni capability
+/// or a raw-`zbus` SNI impl; see ADR-0003).
+#[cfg(feature = "x11-popup")]
+pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
+    let Some(point) = x11::cursor_position() else {
+        return;
+    };
+    let anchor = LogicalRect::new(point, LogicalSize::new(0.0, 0.0));
+    let dark = system_appearance().is_dark();
+    // Scaffold: attach the AT-SPI adapter for the self-drawn popup (inert until
+    // wired device-side — deliverable #5, `a11y` module).
+    let _a11y = a11y::PopupA11y::attach(&tray.menu);
+    let dispatch = |id: &MenuId| tray.dispatch(id);
+    // Reuse the exact styled-popup backend `ContextMenu::open_at` funnels into.
+    let _ = x11::open_popup_session(
+        tray.menu.clone(),
+        tray.options.clone(),
+        &dispatch,
+        anchor,
+        Edge::Bottom,
+        dark,
+    );
+}
+
 /// Register the SNI item + `dbusmenu` and run the command-drain loop to
 /// completion (spec 22 §2, Path 1).
 ///
@@ -285,6 +450,7 @@ fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
     let handle = match (MuriSni {
         tray,
         visible: true,
+        presenter: detect_linux_presenter(),
     }
     .spawn())
     {
