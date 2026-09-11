@@ -288,18 +288,23 @@ pub(super) fn make_panel(
         // `NSMenu`'s private `NSGlassView`, so a dark menu's glass looks less
         // dense than the OS menu (#72). Nudge it toward the menu material with a
         // tint — the glass analogue of the vibrancy path's `setEmphasized(true)`.
-        // Appearance-aware: a DARK menu gets a dark tint toward the measured
-        // native dark-menu color (~sRGB 31,34,40 on Tahoe); a LIGHT menu keeps the
-        // default glass (its density was not reported as off). The hosted raster
-        // already paints a fully transparent background on the live System path
-        // (#64), so the glass — not a bulk fill — is the surface.
-        // DEVICE-VERIFY(0.12.2): tune the tint alpha to match native NSMenu density.
+        // Appearance-aware: a DARK menu gets a NEUTRAL dark tint toward the
+        // measured native dark-menu color (controlled capture over a neutral
+        // desktop on Tahoe: native ~sRGB 44,44,45 / lum 44, vs muri's untinted
+        // glass ~lum 52 — ~8 lum too light, and *neutral*, not blue as an earlier
+        // busy-backdrop reading suggested). A LIGHT menu keeps the default glass
+        // (its density was not reported as off; the light-mode text crispness is
+        // handled by the opaque-text flatten, #73). The hosted raster paints a
+        // fully transparent background on the live System path (#64), so the
+        // glass — not a bulk fill — is the surface.
+        // DEVICE-VERIFY(0.12.4): tune the tint alpha so the glass reads ~lum 44
+        // (neutral) to match native, without going opaque.
         if super::system_is_dark() {
             let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
-                31.0 / 255.0,
-                34.0 / 255.0,
                 40.0 / 255.0,
-                0.5,
+                40.0 / 255.0,
+                41.0 / 255.0,
+                0.55,
             );
             glass.setTintColor(Some(&tint));
         }

@@ -798,15 +798,19 @@ impl PopupSession<'_> {
             }
             read_system_palette().apply_to(&mut theme);
             // #73: `NSColor.labelColor` carries alpha 0.85 (secondaryLabel 0.55).
-            // Drawn straight over the see-through glass, the desktop bleeds through
-            // the glyph ink, washing the text out and tinting it (blue over a dark
-            // desktop in light mode). A native `NSMenu` draws text OPAQUE on the
-            // menu material, so flatten the translucent text colors over the
-            // material's neutral color — the resolved preset background, still set
-            // here before the bulk fill is dropped for vibrancy — and draw them
-            // opaque, so the backdrop only shows *between* glyphs like native.
-            // DEVICE-VERIFY(0.12.2): neutral near-black text on a light menu over a
-            // dark desktop, not blue-tinted.
+            // Drawn straight over the see-through glass, a busy/dark desktop bleeds
+            // through the glyph ink, washing the light-mode text out and dropping
+            // its contrast (an apparent "blue tint" was just a dark-blue desktop
+            // behind the translucent glass, not a color bug — the light symptom of
+            // the same glass translucency as #72). A native `NSMenu` draws text
+            // OPAQUE on the menu material, so flatten the translucent text colors
+            // over the material's NEUTRAL color — the resolved preset background,
+            // still set here before the bulk fill is dropped for vibrancy — and
+            // draw them opaque, so the backdrop only shows *between* glyphs like
+            // native. Flattening over the neutral preset background yields a
+            // neutral near-black (~37,37,37), matching native, with no color cast.
+            // DEVICE-VERIFY(0.12.2): crisp neutral text on a light menu over any
+            // backdrop.
             {
                 use crate::style::{Color, Rgba};
                 let sub = theme.resolve(theme.background);

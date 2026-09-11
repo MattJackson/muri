@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-09-11
+
+### Fixed
+
+- **Dark glass menu tint is now neutral, not blue (#72 follow-up).** A controlled
+  re-measurement over a neutral desktop showed a native dark `NSMenu` is neutral
+  gray (~sRGB 44,44,45, lum 44) and muri's untinted glass ~lum 52 — ~8 lum too
+  light but *neutral*; the earlier "blue" reading was a dark-blue desktop bleeding
+  through the translucent glass. The 0.12.2 dark-glass tint (blue-leaning
+  31,34,40) is corrected to a neutral gray tint toward the measured native color.
+  The washed light-mode text (#73) is the same-cause light symptom and stays
+  handled by the opaque-text flatten. Comments corrected to drop the "blue"
+  framing. (Live path only; no goldens.)
+
 ## [0.12.3] - 2026-09-11
 
 ### Added
