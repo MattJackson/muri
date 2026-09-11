@@ -519,7 +519,11 @@ enum Embolden {
 
 /// The OpenType `wght` variation-axis tag (`b"wght"` as a big-endian `u32`),
 /// used to detect a variable font's weight axis via `swash`'s `Variations`.
-const WGHT_AXIS_TAG: u32 =
+/// The OpenType `wght` variation-axis tag, `pub(crate)` so the macOS
+/// system-font path can single-source the same detection when deciding whether a
+/// regular face is variable (bold via axis instancing, #63/#65) rather than
+/// needing a discrete bold file.
+pub(crate) const WGHT_AXIS_TAG: u32 =
     ((b'w' as u32) << 24) | ((b'g' as u32) << 16) | ((b'h' as u32) << 8) | (b't' as u32);
 
 /// A glyph positioned along a shaped line: which face rendered it, its glyph id,
@@ -1371,27 +1375,16 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
 /// cross-platform `Platform` seam) has no field for a second face, so the
 /// live macOS backend (`src/platform/mac.rs`) that resolves a distinct bold
 /// system-menu face packs both faces' bytes into one `Data` blob with this
-/// header; [`unpack_dual_face`] is the matching decoder read only here, on
-/// the render side of the same seam. Not a real font-container format (no
-/// other platform produces or needs to parse it) — a private encoding
-/// between exactly these two call sites.
-const DUAL_FACE_MAGIC: &[u8; 8] = b"MURIDUOF";
+/// header (its `pack_dual_face` producer — the only writer — is macOS-only and
+/// lives beside that backend in `src/platform/mac.rs`); [`unpack_dual_face`] is
+/// the matching decoder read only here, on the render side of the same seam.
+/// Not a real font-container format (no other platform produces or needs to
+/// parse it) — a private encoding between exactly those two call sites, so this
+/// magic is `pub(crate)` to let the macOS producer share the one definition.
+pub(crate) const DUAL_FACE_MAGIC: &[u8; 8] = b"MURIDUOF";
 
-/// Pack a regular + bold face's raw font bytes into one
-/// [`SystemFontSource::Data`] blob: [`DUAL_FACE_MAGIC`], a little-endian
-/// `u32` byte length of `regular`, then `regular`'s bytes, then `bold`'s
-/// bytes. See [`unpack_dual_face`] for the decoder and [`DUAL_FACE_MAGIC`]
-/// for why this exists instead of a new [`SystemFontSource`] variant.
-pub(crate) fn pack_dual_face(regular: Vec<u8>, bold: Vec<u8>) -> SystemFontSource {
-    let mut buf = Vec::with_capacity(DUAL_FACE_MAGIC.len() + 4 + regular.len() + bold.len());
-    buf.extend_from_slice(DUAL_FACE_MAGIC);
-    buf.extend_from_slice(&(regular.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&regular);
-    buf.extend_from_slice(&bold);
-    SystemFontSource::Data(buf)
-}
-
-/// Decode a [`pack_dual_face`] blob back into its `(regular, bold)` byte
+/// Decode a `pack_dual_face` blob (packed by the macOS backend in
+/// `src/platform/mac.rs`) back into its `(regular, bold)` byte
 /// slices. `None` if `data` doesn't start with [`DUAL_FACE_MAGIC`] or is
 /// truncated — callers treat that as "not a dual-face blob, load it as a
 /// single plain face" rather than an error.
@@ -1409,7 +1402,8 @@ fn unpack_dual_face(data: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((regular, bold))
 }
 
-/// Load a macOS regular+bold face pair (see [`pack_dual_face`]) into `db` and
+/// Load a macOS regular+bold face pair (packed by `pack_dual_face` in
+/// `src/platform/mac.rs`) into `db` and
 /// pin the family the regular face resolves to (#56). Registers the bold
 /// bytes best-effort: if the bold face's own name-table family doesn't match
 /// the regular one's — so `query_face` at weight 700 still can't find it —
@@ -2054,8 +2048,15 @@ mod tests {
         const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
         const DEJAVU_BOLD: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans-Bold.ttf");
         let mut db = Database::new();
-        let blob = pack_dual_face(DEJAVU.to_vec(), DEJAVU_BOLD.to_vec());
-        let name = register_system_font(&mut db, blob);
+        // Build a dual-face blob the way the macOS producer (`pack_dual_face` in
+        // `src/platform/mac.rs`) does, to exercise the decoder side that lives
+        // here: magic, LE u32 regular length, regular bytes, then bold bytes.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(DUAL_FACE_MAGIC);
+        bytes.extend_from_slice(&(DEJAVU.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(DEJAVU);
+        bytes.extend_from_slice(DEJAVU_BOLD);
+        let name = register_system_font(&mut db, SystemFontSource::Data(bytes));
         assert_eq!(name.as_deref(), Some("DejaVu Sans"));
 
         let regular = query_face(&db, DbFamily::Name("DejaVu Sans"), 400);

@@ -784,7 +784,7 @@ impl PopupSession<'_> {
                 // System path we have the real OS menu point size, so derive the
                 // row height from it at the native ratio — leaving the forced
                 // preset's frozen metrics (and its goldens) untouched.
-                theme.row_height = crate::theme::macos_system_row_height(theme.row_font.size);
+                theme.row_height = macos_system_row_height(theme.row_font.size);
             }
             // Native SF tracking (#42/#57): CoreText applies a small size-dependent
             // tracking to San Francisco that a bare shaper does not, so muri's menu
@@ -1990,15 +1990,91 @@ fn sf_ui_tracking(size_pt: f32) -> f32 {
     crate::theme::macos_sf_tracking(size_pt)
 }
 
+/// Legacy fallback ratio for the live-`System` row pitch as a multiple of the
+/// live menu font point size, used **only** when the live `NSMenu` measurement
+/// in [`macos_system_row_height`] is unavailable (e.g. off the main thread or a
+/// degenerate/zero measured size). Native reference: a real `NSMenu` measures
+/// ~48–50px @2x (~24–25pt) per row at the ~13.5pt system menu font — roomier
+/// than the legacy [`crate::theme::MACOS_ROW_HEIGHT`] (22pt) forced-preset base.
+/// `24.5 / 13.5 ≈ 1.82`.
+const MACOS_SYSTEM_ROW_HEIGHT_FACTOR: f32 = 1.82;
+
+/// The live `System`-theme macOS row height in logical points.
+///
+/// Prefers a **live measurement of a real `NSMenu`'s per-row pitch** (#67):
+/// [`measure_nsmenu_row_pitch`] lays out throwaway menus and reads AppKit's own
+/// computed `NSMenu.size`, so the popup's row pitch is the OS's real value for
+/// the current system font rather than a magic ratio. Falls back to the legacy
+/// [`MACOS_SYSTEM_ROW_HEIGHT_FACTOR`] ratio (and finally the
+/// [`crate::theme::MACOS_ROW_HEIGHT`] floor) only when no live measurement is
+/// available. Called after injecting the live system menu size so the live popup
+/// matches a native `NSMenu` rather than the tighter 22pt forced-preset base
+/// (#63). Lives here (not in `theme.rs`) because it is consumed only on the
+/// macOS live-`System` path (ADR-0002).
+fn macos_system_row_height(point_size: f32) -> f32 {
+    // A real measured pitch is authoritative, but guard against a degenerate
+    // read shrinking rows below the legacy floor.
+    if let Some(pitch) = measure_nsmenu_row_pitch() {
+        if pitch.is_finite() && pitch >= crate::theme::MACOS_ROW_HEIGHT {
+            return pitch;
+        }
+    }
+    if point_size > 0.0 {
+        (point_size * MACOS_SYSTEM_ROW_HEIGHT_FACTOR).max(crate::theme::MACOS_ROW_HEIGHT)
+    } else {
+        crate::theme::MACOS_ROW_HEIGHT
+    }
+}
+
+/// Measure the real per-row pitch AppKit lays a live `NSMenu` out at, in logical
+/// points, for the current system menu font (#67). Builds two throwaway menus
+/// differing by one plain item and returns the difference of their computed
+/// `NSMenu.size` heights, which cancels the menu's fixed top/bottom chrome and
+/// isolates a single row's contribution. `None` off the main thread or when
+/// AppKit reports a non-positive/absurd size (caller then uses the ratio
+/// fallback). Nothing is displayed — the menus are never ordered on screen.
+fn measure_nsmenu_row_pitch() -> Option<f32> {
+    let mtm = MainThreadMarker::new()?;
+    let two = nsmenu_layout_height(mtm, 2)?;
+    let three = nsmenu_layout_height(mtm, 3)?;
+    let pitch = three - two;
+    (pitch.is_finite() && pitch > 0.0).then_some(pitch)
+}
+
+/// Build a throwaway `NSMenu` with `items` plain items and return the height
+/// AppKit computes for it (`NSMenu.size`, which triggers layout at the current
+/// system menu font). `None` if AppKit reports a non-positive height. The menu
+/// is never displayed.
+fn nsmenu_layout_height(mtm: MainThreadMarker, items: usize) -> Option<f32> {
+    let menu = objc2_app_kit::NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+    for _ in 0..items {
+        // A plain (non-separator) item takes the standard font-driven row height;
+        // an empty title is fine — height does not depend on the title text.
+        menu.addItem(&objc2_app_kit::NSMenuItem::new(mtm));
+    }
+    let height = menu.size().height as f32;
+    (height > 0.0).then_some(height)
+}
+
 /// Resolve the bold companion of the system menu `font` and, when it is a
 /// genuinely distinct on-disk face, pack the regular+bold file bytes into a
 /// single [`SystemFontSource`] (issue #56) so the render layer registers a real
 /// bold face rather than silently downgrading bold rows to the regular file.
 ///
+/// On modern macOS the system menu font is a **variable font with a `wght`
+/// axis** (SFNS): there is no separate bold file, and the render layer already
+/// produces a real bold by instancing that axis (#63). Trying to pack a discrete
+/// bold there is pointless (and risks registering a mismatched static face), so
+/// when `regular_path` is itself a variable wght font we return `None`
+/// immediately — the caller keeps the single regular `Path` and bold comes from
+/// axis instancing (#65). The discrete-file pack path below remains only for a
+/// genuinely static regular with a separate bold file (older macOS).
+///
 /// `NSFontManager::convertFont:toHaveTrait:` returns the *original* font when no
 /// bold variant exists, so we only pack when the bold face resolves to a
 /// different file than `regular_path`. `None` (→ caller keeps the single regular
-/// `Path`) when there is no distinct bold face or either file can't be read.
+/// `Path`) when the regular is variable, there is no distinct bold face, or
+/// either file can't be read.
 ///
 /// DEVICE-VERIFY(0.10.8): confirm bold menu rows render with the real SF bold
 /// face on a physical device.
@@ -2007,15 +2083,47 @@ fn dual_face_source(
     font: &objc2_app_kit::NSFont,
     regular_path: &str,
 ) -> Option<crate::platform::SystemFontSource> {
+    // A variable regular already produces real bold via wght-axis instancing
+    // (#63/#65) — no discrete bold file to find or pack. Detect the `wght` axis
+    // with the same tag the render bold path uses (single-sourced), so both
+    // agree on what counts as "variable".
+    let regular_bytes = std::fs::read(regular_path).ok()?;
+    let regular_is_variable = swash::FontRef::from_index(&regular_bytes, 0)
+        .map(|f| {
+            f.variations()
+                .find_by_tag(crate::render::WGHT_AXIS_TAG)
+                .is_some()
+        })
+        .unwrap_or(false);
+    if regular_is_variable {
+        return None;
+    }
     let manager = objc2_app_kit::NSFontManager::sharedFontManager(mtm);
     let bold = manager.convertFont_toHaveTrait(font, objc2_app_kit::NSFontTraitMask::BoldFontMask);
     let bold_path = system_ui_font_path(&bold)?;
     if bold_path == regular_path {
         return None;
     }
-    let regular_bytes = std::fs::read(regular_path).ok()?;
     let bold_bytes = std::fs::read(&bold_path).ok()?;
-    Some(crate::render::pack_dual_face(regular_bytes, bold_bytes))
+    Some(pack_dual_face(regular_bytes, bold_bytes))
+}
+
+/// Pack a regular + bold face's raw font bytes into one
+/// [`SystemFontSource::Data`] blob: [`crate::render::DUAL_FACE_MAGIC`], a
+/// little-endian `u32` byte length of `regular`, then `regular`'s bytes, then
+/// `bold`'s bytes. The render layer's `unpack_dual_face` is the matching decoder.
+/// The macOS backend is the only producer of this blob (a discrete-bold face is
+/// a macOS-only concept — every other platform ships a single face or a variable
+/// font), so this writer lives here beside its one caller (ADR-0002) while the
+/// magic and decoder stay on the render side of the `Platform` seam.
+fn pack_dual_face(regular: Vec<u8>, bold: Vec<u8>) -> crate::platform::SystemFontSource {
+    let magic = crate::render::DUAL_FACE_MAGIC;
+    let mut buf = Vec::with_capacity(magic.len() + 4 + regular.len() + bold.len());
+    buf.extend_from_slice(magic);
+    buf.extend_from_slice(&(regular.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&regular);
+    buf.extend_from_slice(&bold);
+    crate::platform::SystemFontSource::Data(buf)
 }
 
 /// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],
@@ -2109,6 +2217,40 @@ fn system_accent(_mtm: MainThreadMarker) -> Option<(u8, u8, u8, u8)> {
         to_u8(srgb.blueComponent()),
         to_u8(srgb.alphaComponent()),
     ))
+}
+
+#[cfg(test)]
+mod row_pitch_tests {
+    use super::{macos_system_row_height, MACOS_SYSTEM_ROW_HEIGHT_FACTOR};
+    use crate::theme::MACOS_ROW_HEIGHT;
+
+    /// The live-`System` row pitch is never tighter than the legacy 22pt floor,
+    /// whether it comes from the live `NSMenu` measurement (on the main thread)
+    /// or the ratio fallback (on a worker thread) — a degenerate read must not
+    /// shrink rows below the old behavior (#63/#67).
+    #[test]
+    fn system_row_height_is_never_tighter_than_the_legacy_floor() {
+        for size in [13.5_f32, 13.0, 1.0, 0.0, -3.0] {
+            let h = macos_system_row_height(size);
+            assert!(
+                h.is_finite() && h >= MACOS_ROW_HEIGHT,
+                "size {size} must not derive a pitch below the {MACOS_ROW_HEIGHT}pt floor, got {h}"
+            );
+        }
+    }
+
+    /// The ratio fallback (used only when no live `NSMenu` measurement is
+    /// available) derives a roomier-than-legacy pitch that scales with the menu
+    /// font size and is floored at the legacy base for tiny/absent sizes.
+    #[test]
+    fn ratio_fallback_scales_with_font_size_above_the_floor() {
+        let fallback = |pt: f32| (pt * MACOS_SYSTEM_ROW_HEIGHT_FACTOR).max(MACOS_ROW_HEIGHT);
+        // ~24.5pt at the ~13.5pt live menu font — the roomier native target.
+        assert!((fallback(13.5) - 24.57).abs() < 0.1);
+        assert!(fallback(13.5) > MACOS_ROW_HEIGHT);
+        // Never tighter than the legacy floor for a degenerate size.
+        assert_eq!(fallback(1.0), MACOS_ROW_HEIGHT);
+    }
 }
 
 #[cfg(test)]

@@ -78,13 +78,25 @@ pub struct PhysicalPosition {
     pub y: f64,
 }
 
+/// A physical (device-pixel) size, mirroring `tray-icon`'s use of
+/// `dpi::PhysicalSize` — so idiomatic `event.rect.size.width` / `.size.height`
+/// compiles against the facade (and back on upstream), preserving the
+/// bidirectional drop-in contract (#61).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PhysicalSize {
+    /// The width in physical pixels.
+    pub width: f64,
+    /// The height in physical pixels.
+    pub height: f64,
+}
+
 /// A rectangle in physical pixels (the tray icon's on-screen rect).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
     /// The rect's top-left position.
     pub position: PhysicalPosition,
-    /// The rect's size, `(width, height)` in physical pixels.
-    pub size: (f64, f64),
+    /// The rect's size in physical pixels.
+    pub size: PhysicalSize,
 }
 
 /// Convert the native, DPI-independent [`LogicalRect`](crate::LogicalRect) into
@@ -101,7 +113,10 @@ impl From<crate::LogicalRect> for Rect {
                 x: r.origin.x as f64,
                 y: r.origin.y as f64,
             },
-            size: (r.size.width as f64, r.size.height as f64),
+            size: PhysicalSize {
+                width: r.size.width as f64,
+                height: r.size.height as f64,
+            },
         }
     }
 }
