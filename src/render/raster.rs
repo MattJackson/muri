@@ -256,6 +256,63 @@ fn linear_to_srgb_u8(l: f32) -> u8 {
     LINEAR_TO_SRGB[idx.min(LIN2SRGB_N - 1)]
 }
 
+/// Font-smoothing coverage exponent applied to **light-on-dark** glyph pixels
+/// (#71). `> 1` thins the anti-aliased edge coverage.
+///
+/// Gamma-correct linear-light AA compositing (see [`blend_pixel`]) is
+/// polarity-*symmetric*, but macOS text rendering is not: CoreText/Quartz apply a
+/// luminance-dependent font smoothing (stem-darkening tuned per fg/bg) so glyph
+/// weight looks consistent in both polarities. A single fixed linear blend fixes
+/// dark-on-light (the #42 fix) but *overshoots* light-on-dark — the linear
+/// round-trip lifts AA edge coverage on a dark background, fattening strokes until
+/// neighbouring letters merge. Thinning the coverage of light-on-dark glyph pixels
+/// restores per-letter separation to match a native `NSMenu`.
+///
+/// DEVICE-VERIFY(0.12.2): tune against a native `NSMenu` (the "8 separated ink
+/// runs, not 3 merged blobs" test for light-weight `matthew` on a dark menu).
+const TEXT_SMOOTHING_GAMMA: f32 = 1.45;
+
+/// LUT of the thinned coverage `round(255 * (cov/255)^TEXT_SMOOTHING_GAMMA)` for
+/// every 8-bit coverage — so the light-on-dark glyph path costs a table lookup,
+/// not a per-pixel `powf`.
+static LIGHT_ON_DARK_COVERAGE: std::sync::LazyLock<[u8; 256]> = std::sync::LazyLock::new(|| {
+    let mut t = [0u8; 256];
+    for (i, v) in t.iter_mut().enumerate() {
+        let c = (i as f32 / 255.0).powf(TEXT_SMOOTHING_GAMMA);
+        *v = (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+    t
+});
+
+/// Perceptual luminance proxy of an sRGB triple, as a scaled integer (Rec. 709
+/// weights ×10000) — only ever compared against another such value, so the sRGB
+/// encoding and the fixed scale cancel out. Used to decide glyph polarity.
+#[inline]
+fn luma_scaled(r: u8, g: u8, b: u8) -> u32 {
+    2126 * r as u32 + 7152 * g as u32 + 722 * b as u32
+}
+
+/// Polarity-aware font-smoothing of a glyph mask's coverage `cov` for the pixel
+/// at byte offset `off` (#71). When the foreground `fg` is **lighter** than the
+/// destination pixel beneath it (light-on-dark), the coverage is thinned by
+/// [`TEXT_SMOOTHING_GAMMA`] so the AA edges don't overshoot vs macOS smoothing;
+/// otherwise (dark-on-light) the coverage is returned unchanged, since the linear
+/// blend already matches native there. Applied only to glyph masks — solid fills,
+/// separators, and icons keep the plain linear blend.
+#[inline]
+pub(crate) fn smooth_glyph_coverage(cov: u8, fg: Rgba, dst: &[u8], off: usize) -> u8 {
+    if cov == 0 || cov == 255 {
+        return cov;
+    }
+    let fg_lum = luma_scaled(fg.r, fg.g, fg.b);
+    let bg_lum = luma_scaled(dst[off], dst[off + 1], dst[off + 2]);
+    if fg_lum > bg_lum {
+        LIGHT_ON_DARK_COVERAGE[cov as usize]
+    } else {
+        cov
+    }
+}
+
 /// Blend a straight-alpha source color, scaled by coverage `a`, over one
 /// premultiplied destination pixel at byte offset `off`, **gamma-correctly**:
 /// the `over` compositing is done in linear light, not directly on the sRGB-
@@ -501,6 +558,34 @@ pub(crate) fn scaled(rect: LogicalRect, scale: f32) -> (f32, f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #71: the polarity-aware font smoothing thins glyph coverage **only** when
+    /// the foreground is lighter than the pixel beneath it (light-on-dark), so
+    /// light-on-dark text doesn't overshoot; dark-on-light is left untouched (its
+    /// linear blend already matches native), and the 0/255 endpoints never move.
+    #[test]
+    fn glyph_coverage_thins_light_on_dark_only() {
+        let white = Rgba::new(255, 255, 255, 255);
+        let black = Rgba::new(0, 0, 0, 255);
+        let dark_dst = [10u8, 10, 10, 255];
+        let light_dst = [240u8, 240, 240, 255];
+
+        // Light glyph over a dark pixel: mid coverage is thinned (strictly less).
+        let thinned = smooth_glyph_coverage(128, white, &dark_dst, 0);
+        assert!(
+            thinned < 128,
+            "light-on-dark mid coverage must thin, got {thinned}"
+        );
+        // Dark glyph over a light pixel: coverage unchanged.
+        assert_eq!(smooth_glyph_coverage(128, black, &light_dst, 0), 128);
+        // Endpoints never move, in either polarity.
+        assert_eq!(smooth_glyph_coverage(0, white, &dark_dst, 0), 0);
+        assert_eq!(smooth_glyph_coverage(255, white, &dark_dst, 0), 255);
+        // Monotonic: heavier input coverage still yields heavier (or equal) output.
+        let a = smooth_glyph_coverage(64, white, &dark_dst, 0);
+        let b = smooth_glyph_coverage(192, white, &dark_dst, 0);
+        assert!(a <= b, "thinning must stay monotonic ({a} !<= {b})");
+    }
 
     #[test]
     fn blend_is_gamma_correct_not_naive_srgb() {

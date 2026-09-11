@@ -797,6 +797,30 @@ impl PopupSession<'_> {
                 theme.accent = Color::Rgba(r, g, b, a);
             }
             read_system_palette().apply_to(&mut theme);
+            // #73: `NSColor.labelColor` carries alpha 0.85 (secondaryLabel 0.55).
+            // Drawn straight over the see-through glass, the desktop bleeds through
+            // the glyph ink, washing the text out and tinting it (blue over a dark
+            // desktop in light mode). A native `NSMenu` draws text OPAQUE on the
+            // menu material, so flatten the translucent text colors over the
+            // material's neutral color — the resolved preset background, still set
+            // here before the bulk fill is dropped for vibrancy — and draw them
+            // opaque, so the backdrop only shows *between* glyphs like native.
+            // DEVICE-VERIFY(0.12.2): neutral near-black text on a light menu over a
+            // dark desktop, not blue-tinted.
+            {
+                use crate::style::{Color, Rgba};
+                let sub = theme.resolve(theme.background);
+                let flatten = |t: Rgba| -> Color {
+                    let a = t.a as f32 / 255.0;
+                    let mix =
+                        |tc: u8, sc: u8| (tc as f32 * a + sc as f32 * (1.0 - a)).round() as u8;
+                    Color::Rgba(mix(t.r, sub.r), mix(t.g, sub.g), mix(t.b, sub.b), 255)
+                };
+                let label = flatten(theme.resolve(theme.label));
+                let secondary = flatten(theme.resolve(theme.secondary_label));
+                theme.label = label;
+                theme.secondary_label = secondary;
+            }
             if let Some(font) = read_system_menu_font() {
                 font.apply_size_to(&mut theme);
             }

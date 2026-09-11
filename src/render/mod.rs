@@ -1861,8 +1861,14 @@ fn blit_glyph(
                     if px < 0 || py < 0 || px >= pw || py >= ph {
                         continue;
                     }
+                    let off = ((py * pw + px) * 4) as usize;
+                    // Polarity-aware font smoothing (#71): thin the AA coverage of
+                    // light-on-dark glyph pixels so strokes don't overshoot vs
+                    // macOS's luminance-dependent smoothing. Dark-on-light is left
+                    // on the plain linear blend.
+                    let cov = raster::smooth_glyph_coverage(cov, color, pixels, off);
                     let a = (cov as u16 * color.a as u16 / 255) as u8;
-                    raster::blend_pixel(pixels, ((py * pw + px) * 4) as usize, color, a);
+                    raster::blend_pixel(pixels, off, color, a);
                 }
             }
         }

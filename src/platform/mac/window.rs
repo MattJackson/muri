@@ -284,6 +284,25 @@ pub(super) fn make_panel(
             NSGlassEffectView::initWithFrame(mtm.alloc(), bounds);
         // Glass rounds itself natively — no layer mask needed.
         glass.setCornerRadius(corner_radius as f64);
+        // The public `NSGlassEffectView` reads lighter/clearer than a native
+        // `NSMenu`'s private `NSGlassView`, so a dark menu's glass looks less
+        // dense than the OS menu (#72). Nudge it toward the menu material with a
+        // tint — the glass analogue of the vibrancy path's `setEmphasized(true)`.
+        // Appearance-aware: a DARK menu gets a dark tint toward the measured
+        // native dark-menu color (~sRGB 31,34,40 on Tahoe); a LIGHT menu keeps the
+        // default glass (its density was not reported as off). The hosted raster
+        // already paints a fully transparent background on the live System path
+        // (#64), so the glass — not a bulk fill — is the surface.
+        // DEVICE-VERIFY(0.12.2): tune the tint alpha to match native NSMenu density.
+        if super::system_is_dark() {
+            let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
+                31.0 / 255.0,
+                34.0 / 255.0,
+                40.0 / 255.0,
+                0.5,
+            );
+            glass.setTintColor(Some(&tint));
+        }
         glass.setContentView(Some(&view));
         panel.setContentView(Some(&glass));
     } else {

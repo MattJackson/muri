@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-11
+
+macOS live-menu text/glass fidelity, measured against a native `NSMenu` on Tahoe.
+
+### Fixed
+
+- **Light-on-dark menu text no longer renders too heavy (#71).** Gamma-correct
+  linear-light AA compositing is polarity-*symmetric*, but macOS font smoothing is
+  not — so light text on a dark menu overshot and adjacent letters' anti-aliased
+  ink merged. Glyph coverage is now thinned by a font-smoothing curve **only** for
+  light-on-dark pixels (per-pixel polarity: foreground lighter than the pixel
+  beneath it); dark-on-light keeps the linear blend it already matched native
+  with. Solid fills, separators, and icons are unaffected.
+- **Light-appearance menu text is crisp again, not washed-out/blue (#73).**
+  `NSColor.labelColor` carries alpha 0.85 (secondary 0.55); drawn straight over
+  the see-through Clear glass, the desktop bled through the glyph ink. The live
+  System path now flattens the text colors over the menu material and draws them
+  opaque, so the backdrop only shows *between* glyphs like a native `NSMenu`.
+- **Live glass menu density closer to native (#72).** On a Liquid Glass system the
+  popup's `NSGlassEffectView` read lighter than a native `NSMenu`'s private
+  `NSGlassView`; a dark menu now gets an appearance-aware tint toward the measured
+  native menu color (the glass analogue of the vibrancy path's `setEmphasized`).
+
+Note: the exact font-smoothing gamma (#71), glass tint alpha (#72), and text
+substrate (#73) are `DEVICE-VERIFY` — tuned against Tahoe captures and refined
+on-device. The forced `Theme::macos` preset is unchanged; only offscreen text
+snapshots move, from the polarity-aware coverage curve.
+
 ## [0.12.1] - 2026-09-11
 
 ### Changed
