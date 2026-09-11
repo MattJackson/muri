@@ -290,24 +290,19 @@ muri's contract is to never lie about it.
 
 muri's fallible operations return a typed `Result<T, Error>` — it **returns
 errors, it does not log** (there is no `log`/`tracing` dependency; a consumer
-decides what to surface). The `Error` enum is `#[non_exhaustive]` and its
-actionable failure sites are structured so you can `match` on the kind rather than
-string-match a message:
+decides what to surface):
 
 - `Error::Unsupported(Unsupported)` — a genuine per-platform impossibility,
   surfaced deliberately: `Unsupported::TrayAnchor` (a styled tray-anchored popup
   on Linux) and `Unsupported::ClientPositioning` (client-side toplevel
   positioning, which Wayland forbids).
 - `Error::BadIcon(String)` — the supplied icon bytes could not be decoded.
-- `Error::TrayInstall(String)` — the OS tray/status-item install failed
-  (`Shell_NotifyIcon(NIM_ADD)` on Windows, the SNI D-Bus registration on Linux),
-  surfaced synchronously through the tray-thread install handshake.
-- `Error::MainThread` — a main-thread-only surface was requested off the main
-  thread.
-- `Error::ThreadSpawn(String)` — the background `muri-tray` UI thread could not be
-  spawned.
-- `Error::Platform(String)` — the generic catch-all for residual per-OS API
-  failures that don't fit a structured kind.
+- `Error::Platform(String)` — a platform API call failed while creating,
+  installing, or anchoring the tray/surface; the message names the concrete
+  failure site (e.g. a failed `Shell_NotifyIcon(NIM_ADD)` / SNI registration, or a
+  main-thread requirement). A Windows/Linux tray-install failure is surfaced
+  synchronously through the tray-thread install handshake (via
+  `TrayIconBuilder::build_result`) rather than returning a false `Ok`.
 
 ## Performance
 

@@ -83,18 +83,10 @@ pub enum Error {
     BadIcon(String),
     /// A capability unavailable on the current platform.
     Unsupported(crate::Unsupported),
-    /// The OS tray/status-item install failed (`Shell_NotifyIcon(NIM_ADD)` /
-    /// SNI registration). Mirrors [`crate::Error::TrayInstall`]; surfaced by
-    /// [`TrayIconBuilder::build_result`](super::tray_icon::TrayIconBuilder::build_result)
-    /// when the tray genuinely never installed.
-    TrayInstall(String),
-    /// A tray/surface that must be built on the main thread was requested off it.
-    /// Mirrors [`crate::Error::MainThread`].
-    MainThread,
-    /// The background muri tray thread could not be spawned. Mirrors
-    /// [`crate::Error::ThreadSpawn`].
-    ThreadSpawn(String),
-    /// A platform API call failed and does not fit a more specific variant.
+    /// A platform API call failed (tray install, main-thread requirement, thread
+    /// spawn, or a residual per-OS API error — the message names which). The
+    /// tray-install handshake surfaces a Windows/Linux install failure here via
+    /// [`TrayIconBuilder::build_result`](super::tray_icon::TrayIconBuilder::build_result).
     Platform(String),
 }
 
@@ -106,9 +98,6 @@ impl std::fmt::Display for Error {
             Error::AcceleratorParse(s) => write!(f, "failed to parse accelerator: {s}"),
             Error::BadIcon(s) => write!(f, "bad icon: {s}"),
             Error::Unsupported(u) => write!(f, "unsupported on this platform: {u}"),
-            Error::TrayInstall(s) => write!(f, "tray install failed: {s}"),
-            Error::MainThread => f.write_str("must be called on the main thread"),
-            Error::ThreadSpawn(s) => write!(f, "failed to spawn the muri tray thread: {s}"),
             Error::Platform(s) => write!(f, "platform error: {s}"),
         }
     }
@@ -116,19 +105,15 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Map muri's core [`crate::Error`] onto the facade error, **preserving the
-/// structured kind** so a migrated consumer can `match` on
-/// [`Error::TrayInstall`] / [`Error::MainThread`] / [`Error::Unsupported`]
-/// instead of string-matching a message. Any residual generic
-/// [`crate::Error::Platform`] stays a [`Error::Platform`].
+/// Map muri's core [`crate::Error`] onto the facade error. The concrete failure
+/// site (tray install, main thread, thread spawn) is preserved in the
+/// [`Error::Platform`] message; [`Error::Unsupported`] / [`Error::BadIcon`] map
+/// across unchanged.
 impl From<crate::Error> for Error {
     fn from(e: crate::Error) -> Self {
         match e {
             crate::Error::Unsupported(u) => Error::Unsupported(u),
             crate::Error::BadIcon(s) => Error::BadIcon(s),
-            crate::Error::TrayInstall(s) => Error::TrayInstall(s),
-            crate::Error::MainThread => Error::MainThread,
-            crate::Error::ThreadSpawn(s) => Error::ThreadSpawn(s),
             crate::Error::Platform(s) => Error::Platform(s),
         }
     }

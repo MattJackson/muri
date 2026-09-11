@@ -1662,7 +1662,8 @@ impl MacPlatform {
     }
 
     fn require_mtm(&self) -> Result<MainThreadMarker> {
-        self.mtm.ok_or(Error::MainThread)
+        self.mtm
+            .ok_or(Error::Platform("must be created on the main thread".into()))
     }
 }
 
@@ -1792,7 +1793,8 @@ fn stop_run_loop(mtm: MainThreadMarker) {
 /// styled popup on click and dispatching row clicks to the tray's handler.
 /// Consumes the [`Tray`]; returns when the loop exits.
 fn run_event_loop(tray: Tray) -> Result<()> {
-    let mtm = MainThreadMarker::new().ok_or(Error::MainThread)?;
+    let mtm = MainThreadMarker::new()
+        .ok_or(Error::Platform("must be created on the main thread".into()))?;
 
     // A tray-only native app is an Accessory: no Dock icon, no app menu bar
     // (spec 20 §5). The muda-compat menu-bar path chooses Regular elsewhere.

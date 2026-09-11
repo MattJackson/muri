@@ -141,7 +141,7 @@ pub trait SceneDrawer {
 
     /// Like [`draw_image`](Self::draw_image), but with the whole blit's opacity
     /// scaled by `alpha` (`1.0` = opaque, `0.0` = invisible). The icon funnel
-    /// ([`paint::draw_icon`]) routes through this so a **disabled** row dims its
+    /// (the `draw_icon` funnel in `paint`) routes through this so a **disabled** row dims its
     /// icon exactly as it dims its checkmark/text (issue E). The default forwards
     /// to the opaque [`draw_image`](Self::draw_image) so drawers that don't care
     /// about dimming need not implement it.

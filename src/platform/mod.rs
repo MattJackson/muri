@@ -345,8 +345,8 @@ pub(crate) type InstallReport = std::sync::mpsc::Sender<Result<()>>;
 /// confirmed install, else the real [`Error`](crate::error::Error). This function
 /// then returns `Ok(())` only on a confirmed install; on a reported failure it
 /// returns that error, and if the thread dies before signalling (sender dropped)
-/// it returns an [`Error::TrayInstall`](crate::error::Error::TrayInstall) rather
-/// than hanging. A `run` failure *after* the install (inside the pump) is still
+/// it returns an [`Error::Platform`](crate::error::Error::Platform) install error
+/// rather than hanging. A `run` failure *after* the install (inside the pump) is still
 /// reported on stderr, since the caller has already returned by then.
 ///
 /// Gated to the spawning targets plus `test`, so the host can exercise the
@@ -367,7 +367,7 @@ pub(crate) fn spawn_tray_thread(
             }
         })
         .map_err(|e| {
-            crate::error::Error::ThreadSpawn(format!("failed to spawn muri tray thread: {e}"))
+            crate::error::Error::Platform(format!("failed to spawn muri tray thread: {e}"))
         })?;
 
     // Block until the tray thread has attempted the OS install and reported the
@@ -375,8 +375,8 @@ pub(crate) fn spawn_tray_thread(
     // the handshake) surfaces as an install error, never a hang.
     match wait.recv() {
         Ok(result) => result,
-        Err(_) => Err(crate::error::Error::TrayInstall(
-            "muri tray thread exited before reporting the tray install".into(),
+        Err(_) => Err(crate::error::Error::Platform(
+            "tray install failed: muri tray thread exited before reporting the tray install".into(),
         )),
     }
 }
@@ -396,17 +396,19 @@ mod handshake_tests {
         // The backend seam (EH-1): a `run` that reports an install failure through
         // the handshake (as run_event_loop / run_sni_loop do when
         // Shell_NotifyIcon / SNI registration fails) makes spawn_tray_thread return
-        // that exact structured error — the mechanism build_result relies on.
+        // that error — the mechanism build_result relies on.
         // DEVICE-VERIFY(0.10.8): a true Shell_NotifyIcon(NIM_ADD)/SNI failure on a
         // real Windows/Linux session flowing through this same seam to build_result.
         fn failing(_tray: Tray, report: &InstallReport) -> Result<()> {
-            let _ = report.send(Err(Error::TrayInstall("forced install failure".into())));
+            let _ = report.send(Err(Error::Platform(
+                "tray install failed: forced install failure".into(),
+            )));
             Ok(())
         }
         let err = spawn_tray_thread(dummy_tray(), failing).unwrap_err();
         assert!(
-            matches!(err, Error::TrayInstall(_)),
-            "a reported install failure must surface as Error::TrayInstall, got {err:?}"
+            matches!(&err, Error::Platform(m) if m.contains("install")),
+            "a reported install failure must surface as an install Platform error, got {err:?}"
         );
     }
 
@@ -425,14 +427,14 @@ mod handshake_tests {
     #[test]
     fn spawn_tray_thread_does_not_hang_when_the_thread_dies_before_signalling() {
         // If the tray thread returns/panics before firing the handshake, the
-        // dropped sender must surface as a TrayInstall error rather than blocking
+        // dropped sender must surface as an install error rather than blocking
         // the spawner forever.
         fn dies_silently(_tray: Tray, _report: &InstallReport) -> Result<()> {
             Ok(())
         }
         let err = spawn_tray_thread(dummy_tray(), dies_silently).unwrap_err();
         assert!(
-            matches!(err, Error::TrayInstall(_)),
+            matches!(&err, Error::Platform(m) if m.contains("install")),
             "a thread that never signals must not hang; got {err:?}"
         );
     }
