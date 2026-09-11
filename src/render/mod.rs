@@ -222,7 +222,16 @@ const FALLBACK_FAMILIES: &[&str] = &[
 pub struct RasterDrawer {
     scale: f32,
     fb: Framebuffer,
-    fonts: FontStore,
+    /// The shared text layer (font DB + face/shaping/glyph caches). Held behind
+    /// an [`Rc`] so a fresh drawer for each popup/flyout open (the platform
+    /// backends build one per `for_menu_options` call) reuses the *same*
+    /// already-built [`FontStore`] — the expensive font-DB scan/registration and
+    /// UI-family resolution happen once per configuration, not once per open, and
+    /// the shaping/glyph caches stay warm across opens (#1). Per-frame layout
+    /// state (the framebuffer, `scale`) is still per-drawer, so a theme/scale
+    /// change between opens is honored; only the config-independent font DB is
+    /// shared (see [`shared_font_store`]).
+    fonts: Rc<FontStore>,
     /// Decoded-PNG-icon cache, keyed by the source `Arc<[u8]>`'s pointer
     /// identity (see [`SceneDrawer::decode_icon`]). Bounded by
     /// [`ICON_CACHE_CAP`] so a very long-lived drawer fed many distinct icon
@@ -274,7 +283,18 @@ impl RasterDrawer {
     /// installed-font discovery when the platform returns `None` or the face
     /// can't be registered — so it never regresses [`RasterDrawer::new`].
     pub fn new_native(scale: f32) -> Self {
-        Self::with_system_font(scale, crate::platform::current().system_menu_font())
+        // The host-native font store is config-independent (the OS menu font is
+        // stable for the process), so build it once and share it across every
+        // popup/flyout open rather than re-scanning + re-resolving per open (#1).
+        let fonts = shared_font_store(FontStoreKey::Native, || {
+            let mut db = cached_system_fonts_db();
+            let ui_family = crate::platform::current()
+                .system_menu_font()
+                .and_then(|sf| register_system_font(&mut db, sf.source))
+                .or_else(|| resolve_ui_family(&db));
+            FontStore::new(db, ui_family)
+        });
+        Self::from_shared(scale, fonts)
     }
 
     /// Construct a drawer, optionally pinning `FontFamily::System` to a supplied
@@ -317,28 +337,34 @@ impl RasterDrawer {
     /// `theme_source.forced_family()` — `Some(family)` calls this,
     /// `None` calls `new_native`.
     pub fn with_forced_theme(scale: f32, family: OsFamily) -> Self {
-        // With `bundled-fonts` on, resolution gains a middle tier: the vendored
-        // OSS substitute (registered into `db`, hence the `&mut`) is tried after
-        // the real target font is found absent and before any free host fallback
-        // (issue #54). With the feature off this is byte-for-byte the original
-        // read-only two-tier resolution — no regression.
-        #[cfg(feature = "bundled-fonts")]
-        let (db, ui_family) = {
-            let mut db = cached_system_fonts_db();
-            let ui_family = resolve_forced_ui_family_bundled(&mut db, family);
-            (db, ui_family)
-        };
-        #[cfg(not(feature = "bundled-fonts"))]
-        let (db, ui_family) = {
-            let db = cached_system_fonts_db();
-            let ui_family = resolve_forced_ui_family(
-                &db,
-                family.ui_font_families(),
-                family.fallback_font_families(),
-            );
-            (db, ui_family)
-        };
-        Self::from_parts(scale, db, ui_family)
+        // A forced theme's store depends only on the target `OsFamily`, so it too
+        // is built once per family and shared across opens (#1) — keyed by family
+        // so switching the forced OS between opens still resolves correctly.
+        let fonts = shared_font_store(FontStoreKey::Forced(forced_family_tag(family)), || {
+            // With `bundled-fonts` on, resolution gains a middle tier: the vendored
+            // OSS substitute (registered into `db`, hence the `&mut`) is tried after
+            // the real target font is found absent and before any free host fallback
+            // (issue #54). With the feature off this is byte-for-byte the original
+            // read-only two-tier resolution — no regression.
+            #[cfg(feature = "bundled-fonts")]
+            let (db, ui_family) = {
+                let mut db = cached_system_fonts_db();
+                let ui_family = resolve_forced_ui_family_bundled(&mut db, family);
+                (db, ui_family)
+            };
+            #[cfg(not(feature = "bundled-fonts"))]
+            let (db, ui_family) = {
+                let db = cached_system_fonts_db();
+                let ui_family = resolve_forced_ui_family(
+                    &db,
+                    family.ui_font_families(),
+                    family.fallback_font_families(),
+                );
+                (db, ui_family)
+            };
+            FontStore::new(db, ui_family)
+        });
+        Self::from_shared(scale, fonts)
     }
 
     /// The live drawer for a menu about to be painted, selected from its
@@ -391,12 +417,27 @@ impl RasterDrawer {
     }
 
     fn from_parts(scale: f32, db: Database, ui_family: Option<String>) -> Self {
+        Self::from_shared(scale, Rc::new(FontStore::new(db, ui_family)))
+    }
+
+    /// Build a drawer around an already-constructed (possibly shared) font store.
+    /// The per-frame state (framebuffer, scale, icon cache) is always fresh per
+    /// drawer; only the `fonts` text layer may be shared across drawers (#1).
+    fn from_shared(scale: f32, fonts: Rc<FontStore>) -> Self {
         RasterDrawer {
             scale: scale.max(0.1),
             fb: Framebuffer::new(1, 1),
-            fonts: FontStore::new(db, ui_family),
+            fonts,
             icons: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Test-only: the shared [`FontStore`]'s allocation address, so a test can
+    /// assert two drawers built for the *same* configuration reuse the very same
+    /// store (built once, not rebuilt per open — #1).
+    #[cfg(test)]
+    pub(crate) fn font_store_ptr(&self) -> usize {
+        Rc::as_ptr(&self.fonts) as usize
     }
 
     /// The device scale factor this drawer rasterizes at.
@@ -434,6 +475,14 @@ impl RasterDrawer {
     #[cfg(test)]
     pub(crate) fn weight_downgrade_count(&self) -> usize {
         self.fonts.weight_downgrade_count()
+    }
+
+    /// Test-only: how many owned [`ShapeKey`] `String`s have been built (i.e.
+    /// fresh `shaped`-cache inserts), so a test can assert the cache-hit path
+    /// allocates no owned key (#4).
+    #[cfg(test)]
+    pub(crate) fn owned_key_build_count(&self) -> usize {
+        self.fonts.owned_key_builds.get()
     }
 }
 
@@ -528,17 +577,30 @@ struct FontStore {
     /// draw_text call (once per segment per row, every repaint); the result is
     /// stable for the drawer's lifetime, so it is cached like the others.
     face_cache: RefCell<HashMap<(FontFamily, u16), Option<FaceId>>>,
-    /// Memoized shaped runs per `(text, primary face, ot_weight, px-bits)`.
-    /// `shape` is called several times per run per render (measure pass + draw
-    /// pass), and a hover-highlight repaints unchanged text — so caching the
-    /// shaped glyph list across frames turns a repaint into a glyph-blit with no
-    /// re-shaping. Bounded by [`SHAPED_CACHE_CAP`] (cleared wholesale on overflow)
-    /// so a live menu whose text changes each tick can't grow it without limit.
-    shaped: RefCell<HashMap<ShapeKey, Rc<ShapedLine>>>,
+    /// Memoized shaped runs, keyed by a **hash** of `(text, primary face,
+    /// ot_weight, px-bits, tracking-bits)` so the hot lookup path (measure +
+    /// draw both call `shape`, and a hover repaint re-shapes unchanged text)
+    /// never allocates an owned [`String`] key — it hashes the borrowed `&str`
+    /// and, on a hash hit, verifies the retained owned [`ShapeKey`] matches
+    /// field-by-field (guarding against a hash collision returning the wrong
+    /// glyphs). The owned key's `String` is built only when inserting a genuinely
+    /// new entry (#4). Bounded by [`SHAPED_CACHE_CAP`] (cleared wholesale on
+    /// overflow) so a live menu whose text changes each tick can't grow it
+    /// without limit.
+    shaped: RefCell<HashMap<u64, (ShapeKey, Rc<ShapedLine>)>>,
+    /// Reused scratch for `shape`'s face segmentation, so the per-run
+    /// `(FaceId, String)` buffer (and its `String` allocations) is recycled
+    /// across shaping runs instead of freshly allocated each call (#3).
+    seg_scratch: RefCell<Vec<(FaceId, String)>>,
     /// Test-only counter of actual shaping runs (cache misses), so a test can
     /// assert a repaint of unchanged text re-shapes nothing.
     #[cfg(test)]
     shape_misses: std::cell::Cell<usize>,
+    /// Test-only counter of owned [`ShapeKey`] `String` allocations — bumped
+    /// only when inserting a fresh `shaped` entry, never on a cache hit — so a
+    /// test can assert the hit path doesn't build a new owned key (#4).
+    #[cfg(test)]
+    owned_key_builds: std::cell::Cell<usize>,
     /// Test-only counter of times [`FontStore::resolve_face`] requested a
     /// heavy weight (`ot_weight >= 600`, e.g. `Weight::Bold`) but the
     /// database's best match resolved to a substantially lighter face
@@ -570,8 +632,11 @@ impl FontStore {
             fallback_cache: RefCell::new(HashMap::new()),
             face_cache: RefCell::new(HashMap::new()),
             shaped: RefCell::new(HashMap::new()),
+            seg_scratch: RefCell::new(Vec::new()),
             #[cfg(test)]
             shape_misses: std::cell::Cell::new(0),
+            #[cfg(test)]
+            owned_key_builds: std::cell::Cell::new(0),
             #[cfg(test)]
             weight_downgrades: std::cell::Cell::new(0),
             scale_ctx: RefCell::new(ScaleContext::new()),
@@ -708,6 +773,7 @@ impl FontStore {
     /// whole label shapes as one run with kerning/ligatures intact); only
     /// codepoints it lacks divert to a fallback face, keeping tofu out of
     /// CJK/emoji/symbol text.
+    #[cfg(test)]
     fn segment_faces(
         &self,
         text: &str,
@@ -715,6 +781,25 @@ impl FontStore {
         ot_weight: u16,
     ) -> Vec<(FaceId, String)> {
         let mut runs: Vec<(FaceId, String)> = Vec::new();
+        let used = self.segment_faces_into(text, primary, ot_weight, &mut runs);
+        runs.truncate(used);
+        runs
+    }
+
+    /// Fill `runs` with the `(face, substring)` segmentation of `text` and return
+    /// how many entries are live. `runs` may carry entries (and their `String`
+    /// allocations) from a previous call: they are recycled in place (cleared and
+    /// rewritten) rather than reallocated, so `shape`'s hot path reuses one
+    /// scratch buffer across runs (#3). Entries past the returned length are stale
+    /// and must be ignored by the caller (they keep their capacity for reuse).
+    fn segment_faces_into(
+        &self,
+        text: &str,
+        primary: Option<FaceId>,
+        ot_weight: u16,
+        runs: &mut Vec<(FaceId, String)>,
+    ) -> usize {
+        let mut used = 0usize;
         for ch in text.chars() {
             let face = match primary {
                 Some(p) if self.face_has_glyph(p, ch) => Some(p),
@@ -722,14 +807,27 @@ impl FontStore {
                 None => self.fallback_face_for(ch, ot_weight),
             };
             let Some(face) = face else { continue };
-            match runs.last_mut() {
-                Some((f, s)) if *f == face => s.push(ch),
-                // Open per-char merge, not a closed enum: start a new run when the
-                // previous run's face differs (or there is none yet).
-                _ => runs.push((face, ch.to_string())),
+            // Merge into the current live run when the face matches (keeps a whole
+            // label on one face so kerning/ligatures survive).
+            if used > 0 && runs[used - 1].0 == face {
+                runs[used - 1].1.push(ch);
+                continue;
             }
+            // Start a new run, recycling an existing slot's `String` allocation
+            // when the scratch already has one, else growing the buffer.
+            if used < runs.len() {
+                let slot = &mut runs[used];
+                slot.0 = face;
+                slot.1.clear();
+                slot.1.push(ch);
+            } else {
+                let mut s = String::new();
+                s.push(ch);
+                runs.push((face, s));
+            }
+            used += 1;
         }
-        runs
+        used
     }
 
     /// Shape a single line of `text` into positioned glyphs (device px), running
@@ -745,21 +843,32 @@ impl FontStore {
         // draw stay proportional (#42). `0.0` is the metrics-only default.
         tracking: f32,
     ) -> Rc<ShapedLine> {
-        let key = (
-            text.to_owned(),
-            primary,
-            ot_weight,
-            px.to_bits(),
-            tracking.to_bits(),
-        );
-        if let Some(cached) = self.shaped.borrow().get(&key) {
-            return Rc::clone(cached);
+        let px_bits = px.to_bits();
+        let tracking_bits = tracking.to_bits();
+        // Hash the borrowed components — no owned `String` on the lookup path.
+        let hash = shape_key_hash(text, primary, ot_weight, px_bits, tracking_bits);
+        if let Some((k, cached)) = self.shaped.borrow().get(&hash) {
+            // Verify the retained owned key really matches (a hash collision must
+            // not return another run's glyphs). Field-by-field so `String == &str`
+            // compares without allocating.
+            if k.0 == text
+                && k.1 == primary
+                && k.2 == ot_weight
+                && k.3 == px_bits
+                && k.4 == tracking_bits
+            {
+                return Rc::clone(cached);
+            }
         }
         #[cfg(test)]
         self.shape_misses.set(self.shape_misses.get() + 1);
         let mut glyphs = Vec::new();
         let mut pen = 0.0_f32;
-        for (face_id, sub) in self.segment_faces(text, primary, ot_weight) {
+        let mut scratch = self.seg_scratch.borrow_mut();
+        let runs = &mut *scratch;
+        let used = self.segment_faces_into(text, primary, ot_weight, runs);
+        for (face_id, sub) in runs.iter().take(used) {
+            let face_id = *face_id;
             let Some(bytes) = self.face_bytes(face_id) else {
                 continue;
             };
@@ -785,7 +894,7 @@ impl FontStore {
             let upem = shaper.units_per_em() as f32;
             let s = if upem > 0.0 { px / upem } else { 0.0 };
             let mut buffer = UnicodeBuffer::new();
-            buffer.push_str(&sub);
+            buffer.push_str(sub);
             buffer.guess_segment_properties();
             let shaped = shaper.shape(buffer, ShapeOptions::default());
             for (info, pos) in shaped
@@ -804,12 +913,17 @@ impl FontStore {
                 pen += pos.x_advance as f32 * s + tracking;
             }
         }
+        drop(scratch);
         let line = Rc::new(ShapedLine { glyphs, width: pen });
+        // Build the owned key only now, on a genuine insert (never on a hit) (#4).
+        let key: ShapeKey = (text.to_owned(), primary, ot_weight, px_bits, tracking_bits);
+        #[cfg(test)]
+        self.owned_key_builds.set(self.owned_key_builds.get() + 1);
         let mut cache = self.shaped.borrow_mut();
         if cache.len() >= SHAPED_CACHE_CAP {
             cache.clear();
         }
-        cache.insert(key, Rc::clone(&line));
+        cache.insert(hash, (key, Rc::clone(&line)));
         line
     }
 
@@ -891,6 +1005,27 @@ impl FontStore {
     }
 }
 
+/// Hash the components of a [`ShapeKey`] from borrowed parts, so `shape`'s cache
+/// lookup never allocates an owned `String` (#4). The `shaped` map keys on this
+/// hash and verifies the stored owned key on a hit, so a collision only costs a
+/// re-shape, never wrong output.
+fn shape_key_hash(
+    text: &str,
+    primary: Option<FaceId>,
+    ot_weight: u16,
+    px_bits: u32,
+    tracking_bits: u32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    primary.hash(&mut h);
+    ot_weight.hash(&mut h);
+    px_bits.hash(&mut h);
+    tracking_bits.hash(&mut h);
+    h.finish()
+}
+
 /// Query the db for the best face matching `family` at `ot_weight` (normal
 /// style/stretch). Returns a face *within one of the requested families* — it
 /// never falls back across families (that is the caller's job), which is what
@@ -917,6 +1052,52 @@ fn query_face(db: &Database, family: DbFamily, ot_weight: u16) -> Option<FaceId>
 /// A clone of the process's system-font database, scanned **once** per thread and
 /// cached (the scan — `load_system_fonts` — is the dominant popup-open cost; a
 /// clone is a cheap metadata copy since fontdb `Arc`s the actual font data) (#22).
+/// Identifies a shareable [`FontStore`] configuration for the process-wide
+/// (per-thread) store cache. Two drawers with the same key resolve to the exact
+/// same font DB + pinned UI family, so they can share one built store (#1). The
+/// forced variant carries a small tag rather than [`OsFamily`] itself only so
+/// this key can `derive(Hash)` without depending on `OsFamily: Hash`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FontStoreKey {
+    /// The host-native menu font store ([`RasterDrawer::new_native`]).
+    Native,
+    /// A forced-OS-theme store ([`RasterDrawer::with_forced_theme`]), one per
+    /// target [`OsFamily`] (tag from [`forced_family_tag`]).
+    Forced(u8),
+}
+
+/// Stable tag for an [`OsFamily`] used as a [`FontStoreKey::Forced`] discriminant.
+fn forced_family_tag(family: OsFamily) -> u8 {
+    match family {
+        OsFamily::MacOs => 0,
+        OsFamily::Windows => 1,
+        OsFamily::Gnome => 2,
+    }
+}
+
+/// Return the shared [`FontStore`] for `key`, building it with `build` exactly
+/// once per key per thread and reusing it (as an [`Rc`]) on every later open (#1).
+///
+/// The store's contents (font DB, pinned UI family, and the shaping/glyph/face
+/// caches) depend only on `key`, never on the per-open device scale or theme
+/// colors, so sharing is behavior-preserving: the glyph/shaped caches are keyed
+/// by device-pixel size, so different scales never collide, and per-frame layout
+/// runs entirely in the per-drawer framebuffer.
+fn shared_font_store(key: FontStoreKey, build: impl FnOnce() -> FontStore) -> Rc<FontStore> {
+    thread_local! {
+        static SHARED_FONT_STORES: RefCell<HashMap<FontStoreKey, Rc<FontStore>>> =
+            RefCell::new(HashMap::new());
+    }
+    SHARED_FONT_STORES.with(|cell| {
+        if let Some(fs) = cell.borrow().get(&key) {
+            return Rc::clone(fs);
+        }
+        let fs = Rc::new(build());
+        cell.borrow_mut().insert(key, Rc::clone(&fs));
+        fs
+    })
+}
+
 fn cached_system_fonts_db() -> Database {
     thread_local! {
         static SYSTEM_FONTS_DB: std::cell::OnceCell<Database> = const { std::cell::OnceCell::new() };
@@ -1495,6 +1676,56 @@ mod tests {
             tight < w0,
             "negative tracking must tighten: {tight} !< {w0}"
         );
+    }
+
+    /// #1: the expensive [`FontStore`] (font DB + shaping/glyph caches) is built
+    /// once per configuration and shared across drawers, not rebuilt on every
+    /// popup/flyout open. Two drawers built for the *same* forced theme — even at
+    /// different device scales — must reference the very same store allocation
+    /// (scale is per-drawer and does not affect the shared store).
+    #[test]
+    fn font_store_is_reused_across_drawers_of_the_same_config() {
+        let d1 = RasterDrawer::with_forced_theme(1.0, OsFamily::Windows);
+        let d2 = RasterDrawer::with_forced_theme(2.0, OsFamily::Windows);
+        assert_eq!(
+            d1.font_store_ptr(),
+            d2.font_store_ptr(),
+            "same-config drawers must share one built FontStore, not rebuild it per open"
+        );
+        // The build closure must not run again for a cached key: passing a
+        // panicking builder for the same key proves the store came from the cache.
+        let key = FontStoreKey::Forced(forced_family_tag(OsFamily::Windows));
+        let reused = shared_font_store(key, || {
+            panic!("FontStore must not be rebuilt for a cached key")
+        });
+        assert_eq!(Rc::as_ptr(&reused) as usize, d1.font_store_ptr());
+    }
+
+    /// #4: the `shaped`-cache lookup path must not allocate an owned `String`
+    /// key on a cache hit. `owned_key_build_count` bumps only on a fresh insert,
+    /// so a repeated identical measure (a hit) must leave it unchanged.
+    #[test]
+    fn shape_cache_hit_does_not_build_a_new_owned_key() {
+        let d = RasterDrawer::new_headless(1.0);
+        let font = Font::system(13.0, crate::style::Weight::Regular);
+
+        assert_eq!(d.owned_key_build_count(), 0);
+        let w1 = d.measure_text("Reuse", &font);
+        assert!(w1 > 0.0);
+        assert_eq!(
+            d.owned_key_build_count(),
+            1,
+            "the first (miss) measure builds exactly one owned key"
+        );
+
+        let w2 = d.measure_text("Reuse", &font);
+        assert_eq!(w1, w2, "the cached measure must be identical");
+        assert_eq!(
+            d.owned_key_build_count(),
+            1,
+            "a cache hit must not build (allocate) a new owned key"
+        );
+        assert_eq!(d.shape_miss_count(), 1, "and it must not re-shape either");
     }
 
     #[test]
