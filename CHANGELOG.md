@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-09-11
+
+macOS native fidelity, a paint-layer overhaul against the "attribute set but
+silently not drawn" bug class, optional bundled OSS fonts, and render/raster
+performance — all non-breaking (public API unchanged since 0.10.7).
+
+### Added
+
+- **Bundled OSS UI fonts (`bundled-fonts` feature, opt-in, off by default).**
+  Vendors OFL metric/shape substitutes — **Inter** (→ San Francisco), **Selawik**
+  (Microsoft's own OFL Segoe UI replacement), and **Cantarell** (GNOME) — wired as
+  a fallback tier for forced cross-platform themes: the real OEM font is used when
+  installed, else the bundled substitute, else a free host fallback (never the
+  wrong-platform UI font). The proprietary originals are never redistributed.
+- **macOS bold system face (#56).** The macOS backend now resolves the real
+  **bold** San Francisco face (via `NSFontManager`) and registers regular + bold
+  together, so `Weight::Bold` / per-run bold rows draw at bold weight instead of
+  silently downgrading to regular. A cross-platform weight-downgrade detector
+  guards against the whole silent-downgrade class.
+- **macOS status item icon + title together (#58).** When both a drawable image
+  and a non-empty title are set, the `NSStatusItem` button renders them
+  side-by-side, **icon leading, title trailing** (`NSImageLeft`), matching native
+  menu-bar extras.
+
+### Changed / Fixed
+
+- **macOS menu metrics tightened to NSMenu (#57).** Row height, insets, font size,
+  and corner radius are pinned to documented native references, and SF UI
+  **tracking now travels with the theme** — a forced macOS theme carries its
+  letter-spacing on any host (Windows/GNOME presets carry their documented ~0),
+  reconciled so the live-System path never double-applies.
+- **Paint-layer overhaul.** All icon drawing funnels through one exhaustive
+  `draw_icon` (no `_` wildcard — a new `Icon` variant is now a compile error);
+  fixes a class of "set on the model, silently not rendered" bugs: leading `Svg`
+  icons, trailing-icon column, row background fills, overlapping style runs
+  (later wins), disabled rows now dim icon + checkmark (not just text), a NaN
+  layout guard, and the `row_highlight` theme field is now actually read.
+- **Structured tray-install errors surfaced (EH-1).** A synchronous tray-install
+  handshake makes `TrayIconBuilder::build_result()` / `is_live()` reflect a real
+  Windows/Linux (`Shell_NotifyIcon` / SNI) install failure instead of a false
+  `Ok`; the failure is returned as an `Error::Platform` message naming the site.
+
+### Performance
+
+- **FontStore shared across popup opens.** The font database + shaping/glyph
+  caches are built once per configuration and reused, instead of being rebuilt on
+  every popup/hover open.
+- **Fewer per-call allocations** on the shape/measure hot path (`segment_faces`
+  scratch reuse; the measurement cache no longer allocates an owned key on a hit).
+- **Opaque-destination fast path** in `blend_pixel` (skips the unpremultiply
+  divide when the destination is already opaque; proven bit-identical to the
+  general path, so rendered output is unchanged).
+
+### Notes
+
+- Machine-matchable structured `Error` variants were prepared but **deferred to a
+  future intentional minor (0.11)** to keep 0.10.8 non-breaking
+  (`cargo-semver-checks` green).
+- Several macOS changes (bold face, metrics, status-item layout) carry
+  `DEVICE-VERIFY(0.10.8)` markers for on-device pixel confirmation.
+
 ## [0.10.7] - 2026-09-10
 
 OEM fidelity + ergonomics. Native-parity tracking, cursor-anchored context menus,
