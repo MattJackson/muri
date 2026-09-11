@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -91,6 +91,11 @@ objc2-app-kit = "0.3"
 # AppKit exposes — `NSEvent`'s global/local event monitors — take a block
 # handler, so native-menu-parity dismissal (#11) constructs them here.
 block2 = "0.6"
+# libdispatch bridge (0.12.1): the one-shot live native-menu metrics read
+# (#67/#68) schedules a main-queue block that fires during the menu's
+# event-tracking modal loop — a plain runloop timer is mode-gated and would not
+# fire there. Used only once per process (the result is cached).
+dispatch2 = "0.3"
 # CALayer present path: build a CGImage from the raster RGBA framebuffer and set
 # it as the panel content view's layer contents (replaces softbuffer).
 objc2-quartz-core = "0.3"

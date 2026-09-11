@@ -336,8 +336,9 @@ const MACOS_VERTICAL_INSET: f32 = 4.0;
 
 /// Leading text inset (no checkmark gutter) in logical points — where a plain
 /// row's text starts. Native reference: `NSMenu` text begins ~14pt in.
-/// DEVICE-VERIFY(0.10.8).
-const MACOS_LEADING_INSET: f32 = 14.0;
+/// `pub(crate)` so the macOS backend's live native-menu metrics read can use it
+/// as the fallback when the live read is unavailable (0.12.1). DEVICE-VERIFY(0.10.8).
+pub(crate) const MACOS_LEADING_INSET: f32 = 14.0;
 
 /// Horizontal gap between the leading icon, text segments, and the trailing
 /// column, in logical points. Native reference: the `NSMenu` inter-column rhythm

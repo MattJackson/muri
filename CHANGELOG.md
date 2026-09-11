@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-11
+
+### Changed
+
+- **macOS live menu chrome is now read live from a real `NSMenu`, not hardcoded
+  (#67/#68).** On the live System path the corner radius (12pt on Tahoe), leading
+  text inset (14pt), and row pitch (24pt) are read once from an actual `NSMenu` —
+  the exact values AppKit lays it out at — then cached for the process, so muri
+  auto-tracks whatever the running OS uses (e.g. a future patch that moves Tahoe's
+  corner) with no version table to maintain. The read is genuinely invisible: it
+  pops a real menu but hides its window (`alphaValue = 0` and off-screen) on the
+  first event-tracking tick before it paints, reads `_cornerRadius` /
+  `_NSMenuItemTextField` / `NSTableRowView` off the live tree, then cancels
+  tracking. The version-gated constants remain as the fallback, so behavior can
+  never regress if the live read is unavailable. The forced `Theme::macos` preset
+  and its offscreen goldens are unchanged.
+
 ## [0.12.0] - 2026-09-11
 
 First breaking release: the compat `tray_icon::Rect.size` type change (below) is

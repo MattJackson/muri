@@ -799,21 +799,20 @@ impl PopupSession<'_> {
             read_system_palette().apply_to(&mut theme);
             if let Some(font) = read_system_menu_font() {
                 font.apply_size_to(&mut theme);
-                // Roomier native row pitch (#63): the forced `Theme::macos`
-                // preset (and the offscreen goldens) use the legacy 22pt
-                // `MACOS_ROW_HEIGHT`, which is ~10% tighter than a modern
-                // NSMenu's ~24–25pt pitch (measured ~48–50px @2x). On the LIVE
-                // System path we have the real OS menu point size, so derive the
-                // row height from it at the native ratio — leaving the forced
-                // preset's frozen metrics (and its goldens) untouched.
-                theme.row_height = macos_system_row_height(theme.row_font.size);
             }
-            // Live popup corner radius (#67): Apple enlarged the menu corner in
-            // the Tahoe (macOS 26) Liquid Glass redesign, so the frozen ~6pt
-            // preset reads too square there. Version-gate the live radius (no
-            // public API exposes it) while leaving the forced preset — and its
-            // offscreen goldens — on the pre-Tahoe value.
-            theme.corner_radius = read_system_corner_radius();
+            // Live native menu chrome, read once from a real `NSMenu` and cached
+            // (#67/#68, 0.12.1): the row pitch (~24pt), corner radius (12pt on
+            // Tahoe), and leading text inset (~14pt) are the exact values AppKit
+            // lays a native `NSMenu` out at — read live so muri auto-tracks OS
+            // changes (e.g. a future patch moving Tahoe's corner) instead of a
+            // hardcoded version table, with the version-gated constants as
+            // fallback. The forced `Theme::macos` preset (and its offscreen
+            // goldens) keep their frozen metrics.
+            let metrics = native_menu_metrics();
+            theme.row_height = metrics.row_height;
+            theme.corner_radius = metrics.corner_radius;
+            theme.padding.left = metrics.leading_inset;
+            theme.padding.right = metrics.leading_inset;
             // Live SF tracking (#66): the earlier negative tracking (baked into
             // the forced preset for its 13pt base) overcorrected on the LIVE
             // path — with the real SF face shaped at its own advances, the extra
@@ -2091,6 +2090,176 @@ fn read_system_corner_radius() -> f32 {
         11..=25 => crate::theme::MACOS_CORNER_RADIUS,
         _ => MACOS_CORNER_RADIUS_TAHOE,
     }
+}
+
+/// Native macOS menu chrome metrics, read once **live** from a real `NSMenu` and
+/// cached for the process (0.12.1). The values (corner radius, leading text
+/// inset, row pitch) are only exposed on a menu's *displayed* backing window —
+/// `_cornerRadius` on the window plus the `_NSMenuItemTextField` / `NSTableRowView`
+/// frames in its view tree — so reading them live means briefly running a real
+/// menu. Reading them (rather than hardcoding) means muri auto-tracks whatever the
+/// running OS uses (e.g. a future patch moving Tahoe's 12pt corner) with no
+/// version table to maintain.
+#[derive(Clone, Copy)]
+struct NativeMenuMetrics {
+    corner_radius: f32,
+    leading_inset: f32,
+    row_height: f32,
+}
+
+// Sentinel-guarded slots the one-shot measurement block writes the read values
+// into (as `f32` bits). `u32::MAX` means "not read" so a real read is required to
+// override the fallback. Only ever touched on the main thread, once.
+static MEASURED_CORNER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+static MEASURED_INSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+static MEASURED_ROW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// The cached native menu metrics — measured live on first use (main thread),
+/// then reused. Off the main thread (never expected on the live theme path) it
+/// returns the constant fallback without caching, so a later main-thread call can
+/// still measure.
+fn native_menu_metrics() -> NativeMenuMetrics {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<NativeMenuMetrics> = OnceLock::new();
+    if let Some(m) = CACHE.get() {
+        return *m;
+    }
+    match MainThreadMarker::new() {
+        Some(mtm) => *CACHE.get_or_init(|| measure_native_menu_metrics(mtm)),
+        None => fallback_native_menu_metrics(),
+    }
+}
+
+/// The constant fallback used when the live read is unavailable or returns an
+/// absurd value: the version-gated corner radius, the preset leading inset, and
+/// the no-popup `NSMenu.size` row pitch.
+fn fallback_native_menu_metrics() -> NativeMenuMetrics {
+    NativeMenuMetrics {
+        corner_radius: read_system_corner_radius(),
+        leading_inset: crate::theme::MACOS_LEADING_INSET,
+        // `macos_system_row_height` already prefers a no-popup `NSMenu.size` read
+        // and only falls back to the ratio at the ~13pt native menu font size.
+        row_height: macos_system_row_height(13.0),
+    }
+}
+
+/// Perform the one-shot live read. Pops a real `NSMenu`, and on the first
+/// event-tracking tick (before it paints) hides its window — `alphaValue = 0`
+/// **and** moved off-screen, so nothing is ever visible — reads the chrome
+/// metrics off the live tree, and cancels tracking so `popUp` returns. The
+/// hiding block is scheduled on the dispatch **main queue**, which drains in all
+/// runloop modes (unlike a plain runloop timer, which is gated to the default
+/// mode and never fires during menu tracking — the reason a naive attempt shows
+/// a flash or reads nothing). Each field falls back to the constant when the read
+/// didn't land or is out of range.
+fn measure_native_menu_metrics(mtm: MainThreadMarker) -> NativeMenuMetrics {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    MEASURED_CORNER.store(u32::MAX, SeqCst);
+    MEASURED_INSET.store(u32::MAX, SeqCst);
+    MEASURED_ROW.store(u32::MAX, SeqCst);
+
+    let menu = objc2_app_kit::NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+    for title in ["Row One", "Row Two", "Row Three"] {
+        let item = objc2_app_kit::NSMenuItem::new(mtm);
+        item.setTitle(&NSString::from_str(title));
+        menu.addItem(&item);
+    }
+    let menu_ptr = Retained::as_ptr(&menu) as usize;
+
+    dispatch2::DispatchQueue::main().exec_async(move || read_tracking_menu_metrics(menu_ptr));
+
+    // Blocks ~1 tick until the scheduled block cancels tracking. The menu is
+    // never visible (hidden before paint), so this is not a real popup.
+    let _shown: bool = unsafe {
+        msg_send![
+            &menu,
+            popUpMenuPositioningItem: Option::<&objc2_app_kit::NSMenuItem>::None,
+            atLocation: NSPoint::new(0.0, 0.0),
+            inView: Option::<&objc2_app_kit::NSView>::None,
+        ]
+    };
+
+    let read = |slot: &std::sync::atomic::AtomicU32| -> Option<f32> {
+        let bits = slot.load(SeqCst);
+        (bits != u32::MAX).then(|| f32::from_bits(bits))
+    };
+    let fb = fallback_native_menu_metrics();
+    NativeMenuMetrics {
+        corner_radius: read(&MEASURED_CORNER)
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v < 64.0)
+            .unwrap_or(fb.corner_radius),
+        leading_inset: read(&MEASURED_INSET)
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v < 64.0)
+            .unwrap_or(fb.leading_inset),
+        row_height: read(&MEASURED_ROW)
+            .filter(|v| v.is_finite() && *v >= crate::theme::MACOS_ROW_HEIGHT)
+            .unwrap_or(fb.row_height),
+    }
+}
+
+/// Runs on the first tracking tick (dispatch main): hide the live menu window,
+/// read the chrome metrics off its view tree, cancel tracking. Always cancels
+/// (even if nothing was read) so `popUp` can never hang.
+fn read_tracking_menu_metrics(menu_ptr: usize) {
+    use std::sync::atomic::Ordering::SeqCst;
+    if let Some(mtm) = MainThreadMarker::new() {
+        let windows = NSApplication::sharedApplication(mtm).windows();
+        for i in 0..windows.count() {
+            let w = windows.objectAtIndex(i);
+            if !obj_class_name(&*w).contains("Menu") {
+                continue;
+            }
+            unsafe {
+                // Hide before it paints: fully transparent AND off-screen.
+                let _: () = msg_send![&*w, setAlphaValue: 0.0f64];
+                let _: () = msg_send![&*w, setFrameOrigin: NSPoint::new(-30000.0, -30000.0)];
+                let responds: bool = msg_send![&*w, respondsToSelector: sel!(_cornerRadius)];
+                if responds {
+                    let r: f64 = msg_send![&*w, _cornerRadius];
+                    MEASURED_CORNER.store((r as f32).to_bits(), SeqCst);
+                }
+                let content: Option<Retained<objc2_app_kit::NSView>> = msg_send![&*w, contentView];
+                if let Some(cv) = content {
+                    let superview: Option<Retained<objc2_app_kit::NSView>> =
+                        msg_send![&*cv, superview];
+                    let root = superview.unwrap_or(cv);
+                    if let Some(x) = find_descendant_frame(&root, "MenuItemTextField", true) {
+                        MEASURED_INSET.store((x as f32).to_bits(), SeqCst);
+                    }
+                    if let Some(h) = find_descendant_frame(&root, "NSTableRowView", false) {
+                        MEASURED_ROW.store((h as f32).to_bits(), SeqCst);
+                    }
+                }
+            }
+        }
+    }
+    // Unconditionally end tracking so `popUp` returns.
+    let menu = unsafe { &*(menu_ptr as *const objc2_app_kit::NSMenu) };
+    menu.cancelTracking();
+}
+
+/// The Objective-C `-className` of `obj` as a `String`.
+fn obj_class_name<T: objc2::Message>(obj: &T) -> String {
+    let name: Retained<NSString> = unsafe { msg_send![obj, className] };
+    name.to_string()
+}
+
+/// Depth-first: the first descendant view (or `view` itself) whose class name
+/// contains `needle`, returning its frame's `origin.x` (`want_x`) or
+/// `size.height` — the two menu metrics read off the live tree.
+fn find_descendant_frame(view: &objc2_app_kit::NSView, needle: &str, want_x: bool) -> Option<f64> {
+    if obj_class_name(view).contains(needle) {
+        let f = view.frame();
+        return Some(if want_x { f.origin.x } else { f.size.height });
+    }
+    let subs = view.subviews();
+    for i in 0..subs.count() {
+        if let Some(v) = find_descendant_frame(&subs.objectAtIndex(i), needle, want_x) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Resolve the bold companion of the system menu `font` and, when it is a
