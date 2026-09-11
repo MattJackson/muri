@@ -799,6 +799,21 @@ impl PopupSession<'_> {
             theme.header_font.letter_spacing = sf_ui_tracking(theme.header_font.size);
             if !transparency_enabled() {
                 theme.make_opaque();
+            } else {
+                // A native `NSMenu` paints NO bulk background over its vibrancy —
+                // the `Material::Menu` backdrop (our rounded `NSVisualEffectView`
+                // content view, `mac/window.rs`) *is* the surface. The macOS
+                // preset's translucent fill (~0.80 alpha) is a stand-in for hosts
+                // that have no real vibrancy (the offscreen renderer, forced
+                // themes). On the LIVE System path the vibrancy is present, so
+                // drop the bulk fill to fully transparent: the material shows
+                // through exactly like native, instead of masking ~80% of it with
+                // a flat gray (#64). Selection/hover/separators/text still paint
+                // on top. Offscreen/forced/preset themes never reach this branch
+                // (no `injects_system`), so their fill — and the goldens — stand.
+                // DEVICE-VERIFY(0.11.3): confirm the live popup background now
+                // reads as the translucent Menu material, not flat gray.
+                theme.background = Color::Rgba(0, 0, 0, 0);
             }
         }
         theme
