@@ -816,6 +816,12 @@ mod tests {
         let logical = LogicalRect::new(LogicalPoint::new(10.0, 20.0), LogicalSize::new(30.0, 40.0));
         let rect: Rect = logical.into();
         assert_eq!(rect.position, PhysicalPosition { x: 10.0, y: 20.0 });
-        assert_eq!(rect.size, (30.0, 40.0));
+        assert_eq!(
+            rect.size,
+            PhysicalSize {
+                width: 30.0,
+                height: 40.0
+            }
+        );
     }
 }

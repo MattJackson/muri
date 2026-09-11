@@ -115,8 +115,23 @@ define_class!(
             });
         }
 
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &objc2_app_kit::NSEvent) {
+            // Push the arrow onto the cursor stack for the whole time the pointer
+            // is inside the panel, rather than only `set()`-ing it per event: a
+            // bare `set()` is transient and loses to the I-beam the view beneath
+            // (or AppKit's cursor-rect management on a non-key panel) reasserts
+            // between moves, so the menu flashed a text caret (#70). `push` makes
+            // the arrow authoritative until the matching `pop` in `mouseExited:`.
+            NSCursor::arrowCursor().push();
+        }
+
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &objc2_app_kit::NSEvent) {
+            // Balance the `push` in `mouseEntered:` so the arrow is popped off the
+            // cursor stack as the pointer leaves (#70), restoring the ambient
+            // cursor for whatever is underneath.
+            NSCursor::arrowCursor().pop();
             // The pointer left this panel; the drain decides (by global cursor
             // geometry) whether to collapse submenus + clear the highlight.
             super::push_event(UiEvent::MouseExited {
@@ -248,6 +263,10 @@ pub(super) fn make_panel(
     effect.setMaterial(NSVisualEffectMaterial::Menu);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
+    // Emphasized darkens/saturates the `Menu` material toward a native `NSMenu`'s
+    // density — without it the vibrancy reads lighter than the real menu (#68).
+    // DEVICE-VERIFY(0.12.0): confirm the emphasized tint matches native NSMenu.
+    effect.setEmphasized(true);
     effect.setWantsLayer(true);
     if let Some(layer) = effect.layer() {
         layer.setCornerRadius(corner_radius as f64);

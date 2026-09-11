@@ -344,9 +344,16 @@ const MACOS_LEADING_INSET: f32 = 14.0;
 /// (~8pt). DEVICE-VERIFY(0.10.8).
 const MACOS_COLUMN_GAP: f32 = 8.0;
 
-/// Popup corner radius in logical points. Native reference: the Big Sur+ `NSMenu`
-/// rounded-corner radius (~6pt). DEVICE-VERIFY(0.10.8).
-const MACOS_CORNER_RADIUS: f32 = 6.0;
+/// Popup corner radius in logical points for the forced/offscreen `Theme::macos`
+/// preset. Native reference: the Big Sur..Sequoia `NSMenu` rounded-corner radius
+/// (~6pt; design-community measurements put it at ~6–9pt). `pub(crate)` so the
+/// macOS backend's live version-gated read (`read_system_corner_radius` in
+/// `src/platform/mac.rs`) can reuse it as the pre-Tahoe value while bumping the
+/// radius on Tahoe (#67), where Apple's Liquid Glass redesign enlarged it. There
+/// is no public API for the live value and no industry-standard constant (nearly
+/// every toolkit delegates to a real `NSMenu`), so this stays a DEVICE-VERIFY
+/// estimate. DEVICE-VERIFY(0.10.8).
+pub(crate) const MACOS_CORNER_RADIUS: f32 = 6.0;
 
 /// Tracking (letter-spacing) as a fraction of the point size applied to macOS
 /// San Francisco UI text, mirroring the small size-dependent tracking CoreText

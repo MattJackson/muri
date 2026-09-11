@@ -370,6 +370,23 @@ impl DismissWatchers {
             );
         }
 
+        // A Space switch (three-finger swipe / Mission Control) dismisses the
+        // popup, matching a native `NSMenu` (#69). This notification is posted on
+        // `NSWorkspace`'s OWN notification center, not the default center, so it
+        // needs its own registration (and its own removal in `Drop`).
+        // SAFETY: `observer` responds to `muriDismiss:`; the name is a valid
+        // `&'static NSNotificationName`.
+        unsafe {
+            objc2_app_kit::NSWorkspace::sharedWorkspace()
+                .notificationCenter()
+                .addObserver_selector_name_object(
+                    &observer,
+                    sel!(muriDismiss:),
+                    Some(objc2_app_kit::NSWorkspaceActiveSpaceDidChangeNotification),
+                    None,
+                );
+        }
+
         DismissWatchers {
             global_monitor,
             local_monitor,
@@ -390,6 +407,11 @@ impl Drop for DismissWatchers {
                 NSEvent::removeMonitor(&m);
             }
             NSNotificationCenter::defaultCenter().removeObserver(&self.observer);
+            // The Space-change observer (#69) was registered on the workspace
+            // center, so it must be removed from that same center.
+            objc2_app_kit::NSWorkspace::sharedWorkspace()
+                .notificationCenter()
+                .removeObserver(&self.observer);
         }
     }
 }
@@ -786,17 +808,24 @@ impl PopupSession<'_> {
                 // preset's frozen metrics (and its goldens) untouched.
                 theme.row_height = macos_system_row_height(theme.row_font.size);
             }
-            // Native SF tracking (#42/#57): CoreText applies a small size-dependent
-            // tracking to San Francisco that a bare shaper does not, so muri's menu
-            // text otherwise reads slightly *looser* than a real NSMenu. The macOS
-            // preset already bakes tracking in for its 13pt base; here we OVERWRITE
-            // (assign, not `+=`) with the value recomputed for the *live* menu size
-            // just applied by `apply_size_to` above — so the System theme tracks for
-            // the live size with no double application on top of the preset. Only
-            // System themes get this — forced/preset/custom faces aren't SF, but a
-            // forced macOS preset still carries its baked-in tracking on any host.
-            theme.row_font.letter_spacing = sf_ui_tracking(theme.row_font.size);
-            theme.header_font.letter_spacing = sf_ui_tracking(theme.header_font.size);
+            // Live popup corner radius (#67): Apple enlarged the menu corner in
+            // the Tahoe (macOS 26) Liquid Glass redesign, so the frozen ~6pt
+            // preset reads too square there. Version-gate the live radius (no
+            // public API exposes it) while leaving the forced preset — and its
+            // offscreen goldens — on the pre-Tahoe value.
+            theme.corner_radius = read_system_corner_radius();
+            // Live SF tracking (#66): the earlier negative tracking (baked into
+            // the forced preset for its 13pt base) overcorrected on the LIVE
+            // path — with the real SF face shaped at its own advances, the extra
+            // tightening made adjacent letters touch. A native `NSMenu` adds no
+            // extra tracking beyond the font's own metrics, so on the live System
+            // path we OVERWRITE (assign, not `+=`) with metrics-only (0) rather
+            // than the preset's baked value. The forced `Theme::macos` preset (and
+            // its offscreen goldens) keep their frozen tracking, matching how the
+            // live row-pitch and corner-radius reads leave the preset untouched.
+            // DEVICE-VERIFY(0.12.0): confirm native SF menu tracking is ~0.
+            theme.row_font.letter_spacing = 0.0;
+            theme.header_font.letter_spacing = 0.0;
             if !transparency_enabled() {
                 theme.make_opaque();
             } else {
@@ -1969,27 +1998,6 @@ fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     crate::render::encode_rgba_png(&rgba, w, h)
 }
 
-/// Extra tracking (letter-spacing) in **logical points** for the macOS System
-/// theme's UI font at `size_pt`, approximating the small size-dependent tracking
-/// CoreText applies to San Francisco that a bare shaper does not (#42). muri's
-/// menu text otherwise reads slightly *looser* than a native `NSMenu`, so this is
-/// a slight **tightening** (negative). Applied only to `System` themes (real SF) —
-/// never to forced/preset/custom themes, whose faces aren't SF.
-///
-/// DEVICE-VERIFY(0.10.8): the exact factor needs a side-by-side capture against a
-/// real `NSMenu`. It is deliberately a single, conservative, easily-tuned constant
-/// over the narrow menu-size range (11–14pt) rather than a full optical-size table.
-///
-/// This delegates to [`crate::theme::macos_sf_tracking`] — the single source of
-/// truth (#57) shared with the forced `Theme::macos` preset, so the live-system
-/// read path and a forced macOS theme compute *identical* tracking for the same
-/// size. The forced preset already bakes tracking in for its 13pt base; this path
-/// recomputes it for the live menu size and OVERWRITES (assign, not `+=`) so the
-/// System theme tracks for the live size without ever double-applying.
-fn sf_ui_tracking(size_pt: f32) -> f32 {
-    crate::theme::macos_sf_tracking(size_pt)
-}
-
 /// Legacy fallback ratio for the live-`System` row pitch as a multiple of the
 /// live menu font point size, used **only** when the live `NSMenu` measurement
 /// in [`macos_system_row_height`] is unavailable (e.g. off the main thread or a
@@ -2054,6 +2062,34 @@ fn nsmenu_layout_height(mtm: MainThreadMarker, items: usize) -> Option<f32> {
     }
     let height = menu.size().height as f32;
     (height > 0.0).then_some(height)
+}
+
+/// Tahoe (macOS 26+) live-`System` popup corner radius in logical points (#67).
+/// Apple's Liquid Glass redesign enlarged the menu corner from the Big
+/// Sur..Sequoia ~6pt to ~12–13pt. There is no public API exposing the live value
+/// (the private `_cornerMask` returns a bitmap mask, not a radius, and overriding
+/// it is a known Tahoe WindowServer performance hazard), so — like every other
+/// toolkit that draws its own menu chrome (e.g. Firefox) — this is a
+/// version-gated estimate. DEVICE-VERIFY(0.12.0).
+const MACOS_CORNER_RADIUS_TAHOE: f32 = 13.0;
+
+/// The live-`System` popup corner radius in logical points for the host's macOS
+/// version (#67). Pre-Tahoe reuses the frozen preset value
+/// [`crate::theme::MACOS_CORNER_RADIUS`] (~6pt); Tahoe (major >= 26) uses the
+/// enlarged [`MACOS_CORNER_RADIUS_TAHOE`]; Catalina and earlier (major <= 10)
+/// drew square menus. No public API exposes the live radius, so it is
+/// version-gated rather than measured (see the constant docs). Applied only on
+/// the live System path, so the forced preset and its offscreen goldens are
+/// untouched.
+fn read_system_corner_radius() -> f32 {
+    let major = objc2_foundation::NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion;
+    match major {
+        ..=10 => 0.0,
+        11..=25 => crate::theme::MACOS_CORNER_RADIUS,
+        _ => MACOS_CORNER_RADIUS_TAHOE,
+    }
 }
 
 /// Resolve the bold companion of the system menu `font` and, when it is a
