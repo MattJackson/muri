@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-11
+
+The API-shape release: the compat facade is frozen to a pure muda/tray-icon
+drop-in, the native API converges on "one obvious way," errors become
+structured, and Linux gains a runtime menu-presenter seam. **Breaking** — hence
+the minor bump; a migration guide is in `README.md` / the migration doc.
+
+### Breaking
+
+- **`muda-compat` is now a frozen, pure bidirectional `muda`/`tray-icon` drop-in
+  (#61).** All muri-only extensions were **removed** from the compat surface —
+  `set_active`/`set_bold`/`set_value_color`/`set_value_runs`, `MuriRowExt`,
+  `RowStyle`, the `StyleRun`/`Color`/`Weight` re-exports, `Submenu::set_icon`,
+  `Icon::from_png`/`Icon::data`/`IconData`, `Menu::as_native`/
+  `open_custom_with_options`, `TrayIconBuilder::with_options`/`with_theme`,
+  `TrayIcon::set_theme`/`set_options`/`is_live`, and `TrayIconBuilder::build_result`.
+  The facade now mirrors upstream exactly (both `s/muda/muri/` and `s/muri/muda/`
+  hold). **All customization moves to the native API.** Compat `Icon` now exposes
+  muda's own `from_rgba`/`from_path`.
+- **Structured `Error` (EH-2).** `Error` is now `#[non_exhaustive]` with
+  `TrayInstall`, `MainThread`, and `ThreadSpawn` alongside `Unsupported`/`BadIcon`/
+  `Platform`, so consumers can `match` the failure kind (a `match` on `Error` now
+  needs a `_` arm). The tray-install handshake surfaces Windows/Linux install
+  failures as `Error::TrayInstall` via `Tray::spawn`.
+- **Native API convergence (#62).** Renamed `Icon::from_png_bytes` → `from_png`
+  and `from_svg_bytes` → `from_svg`; `Row::info()` is deprecated in favor of
+  `Row::label_only`. One canonical path is now documented per task (see below).
+
+### Added
+
+- **`Row::bold()` / `Row::value_color()`** — ergonomic native styling for the
+  common cases (the native home for the removed compat `set_bold`/`set_value_color`);
+  per-run `StyleRun` remains the full-control escape hatch (#62).
+- **"Native API: the one obvious way"** doc section (crate root) — a canonical
+  path per task: build a menu, put content in a row, style a row, make an icon,
+  pick a theme (#62).
+- **`TrailingGutterPolicy` on `MenuOptions`** (`Auto`/`Always`/`Never`, mirroring
+  the leading `GutterPolicy`) — reserve the trailing chevron column only when a
+  submenu is present, so right-aligned content reaches the edge otherwise (#60).
+- **Linux menu-presenter seam** — a runtime choice between muri's own styled X11
+  popup, an **experimental** `wlr-layer-shell` styled popup on wlroots + KDE (the
+  new off-by-default `wayland-styled` feature; scaffold with device-verify
+  markers), and the native `dbusmenu` on GNOME-Wayland and as the universal
+  fallback (ADR-0003).
+- **macOS status-item icon + title** render side-by-side, icon leading (#58,
+  shipped 0.10.8) — and OEM-fidelity golden regression tests (bold #56, macOS
+  metrics #57) via the headless renderer.
+
+### Notes
+
+- The Linux Wayland layer-shell renderer and AT-SPI accessibility for the custom
+  popups are scaffolded (`todo!("DEVICE-VERIFY")`) — they land in a follow-up
+  once verified on a real Wayland session.
+
 ## [0.10.9] - 2026-09-11
 
 Display-free rendering for CI. Non-breaking (additive).
