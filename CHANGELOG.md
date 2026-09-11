@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-09-11
+
+Display-free rendering for CI. Non-breaking (additive).
+
+### Added
+
+- **Headless render-to-pixels API (#59).** `muri::render_menu_to_png(&Menu,
+  &MenuOptions, scale) -> Vec<u8>` and `muri::render_menu_to_rgba(&Menu,
+  &MenuOptions, scale) -> (Vec<u8>, u32, u32)` render a built menu straight to
+  pixels **without** a tray, window, display, or TCC/Accessibility — for CI
+  screenshots and cross-OS golden tests. The `Theme` is resolved from the
+  `MenuOptions` `ThemeSource` internally (so forced `ThemeSource::{MacOs,Windows,
+  Gnome}` produce the target-OS look from any host), routing through the same
+  drawer/font path a live popup uses. Ships on default features, all OSes.
+
 ## [0.10.8] - 2026-09-11
 
 macOS native fidelity, a paint-layer overhaul against the "attribute set but

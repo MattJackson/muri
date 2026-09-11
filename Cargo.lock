@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "muri"
-version = "0.10.8"
+version = "0.10.9"
 dependencies = [
  "accesskit",
  "accesskit_macos",
