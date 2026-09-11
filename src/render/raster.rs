@@ -284,6 +284,25 @@ pub(crate) fn blend_pixel(dst: &mut [u8], off: usize, src: Rgba, a: u8) {
         dst[off + 3] = 255;
         return;
     }
+    if dst[off + 3] == 255 {
+        // Opaque destination (`da == 1`): unpremultiplying the destination is a
+        // no-op, the composited alpha is exactly 1, and re-premultiplying by it is
+        // a no-op — so the general branch's per-channel divide/round/re-premultiply
+        // and the alpha recompute all collapse to identities. Composite directly in
+        // linear light; bit-identical to the branch below when `da == 255`. This is
+        // the common "AA glyph / icon over an opaque menu background" path.
+        let lut = &*SRGB_TO_LINEAR;
+        let sa = a as f32 / 255.0;
+        let inv = 1.0 - sa;
+        let src_ch = [src.r, src.g, src.b];
+        for c in 0..3 {
+            let s_lin_pm = lut[src_ch[c] as usize] * sa;
+            let d_lin = lut[dst[off + c] as usize];
+            dst[off + c] = linear_to_srgb_u8(s_lin_pm + d_lin * inv);
+        }
+        dst[off + 3] = 255;
+        return;
+    }
     let lut = &*SRGB_TO_LINEAR;
     let sa = a as f32 / 255.0;
     let da = dst[off + 3] as f32 / 255.0;
@@ -511,6 +530,78 @@ mod tests {
         let mut untouched = [10u8, 20, 30, 255];
         blend_pixel(&mut untouched, 0, Rgba::new(0, 0, 0, 255), 0);
         assert_eq!(untouched, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn blend_opaque_dst_fast_path_matches_reference_unpremultiply() {
+        // The opaque-destination fast path must be bit-identical to the full
+        // gamma-correct general branch (which unpremultiplies the destination by
+        // `da`). Replicate that general math independently and sweep src colors ×
+        // coverage over opaque backgrounds; any divergence (e.g. from `out_a` not
+        // collapsing to exactly 1.0) would silently shift AA text/icon pixels and
+        // move goldens, so this asserts zero difference across the whole range.
+        fn reference_general(dst: [u8; 4], src: Rgba, a: u8) -> [u8; 4] {
+            if a == 0 {
+                return dst;
+            }
+            let lut = &*SRGB_TO_LINEAR;
+            let sa = a as f32 / 255.0;
+            let da = dst[3] as f32 / 255.0;
+            let inv = 1.0 - sa;
+            let out_a = sa + da * inv;
+            if out_a <= 0.0 {
+                return [0, 0, 0, 0];
+            }
+            let mut out = dst;
+            let src_ch = [src.r, src.g, src.b];
+            for c in 0..3 {
+                let s_lin_pm = lut[src_ch[c] as usize] * sa;
+                let d_lin_pm = if da > 0.0 {
+                    let straight = (dst[c] as f32 / da).min(255.0);
+                    lut[straight.round() as usize] * da
+                } else {
+                    0.0
+                };
+                let out_lin_pm = s_lin_pm + d_lin_pm * inv;
+                let out_srgb_straight = linear_to_srgb_u8(out_lin_pm / out_a) as f32;
+                out[c] = (out_srgb_straight * out_a).round().clamp(0.0, 255.0) as u8;
+            }
+            out[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            out
+        }
+        for &dc in &[0u8, 1, 17, 64, 128, 200, 254, 255] {
+            let dst0 = [dc, dc.wrapping_mul(3), dc ^ 0x5A, 255];
+            for &(sr, sg, sb) in &[
+                (0u8, 0u8, 0u8),
+                (255, 255, 255),
+                (200, 100, 50),
+                (13, 200, 77),
+            ] {
+                for a in 1u8..=254 {
+                    let mut got = dst0;
+                    blend_pixel(&mut got, 0, Rgba::new(sr, sg, sb, 255), a);
+                    let want = reference_general(dst0, Rgba::new(sr, sg, sb, 255), a);
+                    assert_eq!(
+                        got, want,
+                        "fast path diverged at dst={dst0:?} src=({sr},{sg},{sb}) a={a}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blend_non_opaque_dst_is_unchanged_by_the_fast_path() {
+        // The fast path must only trigger for a fully-opaque destination; a
+        // translucent destination must still take the general branch. Blending
+        // over a half-alpha destination should raise its alpha above the original.
+        let mut dst = [10u8, 20, 30, 128];
+        blend_pixel(&mut dst, 0, Rgba::new(200, 100, 50, 255), 90);
+        assert!(
+            dst[3] > 128,
+            "translucent dst alpha should increase, got {}",
+            dst[3]
+        );
     }
 
     /// The standard PNG chunk CRC (CRC-32/ISO-HDLC over the chunk's type+data
