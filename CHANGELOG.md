@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-09-11
+
+### Added
+
+- **Live macOS menu honors the OS "Increase Contrast" accessibility setting
+  (#74).** The live System path now reads
+  `NSWorkspace.accessibilityDisplayShouldIncreaseContrast` (analogous to the
+  existing Reduce-Transparency read) and, when on, renders like a native `NSMenu`
+  under Increase Contrast: an opaque background (the bulk fill covers the glass),
+  max-contrast label text (pure white/black), and full-strength separators. The
+  forced preset is unchanged. (A 1px panel border — a further native tell — is
+  deferred until `Theme` grows a border field.)
+
 ## [0.12.2] - 2026-09-11
 
 macOS live-menu text/glass fidelity, measured against a native `NSMenu` on Tahoe.

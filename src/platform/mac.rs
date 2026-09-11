@@ -849,7 +849,35 @@ impl PopupSession<'_> {
             // DEVICE-VERIFY(0.12.0): confirm native SF menu tracking is ~0.
             theme.row_font.letter_spacing = 0.0;
             theme.header_font.letter_spacing = 0.0;
-            if !transparency_enabled() {
+            if increase_contrast_enabled() {
+                // OS "Increase Contrast" accessibility setting (#74): a native
+                // `NSMenu` then renders opaque with max-contrast text and stronger
+                // separators. Apply the same treatment — overriding the
+                // vibrancy/glass translucent path — so Increase-Contrast users get
+                // the accessible look. The opaque bulk fill covers the glass
+                // backdrop, matching native's opaque high-contrast menu.
+                // DEVICE-VERIFY(0.12.3): compare against a native NSMenu with
+                // Increase Contrast on (SIP-protected, must be toggled in
+                // System Settings). A 1px panel border is a further native tell,
+                // deferred until `Theme` grows a border field.
+                theme.make_opaque();
+                let dark = system_is_dark();
+                theme.label = if dark {
+                    Color::rgb(255, 255, 255)
+                } else {
+                    Color::rgb(0, 0, 0)
+                };
+                theme.secondary_label = if dark {
+                    Color::rgb(216, 216, 216)
+                } else {
+                    Color::rgb(40, 40, 40)
+                };
+                theme.separator = if dark {
+                    Color::rgb(255, 255, 255)
+                } else {
+                    Color::rgb(0, 0, 0)
+                };
+            } else if !transparency_enabled() {
                 theme.make_opaque();
             } else {
                 // A native `NSMenu` paints NO bulk background over its vibrancy —
@@ -2432,6 +2460,22 @@ fn transparency_enabled() -> bool {
     }
     let ws = NSWorkspace::sharedWorkspace();
     !ws.accessibilityDisplayShouldReduceTransparency()
+}
+
+/// Whether the OS **Increase Contrast** accessibility setting is on (System
+/// Settings → Accessibility → Display → Increase contrast). A native `NSMenu`
+/// then renders opaque with max-contrast text and stronger separators, so the
+/// live System theme applies the same treatment (#74). `NSWorkspace`'s
+/// `accessibilityDisplayShouldIncreaseContrast` is the canonical source; it isn't
+/// bound by `objc2-app-kit`, so it's sent directly (the method exists at
+/// runtime). `false` off the main thread (matching the other live reads).
+fn increase_contrast_enabled() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    if MainThreadMarker::new().is_none() {
+        return false;
+    }
+    let ws = NSWorkspace::sharedWorkspace();
+    unsafe { msg_send![&*ws, accessibilityDisplayShouldIncreaseContrast] }
 }
 
 /// Query the live OS accent color as straight-alpha RGBA, or `None` if it can't
