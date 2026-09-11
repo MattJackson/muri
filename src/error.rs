@@ -24,26 +24,39 @@ impl std::fmt::Display for Unsupported {
 
 /// Errors returned by muri's fallible operations.
 ///
-/// [`Platform`](Error::Platform) is the catch-all for a failed per-OS API call
-/// while creating, installing, or anchoring the tray/surface — its message names
-/// the concrete failure site (e.g. `"tray install failed: …"`, `"must be created
-/// on the main thread"`). A synchronous tray-install handshake means a Windows/
-/// Linux install failure is surfaced through this variant (via the compat
-/// facade's `build_result`) rather than returning a false `Ok`.
-//
-// NOTE: this enum is intentionally NOT `#[non_exhaustive]` and its variant set
-// matches 0.10.7 — marking it non-exhaustive or adding public variants is a
-// semver-major break for a 0.x crate (see cargo-semver-checks). Machine-matchable
-// structured variants are deferred to the next intentional minor (0.11).
+/// The failure sites that carry actionable meaning are captured as structured
+/// variants — [`TrayInstall`](Error::TrayInstall), [`MainThread`](Error::MainThread),
+/// [`ThreadSpawn`](Error::ThreadSpawn) — so a consumer can `match` on the *kind*
+/// of failure (e.g. distinguish "the OS refused the tray install" from "you called
+/// this off the main thread") rather than string-matching a message.
+/// [`Platform`](Error::Platform) remains the catch-all for residual per-OS API
+/// failures that don't fit a structured kind. A synchronous tray-install handshake
+/// surfaces a Windows/Linux install failure as [`TrayInstall`](Error::TrayInstall)
+/// (via [`Tray::spawn`](crate::Tray::spawn)) instead of a false `Ok`.
+///
+/// `#[non_exhaustive]`: future muri versions may add variants, so a consumer's
+/// `match` must include a `_` arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// A capability that is not available on the current platform.
     Unsupported(Unsupported),
     /// The supplied icon bytes could not be decoded.
     BadIcon(String),
-    /// A platform API call failed while creating, installing, or anchoring the
-    /// surface. The message names the concrete failure (tray install, main-thread
-    /// requirement, thread spawn, or a residual per-OS API error).
+    /// The OS tray/status-item install failed — `Shell_NotifyIcon(NIM_ADD)` on
+    /// Windows, or the SNI/`StatusNotifierItem` D-Bus registration on Linux. On
+    /// Windows/Linux this is surfaced synchronously through the tray-thread
+    /// install handshake, so a caller learns the icon never appeared instead of
+    /// seeing a false `Ok`.
+    TrayInstall(String),
+    /// A tray or surface that must be created on the main thread was requested
+    /// off it (AppKit's `NSStatusItem`, and the platform's main-thread-only
+    /// install/run paths).
+    MainThread,
+    /// The background `muri-tray` UI thread could not be spawned.
+    ThreadSpawn(String),
+    /// A platform API call failed while creating or anchoring the surface and
+    /// does not fit a more specific structured variant.
     Platform(String),
 }
 
@@ -52,6 +65,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::Unsupported(u) => write!(f, "unsupported on this platform: {u}"),
             Error::BadIcon(m) => write!(f, "bad icon: {m}"),
+            Error::TrayInstall(m) => write!(f, "tray install failed: {m}"),
+            Error::MainThread => f.write_str("must be created on the main thread"),
+            Error::ThreadSpawn(m) => write!(f, "failed to spawn the muri tray thread: {m}"),
             Error::Platform(m) => write!(f, "platform error: {m}"),
         }
     }
@@ -67,22 +83,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn errors_display_sensibly() {
-        // The tray-install handshake surfaces the concrete failure site in the
-        // Platform message, so a caller still learns *what* failed.
+    fn structured_variants_display_sensibly() {
         assert_eq!(
-            Error::Platform("tray install failed: Shell_NotifyIcon(NIM_ADD) failed".into())
-                .to_string(),
-            "platform error: tray install failed: Shell_NotifyIcon(NIM_ADD) failed"
+            Error::TrayInstall("Shell_NotifyIcon(NIM_ADD) failed".into()).to_string(),
+            "tray install failed: Shell_NotifyIcon(NIM_ADD) failed"
+        );
+        assert_eq!(
+            Error::MainThread.to_string(),
+            "must be created on the main thread"
+        );
+        assert_eq!(
+            Error::ThreadSpawn("resource limit".into()).to_string(),
+            "failed to spawn the muri tray thread: resource limit"
         );
         assert_eq!(
             Error::BadIcon("empty".into()).to_string(),
             "bad icon: empty"
         );
-        // Unsupported is preserved (not folded into a stringly Platform).
         assert_eq!(
             Error::Unsupported(Unsupported::TrayAnchor).to_string(),
             "unsupported on this platform: tray-anchored styled popup"
         );
+    }
+
+    #[test]
+    fn variants_are_matchable_by_kind() {
+        assert!(matches!(
+            Error::TrayInstall("x".into()),
+            Error::TrayInstall(_)
+        ));
+        assert!(matches!(Error::MainThread, Error::MainThread));
     }
 }

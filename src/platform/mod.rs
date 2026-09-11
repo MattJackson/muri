@@ -366,17 +366,15 @@ pub(crate) fn spawn_tray_thread(
                 eprintln!("muri: tray thread exited with error: {e}");
             }
         })
-        .map_err(|e| {
-            crate::error::Error::Platform(format!("failed to spawn muri tray thread: {e}"))
-        })?;
+        .map_err(|e| crate::error::Error::ThreadSpawn(e.to_string()))?;
 
     // Block until the tray thread has attempted the OS install and reported the
     // real result. A dropped sender (the thread panicked/returned before firing
     // the handshake) surfaces as an install error, never a hang.
     match wait.recv() {
         Ok(result) => result,
-        Err(_) => Err(crate::error::Error::Platform(
-            "tray install failed: muri tray thread exited before reporting the tray install".into(),
+        Err(_) => Err(crate::error::Error::TrayInstall(
+            "muri tray thread exited before reporting the tray install".into(),
         )),
     }
 }
@@ -400,15 +398,13 @@ mod handshake_tests {
         // DEVICE-VERIFY(0.10.8): a true Shell_NotifyIcon(NIM_ADD)/SNI failure on a
         // real Windows/Linux session flowing through this same seam to build_result.
         fn failing(_tray: Tray, report: &InstallReport) -> Result<()> {
-            let _ = report.send(Err(Error::Platform(
-                "tray install failed: forced install failure".into(),
-            )));
+            let _ = report.send(Err(Error::TrayInstall("forced install failure".into())));
             Ok(())
         }
         let err = spawn_tray_thread(dummy_tray(), failing).unwrap_err();
         assert!(
-            matches!(&err, Error::Platform(m) if m.contains("install")),
-            "a reported install failure must surface as an install Platform error, got {err:?}"
+            matches!(err, Error::TrayInstall(_)),
+            "a reported install failure must surface as Error::TrayInstall, got {err:?}"
         );
     }
 
@@ -434,7 +430,7 @@ mod handshake_tests {
         }
         let err = spawn_tray_thread(dummy_tray(), dies_silently).unwrap_err();
         assert!(
-            matches!(&err, Error::Platform(m) if m.contains("install")),
+            matches!(err, Error::TrayInstall(_)),
             "a thread that never signals must not hang; got {err:?}"
         );
     }

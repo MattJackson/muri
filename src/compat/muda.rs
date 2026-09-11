@@ -115,6 +115,12 @@ impl From<crate::Error> for Error {
             crate::Error::Unsupported(u) => Error::Unsupported(u),
             crate::Error::BadIcon(s) => Error::BadIcon(s),
             crate::Error::Platform(s) => Error::Platform(s),
+            // muda's `Error` has no structured install/main-thread/thread-spawn
+            // variants, so muri's native structured kinds — and any future
+            // (`#[non_exhaustive]`) variant — collapse into muda's `Platform`
+            // catch-all, naming the kind in the message, so the facade stays
+            // byte-for-byte muda-shaped (#61).
+            other => Error::Platform(other.to_string()),
         }
     }
 }

@@ -284,9 +284,7 @@ impl Platform for LinuxPlatform {
         }
         .spawn()
         .map_err(|e| {
-            Error::Platform(format!(
-                "tray install failed: SNI/StatusNotifierItem registration failed: {e}"
-            ))
+            Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"))
         })?;
         // Re-install: shut the prior ksni service down before replacing it (#35).
         // ksni's blocking `Handle` has no `Drop` that unregisters, so simply
@@ -459,11 +457,10 @@ fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
             handle
         }
         Err(e) => {
-            let err = Error::Platform(format!(
-                "tray install failed: SNI/StatusNotifierItem registration failed: {e}"
-            ));
-            let _ = report.send(Err(Error::Platform(format!(
-                "tray install failed: SNI/StatusNotifierItem registration failed: {e}"
+            let err =
+                Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"));
+            let _ = report.send(Err(Error::TrayInstall(format!(
+                "SNI/StatusNotifierItem registration failed: {e}"
             ))));
             return Err(err);
         }

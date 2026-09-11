@@ -790,8 +790,8 @@ impl WindowsAnchor {
             null_mut(),
         );
         if hwnd.is_null() {
-            return Err(Error::Platform(
-                "tray install failed: could not create tray message window".into(),
+            return Err(Error::TrayInstall(
+                "could not create tray message window".into(),
             ));
         }
         self.hwnd = hwnd;
@@ -896,8 +896,8 @@ impl WindowsAnchor {
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
                 let _ = DestroyWindow(self.hwnd);
                 self.hwnd = null_mut();
-                return Err(Error::Platform(
-                    "tray install failed: Shell_NotifyIcon(NIM_ADD) failed".into(),
+                return Err(Error::TrayInstall(
+                    "Shell_NotifyIcon(NIM_ADD) failed".into(),
                 ));
             }
             self.installed = true;
@@ -919,9 +919,7 @@ impl WindowsAnchor {
                 Self::fill_tip(&tip, &mut nid.szTip);
             }
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
-                return Err(Error::Platform(
-                    "tray install failed: Shell_NotifyIcon re-add failed".into(),
-                ));
+                return Err(Error::TrayInstall("Shell_NotifyIcon re-add failed".into()));
             }
             self.installed = true;
         }
@@ -2371,10 +2369,10 @@ fn run_event_loop(mut tray: Tray, report: &super::InstallReport) -> Result<()> {
     // the return value.
     if let Err(e) = anchor.install(&tray.icon, tray.tooltip.as_deref()) {
         let msg = match &e {
-            Error::Platform(m) => m.clone(),
+            Error::TrayInstall(m) => m.clone(),
             other => other.to_string(),
         };
-        let _ = report.send(Err(Error::Platform(msg)));
+        let _ = report.send(Err(Error::TrayInstall(msg)));
         return Err(e);
     }
     let _ = report.send(Ok(()));
