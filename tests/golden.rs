@@ -120,6 +120,50 @@ fn golden_flush_right() {
     }
 }
 
+/// The newly-fixed paint paths that the original coverage matrix never
+/// exercised in a golden: a row with an explicit `Row::background` tint, a
+/// **trailing** icon column (issue A), a checked row, and a disabled row whose
+/// icon + text dim (issue E). Pixel output is the point here (the tint, the
+/// dimmed alpha, the trailing-column geometry), so it is pinned as a golden
+/// rather than asserted op-by-op. Light theme, scale 2.0.
+fn edge_paths_menu() -> Menu {
+    Menu::new()
+        .section_header(Row::info().label("Edge paths"))
+        .row(
+            Row::new("tinted")
+                .label("Tinted row")
+                .background(Color::Rgba(255, 214, 214, 255))
+                .trailing(Icon::Checkmark),
+        )
+        .row(
+            Row::new("acct")
+                .leading(Icon::Checkmark)
+                .checked(true)
+                .label("Checked account"),
+        )
+        .separator()
+        .row(
+            Row::new("disabled")
+                .leading(Icon::Checkmark)
+                .label("Disabled with icon")
+                .enabled(false),
+        )
+}
+
+/// Golden for the edge/newly-fixed paint paths (see [`edge_paths_menu`]).
+#[test]
+fn golden_edge_paths() {
+    let mut drawer = RasterDrawer::new_headless(2.0);
+    render_menu(
+        &mut drawer,
+        &edge_paths_menu(),
+        &Theme::light(),
+        &MenuOptions::default(),
+        None,
+    );
+    assert_golden("edge_paths-light-2x", drawer.framebuffer());
+}
+
 /// Cell 3 of the coverage matrix: every `Item` kind, light theme, scale 2.0.
 #[test]
 fn golden_item_kinds() {

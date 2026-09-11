@@ -1047,6 +1047,7 @@ fn draw_glyph_centered<D: SceneDrawer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Insets;
     use crate::menu::{Align, Flex, StyleRun, TextContent};
     use crate::style::Color;
     use std::sync::Arc;
@@ -1282,20 +1283,34 @@ mod tests {
     /// all-zero) so a dimmed-alpha blit is observable, and every op is recorded:
     /// fills (issue B), text colors (issue E checkmark dimming), and per-image
     /// alpha (issue E icon dimming).
-    #[derive(Default)]
+    ///
+    /// The extra `fill_radii`, `separators`, and `text_fonts` channels (added for
+    /// the theme-completeness guard) capture the *last* visually-meaningful inputs
+    /// the earlier channels dropped: a `fill_round_rect`'s corner radius, a
+    /// separator's color (the base drawer ignored both), and the resolved `Font`
+    /// each `draw_text` ran in (size/weight/family/tracking — none of which the
+    /// deterministic 7px/char metric reflects in the recorded x). With these, the
+    /// full op record differs whenever *any* `Theme` field reaches the paint layer.
+    #[derive(Default, PartialEq)]
     struct RecordingDrawer {
         texts: Vec<(String, f32, f32)>,        // (text, origin.x, origin.y)
         images: Vec<LogicalRect>,              // dest rects of draw_image[_alpha]
         fills: Vec<(LogicalRect, Rgba)>,       // (rect, color) of fill_round_rect
         text_colors: Vec<(String, Rgba)>,      // (text, resolved color) of draw_text
         image_alphas: Vec<(LogicalRect, f32)>, // (dest, alpha) of draw_image_alpha
+        fill_radii: Vec<f32>,                  // corner radius per fill_round_rect
+        separators: Vec<(LogicalRect, Rgba)>,  // (rect, color) of draw_separator
+        text_fonts: Vec<Font>,                 // the Font each draw_text ran in
     }
     impl SceneDrawer for RecordingDrawer {
         fn begin_frame(&mut self, _size: LogicalSize) {}
-        fn fill_round_rect(&mut self, r: LogicalRect, _cr: f32, c: Rgba) {
+        fn fill_round_rect(&mut self, r: LogicalRect, cr: f32, c: Rgba) {
             self.fills.push((r, c));
+            self.fill_radii.push(cr);
         }
-        fn draw_separator(&mut self, _r: LogicalRect, _c: Rgba) {}
+        fn draw_separator(&mut self, r: LogicalRect, c: Rgba) {
+            self.separators.push((r, c));
+        }
         fn measure_text(&self, text: &str, _font: &Font) -> f32 {
             text.chars().count() as f32 * 7.0
         }
@@ -1306,6 +1321,7 @@ mod tests {
             self.texts
                 .push((run.text.to_string(), run.origin.x, run.origin.y));
             self.text_colors.push((run.text.to_string(), run.color));
+            self.text_fonts.push(run.font.clone());
         }
         fn draw_image(&mut self, rgba: &[u8], w: u32, h: u32, dest: LogicalRect) {
             self.draw_image_alpha(rgba, w, h, dest, 1.0);
@@ -1883,6 +1899,508 @@ mod tests {
         assert!(
             !d.fills.iter().any(|(_, c)| *c == accent),
             "hover fill must NOT use accent"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Deliverable 1: "no dead visual field" theme completeness.
+    //
+    // Generalizes `row_highlight_uses_the_theme_field` into a table over EVERY
+    // visually-meaningful `Theme` field: render one rich menu twice — once on a
+    // base theme, once with a single field bumped to a clearly-different value —
+    // and assert the *full* recorded op stream differs. A field that leaves the
+    // op stream untouched is either dead (a paint-layer bug of the "attribute set
+    // but silently not rendered" class) or legitimately conditional (documented).
+    // -------------------------------------------------------------------------
+
+    /// A menu that exercises every field-consuming code path at once: a section
+    /// header (`header_font` + `secondary_label`), a checked row (an accent
+    /// checkmark in a reserved gutter — `accent` + `column_gap`), a plain enabled
+    /// row (`label`; the highlight target — `row_highlight`), a disabled row
+    /// (`secondary_label`), a separator (`separator`), and a final plain row
+    /// whose un-highlighted text reads `label`. The whole thing paints on the
+    /// popup `background` at `corner_radius`, inset by `padding`, at `row_height`.
+    fn field_probe_menu() -> Menu {
+        Menu::new()
+            .section_header(Row::info().label("Header"))
+            .row(Row::new("checked").checked(true).label("Checked"))
+            .row(Row::new("plain").label("Plain"))
+            .row(Row::new("disabled").label("Disabled").enabled(false))
+            .separator()
+            .row(Row::new("last").label("Last"))
+    }
+
+    /// Record every draw op for `field_probe_menu` on `theme`, highlighting the
+    /// plain enabled row (index 2) so `row_highlight` is exercised while the
+    /// checked row's accent checkmark and the final row's `label` text stay
+    /// un-inverted.
+    fn probe_ops(theme: &Theme) -> RecordingDrawer {
+        let mut d = RecordingDrawer::default();
+        render_menu(
+            &mut d,
+            &field_probe_menu(),
+            theme,
+            &MenuOptions::default(),
+            Some(2),
+        );
+        d
+    }
+
+    #[test]
+    fn every_theme_field_reaches_the_paint_layer() {
+        // (name, mutator) for each visually-meaningful `Theme` field. Each mutator
+        // sets its field to a value clearly distinct from `Theme::light()`'s.
+        type Mutator = fn(&mut Theme);
+        let fields: &[(&str, Mutator)] = &[
+            ("background", |t| t.background = Color::rgb(1, 2, 3)),
+            ("label", |t| t.label = Color::rgb(1, 2, 3)),
+            ("secondary_label", |t| {
+                t.secondary_label = Color::rgb(4, 5, 6)
+            }),
+            ("accent", |t| t.accent = Color::rgb(7, 8, 9)),
+            ("separator", |t| t.separator = Color::rgb(10, 11, 12)),
+            ("row_highlight", |t| {
+                t.row_highlight = Color::rgb(13, 14, 15)
+            }),
+            ("row_font", |t| {
+                t.row_font = Font::system(30.0, Weight::Bold)
+            }),
+            ("header_font", |t| {
+                t.header_font = Font::system(30.0, Weight::Bold)
+            }),
+            ("row_font.letter_spacing", |t| {
+                t.row_font = t.row_font.clone().with_letter_spacing(5.0)
+            }),
+            ("row_height", |t| t.row_height += 40.0),
+            ("corner_radius", |t| t.corner_radius += 20.0),
+            ("padding", |t| t.padding = Insets::symmetric(40.0, 40.0)),
+            ("column_gap", |t| t.column_gap += 30.0),
+        ];
+
+        let base = Theme::light();
+        let base_ops = probe_ops(&base);
+
+        for (name, mutate) in fields {
+            let mut variant = base.clone();
+            mutate(&mut variant);
+            let variant_ops = probe_ops(&variant);
+            assert!(
+                base_ops != variant_ops,
+                "Theme::{name} did not change any recorded draw op — the field is \
+                 either dead (set but never rendered) or not exercised by \
+                 field_probe_menu(); investigate before assuming it's inert",
+            );
+        }
+    }
+
+    /// Documents a genuine field/consumer nuance the completeness table would
+    /// otherwise paper over: `corner_radius`'s doc says it rounds "the popup and
+    /// highlight", but the paint layer only feeds it to the popup-background
+    /// `fill_round_rect`; the hover highlight uses a fixed 5.0 radius. So
+    /// `corner_radius` DOES reach paint (via the panel), but NOT via the
+    /// highlight. This is intentional (a fixed selection radius), recorded here so
+    /// the discrepancy is a known, asserted fact rather than a silent surprise.
+    #[test]
+    fn corner_radius_rounds_the_panel_not_the_highlight() {
+        let mut theme = Theme::light();
+        theme.corner_radius = 17.0;
+        let mut d = RecordingDrawer::default();
+        render_menu(
+            &mut d,
+            &Menu::new().row(Row::new("a").label("Alpha")),
+            &theme,
+            &MenuOptions::default(),
+            Some(0),
+        );
+        // The panel background is the first fill and carries theme.corner_radius.
+        assert_eq!(
+            d.fill_radii.first().copied(),
+            Some(17.0),
+            "the popup background must be rounded at theme.corner_radius"
+        );
+        // No fill uses the theme radius for the highlight; the highlight's 5.0 is
+        // present and distinct.
+        assert!(
+            d.fill_radii.iter().any(|r| (*r - 5.0).abs() < f32::EPSILON),
+            "the hover highlight uses a fixed 5.0 radius, not corner_radius; \
+             radii={:?}",
+            d.fill_radii
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Deliverable 2: measure == draw.
+    //
+    // The laid-out popup size (`LaidMenu::size`) must bound every primitive the
+    // draw pass emits: in no-width-clamp mode the popup is sized exactly to its
+    // content + padding, so the max extent of the recorded ops equals the
+    // reported size on both axes (the full-panel background fill reaches the far
+    // corner; nothing may exceed it). A primitive escaping the measured rect is a
+    // real measure/layout mismatch.
+    // -------------------------------------------------------------------------
+
+    /// The bottom-right-most extent of every recorded op (text advanced at the
+    /// drawer's 7px/char + 14px line-height metric, plus image/fill/separator
+    /// rects). Returns `(max_x, max_y, min_x, min_y)`.
+    fn op_extents(d: &RecordingDrawer) -> (f32, f32, f32, f32) {
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut acc = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            min_x = min_x.min(x0);
+            min_y = min_y.min(y0);
+            max_x = max_x.max(x1);
+            max_y = max_y.max(y1);
+        };
+        for (t, x, y) in &d.texts {
+            acc(*x, *y, x + t.chars().count() as f32 * 7.0, y + 14.0);
+        }
+        for r in &d.images {
+            acc(r.origin.x, r.origin.y, r.max_x(), r.max_y());
+        }
+        for (r, _) in &d.fills {
+            acc(r.origin.x, r.origin.y, r.max_x(), r.max_y());
+        }
+        for (r, _) in &d.separators {
+            acc(r.origin.x, r.origin.y, r.max_x(), r.max_y());
+        }
+        (max_x, max_y, min_x, min_y)
+    }
+
+    #[test]
+    fn measured_size_bounds_every_drawn_primitive() {
+        let logo: Arc<[u8]> = Arc::from(vec![0u8; 8]);
+        let long = "a-very-long-account-label-that-would-overflow@example.com";
+        let cases: Vec<(&str, Menu)> = vec![
+            ("empty", Menu::new()),
+            ("single", Menu::new().row(Row::new("a").label("Alpha"))),
+            (
+                "many_rows",
+                (0..20).fold(Menu::new(), |m, i| {
+                    m.row(Row::new(format!("r{i}")).label(format!("Row {i}")))
+                }),
+            ),
+            ("long_label", Menu::new().row(Row::new("a").label(long))),
+            (
+                "icons_lead_and_trail",
+                Menu::new().row(
+                    Row::new("a")
+                        .leading(Icon::Png(logo.clone()))
+                        .label("Withicons")
+                        .trailing(Icon::Checkmark),
+                ),
+            ),
+            (
+                "headers_seps_submenu_checks",
+                Menu::new()
+                    .section_header(Row::info().label("Header"))
+                    .row(Row::new("c").checked(true).label("Checked").enabled(false))
+                    .separator()
+                    .submenu(Row::new("more").label("More"), Menu::new())
+                    .row(Row::new("d").checked(false).label("Unchecked")),
+            ),
+            (
+                "flush_right",
+                Menu::new().row(Row::new("a").segments(vec![
+                    Segment::new(long).flex(Flex::Grow),
+                    Segment::new("100%").align(Align::Right),
+                ])),
+            ),
+            (
+                "unicode",
+                Menu::new().row(Row::new("u").label("café 日本語 🎉 Ω")),
+            ),
+        ];
+
+        // No-clamp width: min tiny, max huge — the popup is sized exactly to its
+        // content, so extents must meet the reported size, never merely fit under
+        // a min/max floor/ceiling.
+        let opts = MenuOptions::default().min_width(1.0).max_width(100_000.0);
+        const TOL: f32 = 1.0;
+
+        for (name, menu) in &cases {
+            for highlight in [None, Some(0usize)] {
+                let mut d = RecordingDrawer::default();
+                let laid = render_menu(&mut d, menu, &Theme::light(), &opts, highlight);
+                let (w, h) = (laid.size.width, laid.size.height);
+                assert!(w.is_finite() && h.is_finite(), "{name}: non-finite size");
+
+                // The popup background fill is the whole measured rect.
+                let (bg_rect, _) = d.fills.first().expect("a panel background fill");
+                assert!(
+                    (bg_rect.origin.x).abs() < TOL
+                        && (bg_rect.origin.y).abs() < TOL
+                        && (bg_rect.max_x() - w).abs() < TOL
+                        && (bg_rect.max_y() - h).abs() < TOL,
+                    "{name}: panel background must equal the measured size {:?}, got {bg_rect:?}",
+                    laid.size
+                );
+
+                let (max_x, max_y, min_x, min_y) = op_extents(&d);
+                // Nothing escapes the measured rect (draw fits measure).
+                assert!(
+                    min_x >= -TOL && min_y >= -TOL,
+                    "{name} (hl={highlight:?}): a primitive starts before the popup origin \
+                     (min_x={min_x}, min_y={min_y})"
+                );
+                assert!(
+                    max_x <= w + TOL && max_y <= h + TOL,
+                    "{name} (hl={highlight:?}): a primitive overflows the measured size \
+                     {w}x{h} (max_x={max_x}, max_y={max_y}) — a measure/draw mismatch"
+                );
+                // ...and the measured size is snug: the drawn ops actually reach
+                // both far edges (measure == draw, not measure > draw).
+                assert!(
+                    (max_x - w).abs() < TOL && (max_y - h).abs() < TOL,
+                    "{name} (hl={highlight:?}): measured size {w}x{h} exceeds the drawn extent \
+                     (max_x={max_x}, max_y={max_y}) — the popup is larger than what it paints"
+                );
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Deliverable 3: edge-case + newly-fixed-path coverage (RecordingDrawer).
+    // -------------------------------------------------------------------------
+
+    /// Every `Icon` variant renders in BOTH the leading and the trailing slot —
+    /// the per-slot generalization of `draw_icon_funnel_draws_every_icon_variant`,
+    /// guarding that neither slot silently swallows a variant.
+    #[test]
+    fn every_icon_variant_renders_in_leading_and_trailing_slots() {
+        let png: Arc<[u8]> = Arc::from(vec![1u8; 4]);
+        let svg: Arc<[u8]> = Arc::from(vec![2u8; 4]);
+        let variants: Vec<(&str, Icon)> = vec![
+            ("Png", Icon::Png(png)),
+            ("Svg", Icon::Svg(svg)),
+            ("Checkmark", Icon::Checkmark),
+            ("Symbol", Icon::Symbol("gear")),
+        ];
+        for (name, icon) in variants {
+            for slot in ["leading", "trailing"] {
+                let row = if slot == "leading" {
+                    Row::new("r").leading(icon.clone()).label("Label")
+                } else {
+                    Row::new("r").label("Label").trailing(icon.clone())
+                };
+                let mut d = RecordingDrawer::default();
+                render_menu(
+                    &mut d,
+                    &Menu::new().row(row),
+                    &Theme::dark(),
+                    &MenuOptions::default(),
+                    None,
+                );
+                let ops = d.images.len() + d.texts.len();
+                // An image icon blits; a glyph icon draws text. Either way, the
+                // slot must emit strictly more than the bare "Label" text alone.
+                assert!(
+                    ops > 1,
+                    "Icon::{name} in the {slot} slot emitted no icon draw op (only \
+                     the label); images={} texts={:?}",
+                    d.images.len(),
+                    d.texts
+                );
+            }
+        }
+    }
+
+    /// A disabled row with BOTH a leading and a trailing image icon dims each blit
+    /// to `DISABLED_ALPHA` (issue E, extended to the trailing slot).
+    #[test]
+    fn disabled_row_dims_both_leading_and_trailing_icons() {
+        let lead: Arc<[u8]> = Arc::from(vec![3u8; 4]);
+        let trail: Arc<[u8]> = Arc::from(vec![4u8; 4]);
+        let menu = Menu::new().row(
+            Row::new("a")
+                .leading(Icon::Png(lead))
+                .label("Both")
+                .trailing(Icon::Png(trail))
+                .enabled(false),
+        );
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        assert_eq!(d.image_alphas.len(), 2, "both icons must blit");
+        assert!(
+            d.image_alphas
+                .iter()
+                .all(|(_, a)| (*a - DISABLED_ALPHA).abs() < 1e-6),
+            "a disabled row must dim BOTH its leading and trailing icons; got {:?}",
+            d.image_alphas
+        );
+    }
+
+    /// A disabled row carrying a leading icon AND a checkmark column: the icon
+    /// wins the gutter (leading takes precedence over `checked`), and it dims. The
+    /// row's own text also dims via `secondary_label`. Proves the disabled path is
+    /// coherent when both a checkable state and an icon are requested.
+    #[test]
+    fn disabled_row_with_icon_and_checked_dims_and_prefers_the_icon() {
+        let icon: Arc<[u8]> = Arc::from(vec![5u8; 4]);
+        let menu = Menu::new().row(
+            Row::new("a")
+                .leading(Icon::Png(icon))
+                .checked(true)
+                .label("Item")
+                .enabled(false),
+        );
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        // The leading icon occupies the gutter — no checkmark glyph is drawn.
+        assert!(
+            !d.texts.iter().any(|(t, ..)| t == "\u{2713}"),
+            "a leading icon must win the gutter over the checkmark; texts={:?}",
+            d.texts
+        );
+        // The icon blits dimmed.
+        assert_eq!(d.image_alphas.len(), 1);
+        assert!((d.image_alphas[0].1 - DISABLED_ALPHA).abs() < 1e-6);
+        // The label dims to secondary_label (not the enabled label color).
+        let label = d
+            .text_colors
+            .iter()
+            .find(|(t, _)| t == "Item")
+            .expect("label drawn");
+        assert_eq!(
+            label.1,
+            Theme::dark().resolve(Theme::dark().secondary_label)
+        );
+    }
+
+    /// Three overlapping style runs composite last-wins across the whole overlap,
+    /// not just pairwise — extends `issue_d` to prove the walk-all-runs loop has no
+    /// early-out for any depth of overlap.
+    #[test]
+    fn three_overlapping_style_runs_last_wins() {
+        let seg = Segment::new("abc").runs(vec![
+            StyleRun::new(0, 3, Color::SystemRed),    // a b c
+            StyleRun::new(0, 2, Color::SystemGreen),  // a b
+            StyleRun::new(1, 2, Color::SystemYellow), // b c  (latest over b, c)
+        ]);
+        let theme = Theme::light();
+        let pieces = style_pieces(&seg, Rgba::BLACK, Weight::Regular, &theme, false);
+        // a: red then green -> green wins. b: red, green, yellow -> yellow.
+        // c: red, yellow -> yellow. Adjacent same-color chars merge, so 'b' and
+        // 'c' coalesce into one "bc" yellow piece.
+        assert_eq!(
+            pieces,
+            vec![
+                (
+                    "a".to_string(),
+                    theme.resolve(Color::SystemGreen),
+                    Weight::Regular
+                ),
+                (
+                    "bc".to_string(),
+                    theme.resolve(Color::SystemYellow),
+                    Weight::Regular
+                ),
+            ],
+            "last-wins across a 3-deep overlap, with same-color chars merged"
+        );
+    }
+
+    /// An empty menu still lays out to a finite, sane popup (the default min
+    /// width, padding-only height) with a single background fill and no rows —
+    /// no panic, no degenerate/`NaN` geometry.
+    #[test]
+    fn empty_menu_lays_out_to_a_finite_padded_popup() {
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(
+            &mut d,
+            &Menu::new(),
+            &Theme::light(),
+            &MenuOptions::default(),
+            None,
+        );
+        assert!(laid.rows.is_empty());
+        assert_eq!(laid.size.width, DEFAULT_MIN_WIDTH);
+        let pad = Theme::light().padding;
+        assert!((laid.size.height - (pad.top + pad.bottom)).abs() < f32::EPSILON);
+        assert_eq!(d.fills.len(), 1, "only the panel background is filled");
+    }
+
+    /// A multi-byte / unicode label round-trips through layout and hit-testing:
+    /// the exact string is drawn once, and a click at the row center maps back to
+    /// its id (no UTF-16/char-index confusion breaks measurement or hit rects).
+    #[test]
+    fn unicode_label_renders_and_hit_tests() {
+        let label = "café 日本語 🎉 Ω";
+        let menu = Menu::new().row(Row::new("u").label(label));
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(
+            &mut d,
+            &menu,
+            &Theme::light(),
+            &MenuOptions::default(),
+            None,
+        );
+        assert!(
+            d.texts.iter().any(|(t, ..)| t == label),
+            "the unicode label must be drawn verbatim; texts={:?}",
+            d.texts
+        );
+        let row = &laid.rows[0];
+        let center = LogicalPoint::new(
+            row.rect.origin.x + row.rect.size.width / 2.0,
+            row.rect.origin.y + row.rect.size.height / 2.0,
+        );
+        assert_eq!(laid.id_at(center).unwrap().as_str(), "u");
+    }
+
+    /// A "kitchen sink" menu mixing every top-level `Item` kind — header, plain
+    /// row, checked+disabled row, row with leading+trailing icons and a background
+    /// tint, a separator, a submenu, and a `Content` stack — lays out without
+    /// panicking, paints its explicit row background, and reports exactly the
+    /// interactive rows (plain row + submenu; the checked row is disabled).
+    #[test]
+    fn kitchen_sink_menu_paints_all_item_kinds() {
+        let logo: Arc<[u8]> = Arc::from(vec![6u8; 8]);
+        let menu = Menu::new()
+            .section_header(Row::info().label("Section"))
+            .row(Row::new("plain").label("Plain"))
+            .row(
+                Row::new("cd")
+                    .checked(true)
+                    .enabled(false)
+                    .label("CheckedDisabled"),
+            )
+            .row(
+                Row::new("fancy")
+                    .leading(Icon::Png(logo.clone()))
+                    .label("Fancy")
+                    .trailing(Icon::Checkmark)
+                    .background(Color::SystemRed),
+            )
+            .separator()
+            .submenu(Row::new("more").label("More"), Menu::new())
+            .content(
+                Stack::horizontal(2.0)
+                    .child(Content::Text(TextContent::new("Extra")))
+                    .child(Content::Image {
+                        icon: Icon::Png(logo),
+                        size: 16.0,
+                    }),
+            );
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        // Interactive rows: "plain", "fancy", and the submenu "more" (the checked
+        // row is disabled; header/separator/content are never interactive).
+        assert_eq!(laid.rows.iter().filter(|r| r.interactive).count(), 3);
+        // The fancy row's explicit background is painted.
+        let want = Theme::dark().resolve(Color::SystemRed);
+        assert!(
+            d.fills.iter().any(|(_, c)| *c == want),
+            "the tinted row's background must be filled"
+        );
+        // The fancy row's leading image and the content stack's image blit; its
+        // trailing Checkmark is a glyph, drawn as text, not an image.
+        assert_eq!(d.images.len(), 2, "leading and content icons blit");
+        assert!(
+            d.texts.iter().any(|(t, ..)| t == "\u{2713}"),
+            "the trailing checkmark glyph is drawn"
         );
     }
 }
