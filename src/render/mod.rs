@@ -2247,6 +2247,41 @@ mod tests {
         );
     }
 
+    /// #65 (hermetic): a single registered **variable** face with a `wght` axis
+    /// must resolve a bold request to a variable-weight instance — never
+    /// downgrade to the regular face or fall back to synthetic faux-bold. This is
+    /// the exact modern-macOS SF scenario (one variable file, no discrete bold),
+    /// but hermetic: it uses a bundled variable DejaVu fixture (a `wght` fvar axis
+    /// added to the DejaVu master) so the wght-instancing DECISION is covered on
+    /// EVERY host, not only where the live `SFNS.ttf` exists. Pixel-level bold
+    /// heaviness stays covered by
+    /// `native_sf_variable_font_renders_bold_via_wght_instancing` on macOS hosts
+    /// (the fixture carries no `gvar` deltas, so instancing it doesn't move ink —
+    /// only the *decision* to instance is under test here).
+    #[test]
+    fn variable_face_resolves_bold_via_wght_instancing_not_downgrade() {
+        const VAR: &[u8] = include_bytes!("../../tests/fonts/variable-wght-test.ttf");
+        let mut db = Database::new();
+        db.load_font_data(VAR.to_vec());
+        // A modified, Basic-Latin subset of the DejaVu master with a synthetic
+        // `wght` fvar axis added — renamed off the reserved "DejaVu" name since
+        // it is a derivative test artifact, not the real font product.
+        let d = RasterDrawer::from_parts(1.0, db, Some("Muri Var Test".to_string()));
+
+        let regular = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        let bold = d.fonts.resolve_face(&FontFamily::System, 700).unwrap();
+        assert_eq!(
+            regular, bold,
+            "one variable face: a bold request resolves to the same master"
+        );
+        let emb = d.fonts.face_embolden(bold, 700);
+        assert!(
+            matches!(emb, Embolden::Variable(_)),
+            "a variable face with a wght axis must instance the axis for bold, \
+             not downgrade or synthesize (#65): got {emb:?}"
+        );
+    }
+
     /// spec §7.1's font-fallback layer: when a primary face is pinned but has
     /// no glyph for a codepoint, and the headless (DejaVu-only) db has no
     /// dedicated fallback family that covers it either (no color-emoji face

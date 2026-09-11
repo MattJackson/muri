@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-11
+
+First breaking release: the compat `tray_icon::Rect.size` type change (below) is
+a major bump per SemVer. Also a batch of macOS live-popup fidelity fixes measured
+against a real `NSMenu` on Tahoe (macOS 26), and the bundled OSS UI fonts are now
+on by default.
+
+### Breaking
+
+- **`compat::tray_icon::Rect.size` is now a `PhysicalSize`, not a `(f64, f64)`
+  tuple (F4).** It mirrors `tray-icon`'s `dpi::PhysicalSize` (like the existing
+  `PhysicalPosition`), so the drop-in facade matches upstream's shape. Update
+  `rect.size.0` / `.1` to `rect.size.width` / `.height`.
+- **`bundled-fonts` is now a default feature.** A forced foreign look (e.g. a
+  macOS menu on Windows) renders in its close OSS typeface out of the box. This
+  embeds ~1.4 MB of TTFs; drop it with `default-features = false` (re-add
+  `x11-popup` if you want the Linux styled popup).
+
+### Fixed
+
+- **Live macOS row pitch is now measured from a real `NSMenu` (#67).** The live
+  System path reads AppKit's own computed `NSMenu.size` per-row pitch instead of a
+  magic `1.82` ratio (kept only as a fallback). Matches the measured native 24pt
+  rows on Tahoe.
+- **Live macOS popup corner radius is version-aware (#67).** Tahoe (macOS 26+)
+  enlarged the menu corner to 12pt (measured via `_cornerRadius` on a live
+  `NSPopupMenuWindow`); pre-Tahoe keeps ~6pt. There is no stable public API for
+  the live value, so it is a version-gated constant. The forced preset and its
+  goldens are unchanged.
+- **Live macOS menu no longer over-tightens letters (#66).** The negative SF
+  tracking that made adjacent letters touch is dropped on the live System path (a
+  native `NSMenu` adds no extra tracking beyond the font metrics). The forced
+  preset keeps its frozen value.
+- **macOS menu backdrop follows the OS material (#68).** On a Liquid Glass system
+  (detected by `NSGlassEffectView` existing at runtime, not a hardcoded version)
+  the popup is drawn on glass like a native Tahoe `NSMenu`; on earlier systems it
+  keeps the `NSVisualEffectView(Material::Menu)` vibrancy, now emphasized to match
+  native density.
+- **macOS popup dismisses on a Space switch (#69).** A three-finger swipe /
+  Mission Control Space change now closes the popup like a native `NSMenu`, via an
+  `NSWorkspaceActiveSpaceDidChange` observer.
+- **macOS popup shows the arrow cursor, not the I-beam (#70).** The arrow is now
+  pushed/popped across the pointer entering and leaving the panel, so it stays
+  authoritative instead of a transient `set()` the I-beam reasserted between
+  moves.
+- **Variable system-font bold no longer risks downgrading (#65).** The macOS
+  system-font path detects a variable (`wght`-axis) regular and registers it as a
+  single face, letting the render layer instance bold via the axis (#63) rather
+  than searching for a discrete bold file. Covered by a new hermetic
+  variable-font test.
+
+### Internal
+
+- Relocated macOS-only helpers (`pack_dual_face`, the live row-pitch helper) into
+  `src/platform/mac.rs` per ADR-0002, clearing all cross-target dead-code
+  warnings (verified via a Linux cross-check).
+
 ## [0.11.3] - 2026-09-11
 
 ### Fixed

@@ -2066,12 +2066,13 @@ fn nsmenu_layout_height(mtm: MainThreadMarker, items: usize) -> Option<f32> {
 
 /// Tahoe (macOS 26+) live-`System` popup corner radius in logical points (#67).
 /// Apple's Liquid Glass redesign enlarged the menu corner from the Big
-/// Sur..Sequoia ~6pt to ~12–13pt. There is no public API exposing the live value
-/// (the private `_cornerMask` returns a bitmap mask, not a radius, and overriding
-/// it is a known Tahoe WindowServer performance hazard), so — like every other
-/// toolkit that draws its own menu chrome (e.g. Firefox) — this is a
-/// version-gated estimate. DEVICE-VERIFY(0.12.0).
-const MACOS_CORNER_RADIUS_TAHOE: f32 = 13.0;
+/// Sur..Sequoia ~6pt to **12pt**, measured exactly on macOS 26.6.2 (build 25G83,
+/// arm64) by reading the private `_cornerRadius` KVC key off a live
+/// `NSPopupMenuWindow` during tracking (see #67). No stable *public* API exposes
+/// the live value, and reading the private key every popup is fragile, so — like
+/// every other toolkit that draws its own menu chrome (e.g. Firefox) — muri ships
+/// this as a version-gated constant seeded from that one measurement.
+const MACOS_CORNER_RADIUS_TAHOE: f32 = 12.0;
 
 /// The live-`System` popup corner radius in logical points for the host's macOS
 /// version (#67). Pre-Tahoe reuses the frozen preset value

@@ -185,3 +185,16 @@ has requested that any alterations which yield different font metrics be
 given a different name.
 
 $Id$
+
+
+-------------------------------------------------------------------------------
+Derived test fixture: variable-wght-test.ttf
+-------------------------------------------------------------------------------
+
+`variable-wght-test.ttf` is a modified derivative of DejaVuSans.ttf (above),
+created solely as a unit-test fixture: subset to Basic Latin (U+0020..U+007E)
+with a synthetic `wght` variation axis (fvar, 400..900, no gvar deltas) added.
+Per the Bitstream Vera / DejaVu terms, this modified version does NOT use the
+reserved names — its family is renamed to "Muri Var Test". It is not intended
+for use as a font; it exists only to exercise muri's variable-font bold
+(wght-axis instancing) decision path hermetically.

@@ -4,9 +4,10 @@
 //! `Borderless | NonactivatingPanel` style, floating + `becomesKeyOnlyIfNeeded`
 //! so it can take keyboard focus for menu navigation **without deactivating the
 //! user's foreground app**, at the pop-up-menu window level so it floats above
-//! everything. Its content view is an [`NSVisualEffectView`] backdrop (the OS
-//! vibrancy blur) hosting a layer-backed [`MuriView`] that the raster pixmap is
-//! blitted into (see [`super::present`]).
+//! everything. Its content view is the OS's own menu backdrop — an
+//! `NSGlassEffectView` (Liquid Glass) on a Tahoe-era host, else an
+//! [`NSVisualEffectView`] vibrancy blur — hosting a layer-backed [`MuriView`]
+//! that the raster pixmap is blitted into (see [`super::present`]).
 //!
 //! The responder subclasses ([`MuriView`], [`MuriWindowDelegate`]) never touch
 //! the shared [`super::AppState`] directly: every callback enqueues a
@@ -20,9 +21,10 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSCursor, NSPanel, NSPopUpMenuWindowLevel, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindowDelegate, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSCursor, NSGlassEffectView, NSPanel, NSPopUpMenuWindowLevel,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
@@ -219,6 +221,17 @@ pub(super) struct NativePanel {
     pub delegate: Retained<MuriWindowDelegate>,
 }
 
+/// Whether the running OS draws menus with the Liquid Glass material — detected
+/// by asking the Objective-C runtime whether `NSGlassEffectView` exists, rather
+/// than gating on a hardcoded macOS version (#68). `true` on Tahoe (macOS 26+)
+/// where a native `NSMenu`'s background is an `NSGlassView`; `false` on every
+/// earlier system, where the classic `NSVisualEffectView(Material::Menu)`
+/// vibrancy is the correct menu material. Reading the material from the OS this
+/// way keeps muri matching whatever the host actually uses.
+fn glass_backdrop_available() -> bool {
+    objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
+}
+
 /// Create a non-activating vibrant panel at `content_rect` (screen coordinates,
 /// AppKit bottom-left origin) sized in points, its content view rounded to
 /// `corner_radius`. The panel is *not* shown; the caller orders it front.
@@ -255,29 +268,44 @@ pub(super) fn make_panel(
 
     let bounds = NSRect::new(NSPoint::new(0.0, 0.0), content_rect.size);
 
-    // Vibrancy backdrop: the OS composites the real behind-window menu blur
-    // here; the raster layer sits above it. Rounded via a corner-radius mask so
-    // the blur takes muri's panel shape, not a square.
-    let effect: Retained<NSVisualEffectView> =
-        NSVisualEffectView::initWithFrame(mtm.alloc(), bounds);
-    effect.setMaterial(NSVisualEffectMaterial::Menu);
-    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    effect.setState(NSVisualEffectState::Active);
-    // Emphasized darkens/saturates the `Menu` material toward a native `NSMenu`'s
-    // density — without it the vibrancy reads lighter than the real menu (#68).
-    // DEVICE-VERIFY(0.12.0): confirm the emphasized tint matches native NSMenu.
-    effect.setEmphasized(true);
-    effect.setWantsLayer(true);
-    if let Some(layer) = effect.layer() {
-        layer.setCornerRadius(corner_radius as f64);
-        layer.setMasksToBounds(true);
-    }
-    panel.setContentView(Some(&effect));
-
-    // The layer-backed raster surface, on top of the backdrop.
+    // The layer-backed raster surface the pixmap is blitted into.
     let view = MuriView::new(mtm, bounds, kind);
     view.setWantsLayer(true);
-    effect.addSubview(&view);
+
+    // Backdrop: read the menu material from the OS itself. On a Liquid Glass
+    // system a native `NSMenu` is drawn on `NSGlassView` glass, not the classic
+    // vibrancy material (#68), so when `NSGlassEffectView` exists use glass and
+    // host the raster as its content; on every earlier system fall back to the
+    // vibrancy `Material::Menu`. Detecting the material by class-presence (not a
+    // hardcoded OS version) means muri renders whatever the running OS actually
+    // uses for menus, and whatever is normal for the user's UI otherwise.
+    if glass_backdrop_available() {
+        let glass: Retained<NSGlassEffectView> =
+            NSGlassEffectView::initWithFrame(mtm.alloc(), bounds);
+        // Glass rounds itself natively — no layer mask needed.
+        glass.setCornerRadius(corner_radius as f64);
+        glass.setContentView(Some(&view));
+        panel.setContentView(Some(&glass));
+    } else {
+        // Vibrancy backdrop: the OS composites the real behind-window menu blur
+        // here; the raster layer sits above it. Rounded via a corner-radius mask
+        // so the blur takes muri's panel shape, not a square.
+        let effect: Retained<NSVisualEffectView> =
+            NSVisualEffectView::initWithFrame(mtm.alloc(), bounds);
+        effect.setMaterial(NSVisualEffectMaterial::Menu);
+        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        effect.setState(NSVisualEffectState::Active);
+        // Emphasized darkens/saturates the pre-Liquid-Glass `Menu` material
+        // toward a native `NSMenu`'s density (#68).
+        effect.setEmphasized(true);
+        effect.setWantsLayer(true);
+        if let Some(layer) = effect.layer() {
+            layer.setCornerRadius(corner_radius as f64);
+            layer.setMasksToBounds(true);
+        }
+        effect.addSubview(&view);
+        panel.setContentView(Some(&effect));
+    }
 
     // Deliver `mouseMoved:` to the view regardless of key/active state so hover
     // highlighting works on the non-activating panel.
@@ -306,7 +334,8 @@ pub(super) fn make_panel(
     panel.setDelegate(Some(proto));
     panel.setInitialFirstResponder(Some(&view));
 
-    let _ = effect; // retained by the panel as its content view
+    // The backdrop (glass or vibrancy) is retained by the panel as its content
+    // view; the raster `view` is retained by whichever backdrop hosts it.
     NativePanel {
         panel,
         view,

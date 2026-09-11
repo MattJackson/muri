@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.11.3"
+version = "0.12.0"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -204,7 +204,7 @@ wayland-client = { version = "0.31", optional = true }
 accesskit_unix = { version = "0.13", optional = true }
 
 [features]
-default = ["x11-popup"]
+default = ["x11-popup", "bundled-fonts"]
 # Linux only: the styled, pointer-anchored `ContextMenu::open_at` popup (spec 22 §2
 # Path 2), which pulls the pure-Rust `x11rb` X11 client. On by default for
 # back-compat and `muda-compat` parity; a tray-only consumer can opt out with
@@ -248,14 +248,17 @@ muda-compat = []
 # Embed freely-redistributable OSS UI-font substitutes for the *forced* platform
 # looks (`ThemeSource::MacOs`/`Windows`/`Gnome`), so a forced foreign look can
 # render in a close typeface even when the real target font isn't installed on the
-# host — without ever silently drawing the wrong-OS host font (issue #54). OFF by
-# default to keep the crate small: the vendored TTFs (Inter for SF Pro, Microsoft's
-# own OFL Selawik for Segoe UI, genuine Cantarell for GNOME — all SIL OFL 1.1) are
-# `include_bytes!`-embedded only when this is on. See `assets/fonts/README.md` for
-# the substitutes, licenses, and sources. Pure cross-platform code (feature-gated,
-# never `cfg(target_os)`-gated): the bundled font is registered into the forced
-# theme's fontdb as a fallback tier — tried only after the real target font is
-# found absent, and always before reaching for a host UI face.
+# host — without ever silently drawing the wrong-OS host font (issue #54). ON by
+# default (0.12.0) so a forced foreign look (e.g. a macOS menu on Windows) always
+# renders in its close typeface out of the box; a size-sensitive consumer can drop
+# it with `default-features = false`. The vendored TTFs (Inter for SF Pro,
+# Microsoft's own OFL Selawik for Segoe UI, genuine Cantarell for GNOME — all SIL
+# OFL 1.1) are `include_bytes!`-embedded only when this is on (~1.4 MB). See
+# `assets/fonts/README.md` for the substitutes, licenses, and sources. Pure
+# cross-platform code (feature-gated, never `cfg(target_os)`-gated): the bundled
+# font is registered into the forced theme's fontdb as a fallback tier — tried
+# only after the real target font is found absent, and always before reaching for
+# a host UI face.
 bundled-fonts = []
 
 # Speed-first release profile — a menu system's whole value is INSTANT popup open,

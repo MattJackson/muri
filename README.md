@@ -14,19 +14,20 @@ menus.
 
 ## Install
 
-muri is published on crates.io. It is **pre-1.0** (`0.11.x`), so the public API
+muri is published on crates.io. It is **pre-1.0** (`0.12.x`), so the public API
 may still change between releases while the three backends are device-verified and
 the surface stabilizes — pin at least the minor version:
 
 ```toml
 [dependencies]
-muri = "0.11"
-# with accessibility:            muri = { version = "0.11", features = ["a11y"] }
-# migrating from muda/tray-icon: muri = { version = "0.11", features = ["muda-compat"] }
-# bundled OSS UI fonts for forced cross-platform themes:
-#                                muri = { version = "0.11", features = ["bundled-fonts"] }
+muri = "0.12"
+# with accessibility:            muri = { version = "0.12", features = ["a11y"] }
+# migrating from muda/tray-icon: muri = { version = "0.12", features = ["muda-compat"] }
+# bundled OSS UI fonts for forced cross-platform themes are ON by default (0.12);
+# drop them (saves ~1.4 MB) with:
+#                                muri = { version = "0.12", default-features = false, features = ["x11-popup"] }
 # tray-only Linux, no styled X11 popup (drops the x11rb stack):
-#                                muri = { version = "0.11", default-features = false }
+#                                muri = { version = "0.12", default-features = false }
 # or track the latest unreleased work from git:
 # muri = { git = "https://github.com/MattJackson/muri" }
 ```
@@ -208,7 +209,7 @@ that is where all customization lives.
 1. **Swap the dependency** — replace `muda` + `tray-icon` with:
    ```toml
    [dependencies]
-   muri = { version = "0.11", features = ["muda-compat"] }
+   muri = { version = "0.12", features = ["muda-compat"] }
    ```
 2. **Redirect imports** — your menu-building code compiles unchanged:
    ```rust
