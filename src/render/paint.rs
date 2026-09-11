@@ -127,6 +127,41 @@ const DEFAULT_MAX_WIDTH: f32 = 380.0;
 /// centering within `theme.row_height`.
 const CONTENT_ROW_VPAD: f32 = 4.0;
 
+/// Opacity a **disabled** row's icon/checkmark is drawn at (issue E): the row's
+/// text already dims via `secondary_label`, but its icon and checkmark are drawn
+/// in their own (accent/image) colors and would otherwise stay at full opacity —
+/// so they are dimmed here to match.
+const DISABLED_ALPHA: f32 = 0.5;
+
+/// `v` if it is finite, else `fallback`. Sanitizes a measurement/option before it
+/// feeds a `clamp` or geometry: an empty or degenerate input (a `NaN` min width,
+/// a non-finite measured stack) must not produce `NaN` geometry (`f32::clamp`
+/// even *panics* when its bounds aren't ordered).
+fn finite_or(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
+/// `c` with its alpha scaled by `alpha` (clamped to `[0, 1]`) — the primitive
+/// behind [`dim_color`], applied to a checkmark/symbol glyph so a disabled row's
+/// glyph dims exactly like a blitted icon does.
+fn dim_rgba(c: Rgba, alpha: f32) -> Rgba {
+    let alpha = alpha.clamp(0.0, 1.0);
+    Rgba::new(c.r, c.g, c.b, (c.a as f32 * alpha).round() as u8)
+}
+
+/// `c` unchanged when `enabled`, else dimmed to [`DISABLED_ALPHA`] (issue E).
+fn dim_color(c: Rgba, enabled: bool) -> Rgba {
+    if enabled {
+        c
+    } else {
+        dim_rgba(c, DISABLED_ALPHA)
+    }
+}
+
 fn is_submenu(item: &Item) -> bool {
     matches!(item, Item::Submenu { .. })
 }
@@ -173,17 +208,21 @@ fn row_lead(row: &Row, gap: f32, reserve_gutter: bool) -> f32 {
     }
 }
 
-fn row_font(row: &Row, seg: &Segment, base: &Font) -> Font {
-    if let Some(f) = &seg.font {
-        f.clone()
+/// The trailing column a row reserves for its own trailing icon/accessory:
+/// [`TRAILING_COLUMN`] when the row carries a [`Row::trailing`] icon, else `0`.
+/// A submenu's chevron reserves the same column via [`is_submenu`] at the menu
+/// level — this is the per-row equivalent for an explicit trailing icon (issue A).
+fn row_trailing_width(row: &Row) -> f32 {
+    if row.trailing.is_some() {
+        TRAILING_COLUMN
     } else {
-        let mut f = base.clone();
-        // A bold-labelled row (usagio's active account) carries weight on the
-        // segment font; nothing extra to do here.
-        let _ = row;
-        f.weight = base.weight;
-        f
+        0.0
     }
+}
+
+/// The font a segment renders in: its own override, else the row's base font.
+fn row_font(seg: &Segment, base: &Font) -> Font {
+    seg.font.clone().unwrap_or_else(|| base.clone())
 }
 
 /// Measure the intrinsic width a row's segments want (sum of segment widths plus
@@ -207,7 +246,7 @@ fn row_intrinsic<D: SceneDrawer>(
     }
     let mut w = 0.0;
     for (i, seg) in row.segments.iter().enumerate() {
-        let font = row_font(row, seg, base);
+        let font = row_font(seg, base);
         let seg_base = seg_base_color(seg, theme, base_color, false);
         w += measure_segment(d, cache, seg, &font, theme, seg_base, false);
         if i + 1 < row.segments.len() {
@@ -315,31 +354,9 @@ fn paint_content<D: SceneDrawer>(
             let x = rect.origin.x + (rect.size.width - size) / 2.0;
             let y = rect.origin.y + (rect.size.height - size) / 2.0;
             let dest = LogicalRect::new(LogicalPoint::new(x, y), LogicalSize::new(*size, *size));
-            match icon {
-                // Both raster and SVG icon bytes converge on the same decoded-icon
-                // blit path (`decode_icon` tries PNG then falls back to the SVG
-                // rasterizer; see `crate::render::decode_icon_bytes`).
-                Icon::Png(bytes) | Icon::Svg(bytes) => {
-                    if let Some(decoded) = drawer.decode_icon(bytes) {
-                        let (rgba, w, h) = &*decoded;
-                        drawer.draw_image(rgba, *w, *h, dest);
-                    }
-                }
-                Icon::Checkmark => draw_glyph_centered(
-                    drawer,
-                    cache,
-                    "\u{2713}",
-                    &theme.row_font,
-                    Weight::Bold,
-                    base_color,
-                    dest,
-                ),
-                // A named symbol has no bundled fallback glyph in the content-stack
-                // path yet (Phase 2, same limit `draw_row_content` documents for
-                // its own leading-icon column); skip rather than draw nothing
-                // useful.
-                Icon::Symbol(_) => {}
-            }
+            // Route through the single icon funnel (a content image is enabled and
+            // uses the row's base color for a checkmark/symbol glyph).
+            draw_icon(drawer, cache, &theme.row_font, icon, dest, base_color, true);
         }
         Content::Stack(s) => paint_stack(drawer, cache, theme, s, rect, base_color),
         Content::Spacer => {}
@@ -466,6 +483,10 @@ fn style_pieces(
     for ch in seg.text.chars() {
         let mut color = base_color;
         let mut weight = base_weight;
+        // Walk ALL runs (no early `break`): overlapping runs composite with the
+        // LATER RUN WINS (issue D) — a run later in `seg.runs` overrides an earlier
+        // one on the chars they share, instead of the first match silently
+        // suppressing every later overlapping run.
         for run in &seg.runs {
             // `start`/`len` are public `StyleRun` fields set by the caller;
             // saturating add so a pathological `start + len` can't overflow
@@ -477,10 +498,11 @@ fn style_pieces(
                 if let Some(w) = run.weight {
                     weight = w;
                 }
-                break;
             }
         }
         match pieces.last_mut() {
+            // Open per-char merge, not a closed enum: extend the current piece when
+            // its (color, weight) match, else start a new piece.
             Some((s, c, w)) if *c == color && *w == weight => s.push(ch),
             _ => pieces.push((ch.to_string(), color, weight)),
         }
@@ -553,7 +575,14 @@ pub fn render_menu<D: SceneDrawer>(
         crate::theme::GutterPolicy::Auto => menu_reserves_gutter(menu),
     };
 
-    let trailing_w = if menu.items.iter().any(is_submenu) {
+    // Reserve the trailing column when any item needs it: a submenu (its chevron)
+    // or a row carrying an explicit trailing icon/accessory (issue A). Reserving
+    // it menu-wide keeps every row's segment band ending at the same right edge.
+    let trailing_w = if menu
+        .items
+        .iter()
+        .any(|it| is_submenu(it) || item_row(it).is_some_and(|r| row_trailing_width(r) > 0.0))
+    {
         TRAILING_COLUMN
     } else {
         0.0
@@ -598,11 +627,23 @@ pub fn render_menu<D: SceneDrawer>(
         }
     }
 
-    let min_w = opts.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
+    // Sanitize every input to the width `clamp` (HIGH): a `NaN`/`inf` `min_width`,
+    // `max_width`, or measured `max_content` (a degenerate/empty measurement) must
+    // not reach `f32::clamp` — a non-finite bound produces `NaN` geometry, and an
+    // out-of-order (`min > max`) bound makes `clamp` *panic*.
+    let min_w = finite_or(
+        opts.min_width.unwrap_or(DEFAULT_MIN_WIDTH),
+        DEFAULT_MIN_WIDTH,
+    );
     // `f32::clamp` panics if `min > max`; a consumer can set `min_width >
     // max_width`, so normalize by letting the floor win (#36).
-    let max_w = opts.max_width.unwrap_or(DEFAULT_MAX_WIDTH).max(min_w);
-    let desired = pad.left + max_content + trailing_w + pad.right;
+    let max_w = finite_or(
+        opts.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
+        DEFAULT_MAX_WIDTH,
+    )
+    .max(min_w);
+    let max_content = finite_or(max_content, 0.0);
+    let desired = finite_or(pad.left + max_content + trailing_w + pad.right, min_w);
     let width = desired.clamp(min_w, max_w);
 
     // Every row's content starts at the same left x (`content_left`); a row with a
@@ -619,13 +660,17 @@ pub fn render_menu<D: SceneDrawer>(
             Item::Separator => SEPARATOR_HEIGHT,
             Item::SectionHeader(_) => theme.row_height,
             Item::Row(r) | Item::Submenu { label: r, .. } => {
-                theme.row_height.max(r.min_height.unwrap_or(0.0))
+                // Sanitize a caller-supplied `min_height` before the `max` so a
+                // `NaN` can't poison the row height (HIGH).
+                theme
+                    .row_height
+                    .max(finite_or(r.min_height.unwrap_or(0.0), 0.0))
             }
             Item::Content(stack) => {
                 let stack_size = measure_stack(drawer, &mut measure_cache, theme, stack);
                 theme
                     .row_height
-                    .max(stack_size.height + CONTENT_ROW_VPAD * 2.0)
+                    .max(finite_or(stack_size.height, 0.0) + CONTENT_ROW_VPAD * 2.0)
             }
         };
         plan.push((i, y, h));
@@ -665,8 +710,9 @@ pub fn render_menu<D: SceneDrawer>(
                     reserve_gutter,
                     ry,
                     rh,
-                    false,
-                    false,
+                    false, // submenu
+                    true,  // is_header: never paints a `checked` checkmark
+                    false, // highlighted
                     theme.resolve(theme.secondary_label),
                 );
             }
@@ -702,12 +748,19 @@ pub fn render_menu<D: SceneDrawer>(
                 let highlighted = interactive && highlight == Some(i);
                 let rect =
                     LogicalRect::new(LogicalPoint::new(0.0, ry), LogicalSize::new(width, rh));
+                // A row whose model requests an explicit background gets it painted
+                // first (issue B), underneath any hover highlight.
+                fill_row_background(drawer, theme, row, rect);
                 if highlighted {
                     let hl = LogicalRect::new(
                         LogicalPoint::new(pad.left - 2.0, ry + 1.0),
                         LogicalSize::new(width - pad.horizontal() + 4.0, rh - 2.0),
                     );
-                    drawer.fill_round_rect(hl, 5.0, theme.resolve(theme.accent));
+                    // The hover fill reads `theme.row_highlight` (resolved) rather
+                    // than a hard-coded `theme.accent`: the dedicated theme field
+                    // exists for exactly this and every preset sets it = Accent, so
+                    // the pixels are identical today but a theme can now diverge.
+                    drawer.fill_round_rect(hl, 5.0, theme.resolve(theme.row_highlight));
                 }
                 let base_color = if highlighted {
                     Rgba::WHITE
@@ -728,6 +781,7 @@ pub fn render_menu<D: SceneDrawer>(
                     ry,
                     rh,
                     submenu,
+                    false, // is_header
                     highlighted,
                     base_color,
                 );
@@ -757,9 +811,21 @@ fn draw_row_content<D: SceneDrawer>(
     ry: f32,
     rh: f32,
     submenu: bool,
+    is_header: bool,
     highlighted: bool,
     base_color: Rgba,
 ) {
+    // A disabled row dims its icon/checkmark (issue E); its text already dims via
+    // `secondary_label`. Headers/highlighted rows are always drawn "enabled".
+    let icon_enabled = highlighted || is_header || row.enabled;
+    // The color a checkmark/symbol glyph is drawn in: white on a highlighted row,
+    // else the theme accent (dimmed later for a disabled row inside the funnel).
+    let glyph_color = if highlighted {
+        Rgba::WHITE
+    } else {
+        theme.resolve(theme.accent)
+    };
+
     // Leading advance: the shared gutter width when the menu reserves one (so
     // checked + unchecked rows align, native look), else this row's own inline
     // icon advance (#16). The icon/checkmark still draws at `content_left`.
@@ -771,44 +837,33 @@ fn draw_row_content<D: SceneDrawer>(
             LogicalPoint::new(content_left, ry + (rh - ICON_SIZE) / 2.0),
             LogicalSize::new(ICON_SIZE, ICON_SIZE),
         );
-        match &row.leading {
-            Some(Icon::Png(bytes)) => {
-                if let Some(decoded) = drawer.decode_icon(bytes) {
-                    let (rgba, w, h) = &*decoded;
-                    drawer.draw_image(rgba, *w, *h, icon_rect);
-                }
-            }
-            Some(Icon::Checkmark) => draw_glyph_centered(
+        if let Some(icon) = &row.leading {
+            // Every leading icon — Png, Svg, Checkmark, Symbol — draws through the
+            // single funnel, so an `Icon::Svg`/`Icon::Symbol` in the leading slot
+            // renders instead of being swallowed by a wildcard (HIGH, issue: Svg
+            // leading icon).
+            draw_icon(
                 drawer,
                 cache,
-                "\u{2713}",
                 base_font,
-                Weight::Bold,
-                if highlighted {
-                    Rgba::WHITE
-                } else {
-                    theme.resolve(theme.accent)
-                },
+                icon,
                 icon_rect,
-            ),
-            // SVG / Symbol icons are Phase 2 (rasterize per-DPI); skip for now.
-            _ => {
-                if row.checked == Some(true) {
-                    draw_glyph_centered(
-                        drawer,
-                        cache,
-                        "\u{2713}",
-                        base_font,
-                        Weight::Bold,
-                        if highlighted {
-                            Rgba::WHITE
-                        } else {
-                            theme.resolve(theme.accent)
-                        },
-                        icon_rect,
-                    );
-                }
-            }
+                glyph_color,
+                icon_enabled,
+            );
+        } else if row.checked == Some(true) && !is_header {
+            // A checked row with no explicit leading icon paints the check glyph in
+            // the gutter. Section headers never do (their `checked` is ignored, per
+            // `Menu::section_header`); a submenu-parent row does.
+            draw_icon(
+                drawer,
+                cache,
+                base_font,
+                &Icon::Checkmark,
+                icon_rect,
+                glyph_color,
+                icon_enabled,
+            );
         }
     }
 
@@ -818,7 +873,7 @@ fn draw_row_content<D: SceneDrawer>(
             .segments
             .iter()
             .map(|seg| {
-                let font = row_font(row, seg, base_font);
+                let font = row_font(seg, base_font);
                 let seg_base = seg_base_color(seg, theme, base_color, highlighted);
                 SegmentMetrics::new(
                     measure_segment(drawer, cache, seg, &font, theme, seg_base, highlighted),
@@ -829,7 +884,7 @@ fn draw_row_content<D: SceneDrawer>(
             .collect();
         let boxes = resolve_segments(&metrics, band_w);
         for (seg, bx) in row.segments.iter().zip(boxes.iter()) {
-            let font = row_font(row, seg, base_font);
+            let font = row_font(seg, base_font);
             let lh = drawer.line_height(&font);
             let text_top = ry + (rh - lh) / 2.0;
             let seg_base = seg_base_color(seg, theme, base_color, highlighted);
@@ -848,6 +903,27 @@ fn draw_row_content<D: SceneDrawer>(
                 px += w;
             }
         }
+    }
+
+    // Trailing icon/accessory (issue A): a row carrying `Row::trailing` draws it in
+    // the reserved trailing column, through the same funnel as every other icon.
+    if let Some(icon) = &row.trailing {
+        let trailing_rect = LogicalRect::new(
+            LogicalPoint::new(
+                band_x + band_w + (TRAILING_COLUMN - ICON_SIZE) / 2.0,
+                ry + (rh - ICON_SIZE) / 2.0,
+            ),
+            LogicalSize::new(ICON_SIZE, ICON_SIZE),
+        );
+        draw_icon(
+            drawer,
+            cache,
+            base_font,
+            icon,
+            trailing_rect,
+            glyph_color,
+            icon_enabled,
+        );
     }
 
     // Trailing submenu chevron.
@@ -869,6 +945,76 @@ fn draw_row_content<D: SceneDrawer>(
             },
             chev_rect,
         );
+    }
+}
+
+/// The single funnel every icon-drawing site routes through (leading slot,
+/// trailing slot, standalone checkmark, content-stack image). It matches **every**
+/// [`Icon`] variant exhaustively — there is deliberately no `_` arm, so adding a
+/// future `Icon` variant is a compile error *here* rather than a silently-undrawn
+/// icon (the recurring muri bug class where a model attribute is set but never
+/// rendered).
+///
+/// `glyph_color` is the color a glyph-based icon (checkmark / a symbol's fallback)
+/// draws in; it is ignored for image icons. `enabled` dims the whole icon to
+/// [`DISABLED_ALPHA`] when `false` (issue E) — both a blitted image and a glyph.
+#[allow(clippy::too_many_arguments)]
+fn draw_icon<D: SceneDrawer>(
+    drawer: &mut D,
+    cache: &mut MeasureCache,
+    base_font: &Font,
+    icon: &Icon,
+    rect: LogicalRect,
+    glyph_color: Rgba,
+    enabled: bool,
+) {
+    let alpha = if enabled { 1.0 } else { DISABLED_ALPHA };
+    match icon {
+        // Both raster and SVG icon bytes converge on the same decoded-icon blit
+        // path (`decode_icon` tries PNG then falls back to the SVG rasterizer; see
+        // `crate::render::decode_icon_bytes`).
+        Icon::Png(bytes) | Icon::Svg(bytes) => {
+            if let Some(decoded) = drawer.decode_icon(bytes) {
+                let (rgba, w, h) = &*decoded;
+                drawer.draw_image_alpha(rgba, *w, *h, rect, alpha);
+            }
+        }
+        Icon::Checkmark => draw_glyph_centered(
+            drawer,
+            cache,
+            "\u{2713}",
+            base_font,
+            Weight::Bold,
+            dim_color(glyph_color, enabled),
+            rect,
+        ),
+        // A named symbol has no bundled per-name glyph yet (SF Symbols are macOS-
+        // only), but it must NOT be a silent no-op — that is exactly the bug class
+        // this funnel guards. Draw a neutral placeholder glyph so a `Symbol` icon
+        // is always visibly rendered until a real symbol face is wired up.
+        Icon::Symbol(_) => draw_glyph_centered(
+            drawer,
+            cache,
+            "\u{25AA}", // ▪ small filled square placeholder
+            base_font,
+            Weight::Regular,
+            dim_color(glyph_color, enabled),
+            rect,
+        ),
+    }
+}
+
+/// Fill a row's explicit background (issue B): a row whose model carries a
+/// [`Row::background`] gets that color painted across its full band before its
+/// content (and before any hover highlight). A row with no background is a no-op.
+fn fill_row_background<D: SceneDrawer>(
+    drawer: &mut D,
+    theme: &Theme,
+    row: &Row,
+    rect: LogicalRect,
+) {
+    if let Some(bg) = row.background {
+        drawer.fill_round_rect(rect, 0.0, theme.resolve(bg));
     }
 }
 
@@ -1132,16 +1278,23 @@ mod tests {
 
     /// A drawer that records the geometry of every draw op, with deterministic
     /// monospace metrics (7px/char, 14px line height) so layout is exactly
-    /// reproducible in a test. Icons decode to a 2x2 stub without touching the
-    /// PNG codec.
+    /// reproducible in a test. Icons decode to an **opaque** 2x2 stub (not
+    /// all-zero) so a dimmed-alpha blit is observable, and every op is recorded:
+    /// fills (issue B), text colors (issue E checkmark dimming), and per-image
+    /// alpha (issue E icon dimming).
     #[derive(Default)]
     struct RecordingDrawer {
-        texts: Vec<(String, f32, f32)>, // (text, origin.x, origin.y)
-        images: Vec<LogicalRect>,       // dest rects of draw_image
+        texts: Vec<(String, f32, f32)>,        // (text, origin.x, origin.y)
+        images: Vec<LogicalRect>,              // dest rects of draw_image[_alpha]
+        fills: Vec<(LogicalRect, Rgba)>,       // (rect, color) of fill_round_rect
+        text_colors: Vec<(String, Rgba)>,      // (text, resolved color) of draw_text
+        image_alphas: Vec<(LogicalRect, f32)>, // (dest, alpha) of draw_image_alpha
     }
     impl SceneDrawer for RecordingDrawer {
         fn begin_frame(&mut self, _size: LogicalSize) {}
-        fn fill_round_rect(&mut self, _r: LogicalRect, _cr: f32, _c: Rgba) {}
+        fn fill_round_rect(&mut self, r: LogicalRect, _cr: f32, c: Rgba) {
+            self.fills.push((r, c));
+        }
         fn draw_separator(&mut self, _r: LogicalRect, _c: Rgba) {}
         fn measure_text(&self, text: &str, _font: &Font) -> f32 {
             text.chars().count() as f32 * 7.0
@@ -1152,12 +1305,25 @@ mod tests {
         fn draw_text(&mut self, run: &TextRun<'_>) {
             self.texts
                 .push((run.text.to_string(), run.origin.x, run.origin.y));
+            self.text_colors.push((run.text.to_string(), run.color));
         }
-        fn draw_image(&mut self, _rgba: &[u8], _w: u32, _h: u32, dest: LogicalRect) {
+        fn draw_image(&mut self, rgba: &[u8], w: u32, h: u32, dest: LogicalRect) {
+            self.draw_image_alpha(rgba, w, h, dest, 1.0);
+        }
+        fn draw_image_alpha(
+            &mut self,
+            _rgba: &[u8],
+            _w: u32,
+            _h: u32,
+            dest: LogicalRect,
+            alpha: f32,
+        ) {
             self.images.push(dest);
+            self.image_alphas.push((dest, alpha));
         }
         fn decode_icon(&self, _bytes: &Arc<[u8]>) -> Option<crate::render::DecodedIcon> {
-            Some(std::rc::Rc::new((vec![0u8; 16], 2, 2)))
+            // Opaque stub (alpha 255) so a dimmed blit differs from a transparent one.
+            Some(std::rc::Rc::new((vec![255u8; 16], 2, 2)))
         }
     }
 
@@ -1517,5 +1683,206 @@ mod tests {
         // 16px icon, plus the row's own vertical padding.
         let min_expected = 14.0 + 2.0 + 16.0;
         assert!(laid.size.height > min_expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Structural paint-layer fixes
+    // -------------------------------------------------------------------------
+
+    /// HIGH: a non-finite `min_width` must be sanitized before the width `clamp`
+    /// (a `NaN` bound produces `NaN` geometry / panics `f32::clamp`) so the popup
+    /// size is always finite.
+    #[test]
+    fn nan_min_width_is_clamped() {
+        let menu = Menu::new().row(Row::new("a").label("Alpha"));
+        let opts = MenuOptions::default().min_width(f32::NAN);
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &opts, None);
+        assert!(
+            laid.size.width.is_finite() && laid.size.height.is_finite(),
+            "geometry must be finite despite a NaN min_width: {:?}",
+            laid.size
+        );
+        assert!(laid.size.width > 0.0);
+    }
+
+    /// HIGH: an `Icon::Svg` in the LEADING slot must render (via the funnel),
+    /// not be swallowed by a wildcard that only handled `Png`/`Checkmark`.
+    #[test]
+    fn svg_leading_icon_is_rendered() {
+        let svg: Arc<[u8]> = Arc::from(vec![1u8, 2, 3]);
+        let menu = Menu::new().row(Row::new("a").leading(Icon::Svg(svg)).label("Alpha"));
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        assert_eq!(
+            d.images.len(),
+            1,
+            "an Svg leading icon must blit, not be dropped"
+        );
+    }
+
+    /// MEDIUM: a section header must NOT paint a `checked` checkmark (its
+    /// `checked` is ignored per `Menu::section_header`), but a submenu-parent row
+    /// DOES honor `checked`.
+    #[test]
+    fn header_ignores_checked_but_submenu_parent_honors_it() {
+        let menu = Menu::new()
+            .section_header(Row::info().label("Header").checked(true))
+            .submenu(Row::new("more").label("More").checked(true), Menu::new());
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        let checks = d.texts.iter().filter(|(t, ..)| t == "\u{2713}").count();
+        assert_eq!(
+            checks, 1,
+            "only the submenu-parent row paints a checkmark, not the header; texts={:?}",
+            d.texts
+        );
+    }
+
+    /// Issue A: a row with a trailing icon/accessory must draw it in the reserved
+    /// trailing column (right of the segment band), not silently omit it.
+    #[test]
+    fn issue_a_trailing_icon_is_drawn() {
+        let icon: Arc<[u8]> = Arc::from(vec![9u8; 4]);
+        let menu = Menu::new().row(Row::new("a").label("Alpha").trailing(Icon::Png(icon)));
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        assert_eq!(d.images.len(), 1, "the trailing icon must be blitted");
+        let icon_x = d.images[0].origin.x;
+        let label_x = d
+            .texts
+            .iter()
+            .find(|(t, ..)| t == "Alpha")
+            .map(|(_, x, _)| *x)
+            .expect("label text");
+        assert!(
+            icon_x > label_x,
+            "trailing icon must sit right of the label: icon={icon_x} label={label_x}"
+        );
+        assert!(
+            icon_x + ICON_SIZE <= laid.size.width + 0.5,
+            "trailing icon must stay within the popup width"
+        );
+    }
+
+    /// Issue B: a row whose model requests an explicit background gets it filled.
+    #[test]
+    fn issue_b_row_background_is_filled() {
+        let menu = Menu::new().row(Row::new("a").label("Alpha").background(Color::SystemRed));
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        let want = Theme::dark().resolve(Color::SystemRed);
+        assert!(
+            d.fills.iter().any(|(_, c)| *c == want),
+            "a row with Row::background must be filled with it; fills={:?}",
+            d.fills
+        );
+    }
+
+    /// Issue D: overlapping style runs composite with the LATER RUN WINS — an
+    /// early `break` used to stop at the first matching run, dropping later ones.
+    #[test]
+    fn issue_d_overlapping_style_runs_the_later_run_wins() {
+        let seg = Segment::new("ab").runs(vec![
+            StyleRun::new(0, 2, Color::SystemRed),   // covers a, b
+            StyleRun::new(1, 1, Color::SystemGreen), // overlaps on b — later, wins
+        ]);
+        let theme = Theme::light();
+        let pieces = style_pieces(&seg, Rgba::BLACK, Weight::Regular, &theme, false);
+        let a = pieces.iter().find(|(s, ..)| s == "a").expect("piece a");
+        let b = pieces.iter().find(|(s, ..)| s == "b").expect("piece b");
+        assert_eq!(
+            a.1,
+            theme.resolve(Color::SystemRed),
+            "'a' is covered only by the red run"
+        );
+        assert_eq!(
+            b.1,
+            theme.resolve(Color::SystemGreen),
+            "'b' is covered by both runs; the later (green) run must win"
+        );
+    }
+
+    /// Issue E: a disabled row dims its checkmark AND its icon (not just text),
+    /// applying `DISABLED_ALPHA` to both the glyph color and the image blit.
+    #[test]
+    fn issue_e_disabled_row_dims_checkmark_and_icon() {
+        let icon: Arc<[u8]> = Arc::from(vec![7u8; 4]);
+        let menu = Menu::new()
+            .row(
+                Row::new("i")
+                    .label("IconRow")
+                    .leading(Icon::Png(icon))
+                    .enabled(false),
+            )
+            .row(Row::new("c").label("CheckRow").checked(true).enabled(false));
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+        assert!(
+            d.image_alphas
+                .iter()
+                .any(|(_, a)| (*a - DISABLED_ALPHA).abs() < 1e-6),
+            "a disabled row's icon must blit at DISABLED_ALPHA; got {:?}",
+            d.image_alphas
+        );
+        let check = d
+            .text_colors
+            .iter()
+            .find(|(t, _)| t == "\u{2713}")
+            .expect("a checkmark glyph was drawn");
+        assert!(
+            check.1.a < 255,
+            "a disabled row's checkmark must be dimmed, got alpha {}",
+            check.1.a
+        );
+    }
+
+    /// The funnel draws SOMETHING for every `Icon` variant — a table-driven guard
+    /// against a future variant becoming a silent no-op (the muri bug class).
+    #[test]
+    fn draw_icon_funnel_draws_every_icon_variant() {
+        let png: Arc<[u8]> = Arc::from(vec![1u8; 4]);
+        let svg: Arc<[u8]> = Arc::from(vec![2u8; 4]);
+        let cases: Vec<(&str, Icon)> = vec![
+            ("Png", Icon::Png(png)),
+            ("Svg", Icon::Svg(svg)),
+            ("Checkmark", Icon::Checkmark),
+            ("Symbol", Icon::Symbol("gear")),
+        ];
+        let font = Font::default();
+        let rect = LogicalRect::new(
+            LogicalPoint::new(0.0, 0.0),
+            LogicalSize::new(ICON_SIZE, ICON_SIZE),
+        );
+        for (name, icon) in cases {
+            let mut d = RecordingDrawer::default();
+            let mut cache = MeasureCache::new();
+            draw_icon(&mut d, &mut cache, &font, &icon, rect, Rgba::WHITE, true);
+            let ops = d.images.len() + d.texts.len();
+            assert!(ops > 0, "Icon::{name} must emit at least one draw op");
+        }
+    }
+
+    /// The hover highlight fill reads `theme.row_highlight`, not `theme.accent`:
+    /// a theme whose two fields differ proves the correct one is used.
+    #[test]
+    fn row_highlight_uses_the_theme_field() {
+        let mut theme = Theme::dark();
+        theme.accent = Color::Rgba(1, 2, 3, 255);
+        theme.row_highlight = Color::Rgba(9, 8, 7, 255);
+        let menu = Menu::new().row(Row::new("a").label("Alpha"));
+        let mut d = RecordingDrawer::default();
+        render_menu(&mut d, &menu, &theme, &MenuOptions::default(), Some(0));
+        let want = theme.resolve(theme.row_highlight);
+        let accent = theme.resolve(theme.accent);
+        assert!(
+            d.fills.iter().any(|(_, c)| *c == want),
+            "hover fill must use row_highlight; fills={:?}",
+            d.fills
+        );
+        assert!(
+            !d.fills.iter().any(|(_, c)| *c == accent),
+            "hover fill must NOT use accent"
+        );
     }
 }

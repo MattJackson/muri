@@ -139,6 +139,24 @@ pub trait SceneDrawer {
     /// fit `dest`. `rgba` is `src_w * src_h * 4` bytes, row-major.
     fn draw_image(&mut self, rgba: &[u8], src_w: u32, src_h: u32, dest: LogicalRect);
 
+    /// Like [`draw_image`](Self::draw_image), but with the whole blit's opacity
+    /// scaled by `alpha` (`1.0` = opaque, `0.0` = invisible). The icon funnel
+    /// ([`paint::draw_icon`]) routes through this so a **disabled** row dims its
+    /// icon exactly as it dims its checkmark/text (issue E). The default forwards
+    /// to the opaque [`draw_image`](Self::draw_image) so drawers that don't care
+    /// about dimming need not implement it.
+    fn draw_image_alpha(
+        &mut self,
+        rgba: &[u8],
+        src_w: u32,
+        src_h: u32,
+        dest: LogicalRect,
+        alpha: f32,
+    ) {
+        let _ = alpha;
+        self.draw_image(rgba, src_w, src_h, dest);
+    }
+
     /// Decode a PNG icon (straight-alpha RGBA + dimensions), reusing a cached
     /// decode when `bytes` is the *same* `Arc` (pointer identity, not content)
     /// as a previous call on this drawer. `Icon::Png` bytes live in an
@@ -706,6 +724,8 @@ impl FontStore {
             let Some(face) = face else { continue };
             match runs.last_mut() {
                 Some((f, s)) if *f == face => s.push(ch),
+                // Open per-char merge, not a closed enum: start a new run when the
+                // previous run's face differs (or there is none yet).
                 _ => runs.push((face, ch.to_string())),
             }
         }
@@ -1191,6 +1211,8 @@ fn family_shapes_both_weights(db: &Database, name: &str) -> bool {
                 && face_can_shape(db, r)
                 && face_can_shape(db, b)
         }
+        // Open `(Option, Option)` tuple, not a closed enum: any missing weight
+        // means the family can't supply a distinct regular+bold pair.
         _ => false,
     }
 }
@@ -1299,9 +1321,23 @@ impl SceneDrawer for RasterDrawer {
     }
 
     fn draw_image(&mut self, rgba: &[u8], src_w: u32, src_h: u32, dest: LogicalRect) {
+        self.draw_image_alpha(rgba, src_w, src_h, dest, 1.0);
+    }
+
+    fn draw_image_alpha(
+        &mut self,
+        rgba: &[u8],
+        src_w: u32,
+        src_h: u32,
+        dest: LogicalRect,
+        alpha: f32,
+    ) {
         if src_w == 0 || src_h == 0 {
             return;
         }
+        // Clamp the opacity multiplier to [0, 1] so a degenerate caller can't
+        // overshoot the per-pixel `u8` alpha (issue E dims with `0.5`).
+        let alpha = alpha.clamp(0.0, 1.0);
         let s = self.scale;
         let dx = (dest.origin.x * s).round() as i32;
         let dy = (dest.origin.y * s).round() as i32;
@@ -1318,7 +1354,7 @@ impl SceneDrawer for RasterDrawer {
                 if idx + 3 >= rgba.len() {
                     continue;
                 }
-                let a = rgba[idx + 3];
+                let a = (rgba[idx + 3] as f32 * alpha).round() as u8;
                 if a == 0 {
                     continue;
                 }
@@ -1362,6 +1398,8 @@ impl SceneDrawer for RasterDrawer {
 fn icon_cache_hit(entry: Option<&IconCacheEntry>, bytes: &Arc<[u8]>) -> Option<DecodedIcon> {
     match entry {
         Some((cached_bytes, hit)) if Arc::ptr_eq(cached_bytes, bytes) => Some(hit.clone()),
+        // Open `Option`/guard match, not a closed enum: a missing entry, or a key
+        // hit whose retained `Arc` is a different allocation (ABA), is a miss.
         _ => None,
     }
 }
