@@ -364,6 +364,36 @@ pub(crate) fn macos_sf_tracking(size: f32) -> f32 {
     size * MACOS_SF_TRACKING_FRACTION
 }
 
+/// Row pitch of a modern (Big Sur+) `NSMenu` as a multiple of the live menu
+/// font point size. Native reference: a real `NSMenu` measures ~48–50px @2x
+/// (~24–25pt) per row at the ~13.5pt system menu font — noticeably roomier than
+/// the legacy [`MACOS_ROW_HEIGHT`] (22pt) baked into the forced/headless
+/// `Theme::macos` preset. `24.5 / 13.5 ≈ 1.82`.
+///
+/// This factor is applied **only on the live `System` theme path** (see
+/// [`macos_system_row_height`]), where the real OS menu point size is injected,
+/// so the live popup's row pitch matches a native `NSMenu` (#63). The forced
+/// `Theme::macos` preset keeps its documented 22pt reference unchanged, so the
+/// offscreen forced-MacOs goldens are untouched.
+///
+/// DEVICE-VERIFY(0.11.1): pixel-exact row pitch vs a captured `NSMenu` on a
+/// physical retina display (the ~48–50px @2x range is a measured estimate).
+const MACOS_SYSTEM_ROW_HEIGHT_FACTOR: f32 = 1.82;
+
+/// The live `System`-theme macOS row height in logical points, derived from the
+/// live menu font `point_size` at the native [`MACOS_SYSTEM_ROW_HEIGHT_FACTOR`]
+/// pitch, and never tighter than the legacy [`MACOS_ROW_HEIGHT`] floor. The
+/// macOS backend calls this after injecting the live system menu size so the
+/// live popup matches native `NSMenu` roominess rather than the tighter 22pt
+/// forced-preset base (#63).
+pub(crate) fn macos_system_row_height(point_size: f32) -> f32 {
+    if point_size > 0.0 {
+        (point_size * MACOS_SYSTEM_ROW_HEIGHT_FACTOR).max(MACOS_ROW_HEIGHT)
+    } else {
+        MACOS_ROW_HEIGHT
+    }
+}
+
 /// Tracking for the Windows 11 menu font (Segoe UI), in logical points. Segoe UI
 /// menu text uses metrics-only spacing — no extra tracking — so this is `0.0`.
 const SEGOE_UI_TRACKING: f32 = 0.0;
@@ -1056,6 +1086,35 @@ mod tests {
         assert_eq!(mac.padding.top, dark.padding.top);
         assert_eq!(mac.row_font, dark.row_font);
         assert_eq!(mac.header_font, dark.header_font);
+    }
+
+    /// #63: the live `System`-theme macOS row pitch is derived from the live
+    /// menu point size at the native `NSMenu` ratio (~24.5pt at the ~13.5pt
+    /// system font), so the live popup matches a real `NSMenu` (~48–50px @2x)
+    /// rather than the tighter legacy 22pt forced-preset base — while that
+    /// forced/headless base (and its offscreen goldens) is left unchanged.
+    #[test]
+    fn system_row_height_matches_native_nsmenu_pitch() {
+        // At the ~13.5pt live macOS menu font, the native pitch is ~24.5pt
+        // (~49px @2x) — the roomier target #63 is about.
+        let live = macos_system_row_height(13.5);
+        assert!(
+            (live - 24.57).abs() < 0.1,
+            "13.5pt system font must derive a ~24.5pt native pitch, got {live}"
+        );
+        // Strictly roomier than the legacy 22pt base the System path regressed to.
+        assert!(
+            live > MACOS_ROW_HEIGHT,
+            "the live System pitch ({live}) must be roomier than the legacy {MACOS_ROW_HEIGHT}pt base"
+        );
+        // Never *tighter* than the legacy floor, even for a tiny/absent reported
+        // size, so a degenerate read can't shrink rows below the old behavior.
+        assert_eq!(macos_system_row_height(1.0), MACOS_ROW_HEIGHT);
+        assert_eq!(macos_system_row_height(0.0), MACOS_ROW_HEIGHT);
+        assert_eq!(macos_system_row_height(-3.0), MACOS_ROW_HEIGHT);
+        // The forced/headless preset base is deliberately untouched (its goldens
+        // must not move): it stays at the legacy 22pt reference.
+        assert_eq!(Theme::macos(false).row_height, MACOS_ROW_HEIGHT);
     }
 
     /// #57: forced-theme tracking travels with the theme. A FORCED macOS preset

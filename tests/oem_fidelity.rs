@@ -131,6 +131,33 @@ fn bold_row_inks_heavier_than_regular() {
     );
 }
 
+/// #63: the LIVE default (`System`) theme path — the one the tray popup actually
+/// uses (`new_native`) — must also render a bold segment strictly heavier than
+/// regular, not just the forced-MacOs path. This is the drop-in guard for the
+/// live-popup regression #63 reports: on the real macOS single-SF-variable-file
+/// scenario the render layer now emboldens via the `wght` axis (or faux-bold),
+/// so bold is no longer silently downgraded on the System drawer. Runs on every
+/// feature set — it needs a real (host) UI face with a resolvable bold, not a
+/// reproducible one.
+#[test]
+fn bold_row_inks_heavier_than_regular_on_the_system_path() {
+    let opts = forced(ThemeSource::System(ThemeMode::Light));
+    let (bold, _, _) = render_menu_to_rgba(&weighted_menu(Weight::Bold), &opts, 2.0);
+    let (reg, _, _) = render_menu_to_rgba(&weighted_menu(Weight::Regular), &opts, 2.0);
+
+    assert_ne!(
+        bold, reg,
+        "#63: a bold segment must produce different pixels than regular on the live System path"
+    );
+    let (bold_ink, reg_ink) = (ink(&bold), ink(&reg));
+    assert!(
+        bold_ink > reg_ink,
+        "#63: bold must lay down more ink than regular on the System/new_native path \
+         (bold {bold_ink} vs regular {reg_ink}); equal ink means the live popup silently \
+         downgraded bold — the exact defect #63 traces"
+    );
+}
+
 /// #56: flipping a single row of a representative menu to bold must change the
 /// composited pixels vs the all-regular menu. Feature-independent.
 #[test]

@@ -67,7 +67,7 @@ use fontdb::{
     Database, Family as DbFamily, Query, Source as DbSource, Style as DbStyle, Weight as DbWeight,
     ID as FaceId,
 };
-use harfrust::{FontRef as HbFontRef, ShapeOptions, ShaperData, UnicodeBuffer};
+use harfrust::{FontRef as HbFontRef, ShapeOptions, ShaperData, ShaperInstance, UnicodeBuffer};
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::{FontRef, GlyphId};
@@ -493,11 +493,44 @@ impl RasterDrawer {
     }
 }
 
+/// How a heavy-weight (bold) request is satisfied on a face that `fontdb`'s
+/// weight matching resolved to a *lighter* face than asked — the live-macOS
+/// single-SF-variable-file case (#63/#56), where a `Weight::Bold` request and a
+/// `Weight::Regular` request both land on the one registered SF face.
+///
+/// `fontdb`'s CSS `find_best_match` never fails on weight, so a family with no
+/// discrete bold face silently returns its regular face for a bold request.
+/// This enum records what to do about that so bold still renders visibly bold:
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Embolden {
+    /// Nothing to do — either the request wasn't heavy, or a genuinely bold
+    /// (discrete or already-heavy) face resolved, so it renders as-is.
+    None,
+    /// The resolved face is a **variable font with a `wght` axis**: instance it
+    /// at this OpenType weight (e.g. `700`) through the shaper *and* the glyph
+    /// rasterizer, so it renders at the real bold master (the correct, native
+    /// result on modern macOS, whose SF face is variable).
+    Variable(u16),
+    /// The resolved face is a plain single-weight face with no usable `wght`
+    /// axis: synthesize bold (faux-bold) by dilating the glyph coverage at
+    /// rasterization, so a bold request still visibly bolds.
+    Synthetic,
+}
+
+/// The OpenType `wght` variation-axis tag (`b"wght"` as a big-endian `u32`),
+/// used to detect a variable font's weight axis via `swash`'s `Variations`.
+const WGHT_AXIS_TAG: u32 =
+    ((b'w' as u32) << 24) | ((b'g' as u32) << 16) | ((b'h' as u32) << 8) | (b't' as u32);
+
 /// A glyph positioned along a shaped line: which face rendered it, its glyph id,
 /// and its pen position + offset in device pixels (relative to the line start).
 struct ShapedGlyph {
     face: FaceId,
     glyph: u16,
+    /// How this glyph's face achieves the run's (possibly bold) weight — carried
+    /// through to rasterization so the variation / synthetic-bold treatment and
+    /// the glyph cache key match how it was shaped (#63).
+    emb: Embolden,
     /// Horizontal pen position (already including the shaper's x-offset), px.
     x: f32,
     /// Vertical offset above the baseline (shaper y-offset), px, positive up.
@@ -529,6 +562,11 @@ struct GlyphKey {
     face: FaceId,
     glyph: u16,
     size_bits: u32,
+    /// The emboldening treatment (#63): a bold and a regular glyph on the *same*
+    /// variable/single face at the same size would otherwise collide on this key
+    /// and serve each other's bitmap, so the variation/synthetic-bold state is
+    /// part of the identity.
+    emb: Embolden,
 }
 
 /// Raw font bytes for one face, kept alive so `harfrust`/`swash` borrows into
@@ -579,6 +617,11 @@ struct FontStore {
     /// dominant cost of a laggy menu with symbol/emoji/logo glyphs. The result is
     /// stable for a given char+weight, so it is cached across frames.
     fallback_cache: RefCell<HashMap<(char, u16), Option<FaceId>>>,
+    /// Memoized emboldening decision per `(face, ot_weight)` (#63). Computing it
+    /// parses the face to check for a `wght` variation axis, so — like the other
+    /// resolution caches — the result is memoized (it's stable for the drawer's
+    /// lifetime) rather than recomputed per glyph per repaint.
+    embolden_cache: RefCell<HashMap<(FaceId, u16), Embolden>>,
     /// Memoized primary-face resolution per `(family, ot_weight)`. `resolve_face`
     /// otherwise runs a `fontdb::Database::query` scan on every measure_text /
     /// draw_text call (once per segment per row, every repaint); the result is
@@ -637,6 +680,7 @@ impl FontStore {
             shaper_data: RefCell::new(HashMap::new()),
             coverage: RefCell::new(HashMap::new()),
             fallback_cache: RefCell::new(HashMap::new()),
+            embolden_cache: RefCell::new(HashMap::new()),
             face_cache: RefCell::new(HashMap::new()),
             shaped: RefCell::new(HashMap::new()),
             seg_scratch: RefCell::new(Vec::new()),
@@ -701,12 +745,63 @@ impl FontStore {
 
     /// Weight requested >= this is "asking for bold or heavier" (matches
     /// `Weight::Bold`'s `700`, with headroom for `Weight::Custom` in between).
-    #[cfg(test)]
     const HEAVY_WEIGHT: u16 = 600;
     /// A resolved face below this is "substantially lighter than requested" —
     /// i.e. the caller got a regular-ish face back for a heavy-weight ask.
-    #[cfg(test)]
     const LIGHT_WEIGHT: u16 = 500;
+
+    /// The OpenType weight applied for a variable-font bold instance (#63) — the
+    /// `wght` axis value a `Weight::Bold` heavy run is rendered at when the face
+    /// downgraded to a single/variable master, clamped to the axis's own max.
+    const VARIABLE_BOLD_WEIGHT: u16 = 700;
+
+    /// Decide how a `(face, ot_weight)` pair should be emboldened (#63), memoized.
+    ///
+    /// Returns [`Embolden::None`] unless the request is heavy
+    /// ([`HEAVY_WEIGHT`](Self::HEAVY_WEIGHT)) *and* the resolved face's own
+    /// registered weight is substantially lighter
+    /// ([`LIGHT_WEIGHT`](Self::LIGHT_WEIGHT)) — i.e. `fontdb` silently downgraded
+    /// a bold request to a regular-ish face (no discrete bold in the family).
+    /// In that case: if the face is a variable font exposing a `wght` axis, it
+    /// is instanced at bold ([`Embolden::Variable`], clamped to the axis max);
+    /// otherwise bold is synthesized ([`Embolden::Synthetic`]).
+    fn face_embolden(&self, id: FaceId, ot_weight: u16) -> Embolden {
+        if ot_weight < Self::HEAVY_WEIGHT {
+            return Embolden::None;
+        }
+        let key = (id, ot_weight);
+        if let Some(&cached) = self.embolden_cache.borrow().get(&key) {
+            return cached;
+        }
+        let actual_weight = self.db.face(id).map_or(ot_weight, |f| f.weight.0);
+        let emb = if actual_weight >= Self::LIGHT_WEIGHT {
+            // A genuinely bold-ish face resolved (a discrete bold, or the
+            // variable master's default is already heavy) — render as-is.
+            Embolden::None
+        } else {
+            match self.face_wght_axis_max(id) {
+                Some(max) => {
+                    let w = ot_weight.min(Self::VARIABLE_BOLD_WEIGHT).min(max as u16);
+                    Embolden::Variable(w.max(Self::HEAVY_WEIGHT))
+                }
+                None => Embolden::Synthetic,
+            }
+        };
+        self.embolden_cache.borrow_mut().insert(key, emb);
+        emb
+    }
+
+    /// The maximum value of the face's `wght` variation axis, or `None` when the
+    /// face has no such axis (a plain static face). Used to decide between a real
+    /// variable-weight instance and synthetic faux-bold, and to clamp the
+    /// requested bold weight into the axis's own range (#63).
+    fn face_wght_axis_max(&self, id: FaceId) -> Option<f32> {
+        let bytes = self.face_bytes(id)?;
+        let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
+        font.variations()
+            .find_by_tag(WGHT_AXIS_TAG)
+            .map(|axis| axis.max_value())
+    }
 
     /// Record a weight downgrade (#56): `ot_weight` was heavy
     /// (`>= HEAVY_WEIGHT`) but `resolved`'s actual registered weight in `db`
@@ -897,7 +992,20 @@ impl FontStore {
                         .or_insert_with(|| Rc::new(ShaperData::new(&font))),
                 )
             };
-            let shaper = shaper_data.shaper(&font).build();
+            // A heavy run on a face that downgraded to a single/variable master
+            // is instanced at the bold `wght` axis value so the shaper positions
+            // the *bold* glyphs (advances included), not the regular ones (#63).
+            let emb = self.face_embolden(face_id, ot_weight);
+            let instance = match emb {
+                Embolden::Variable(w) => {
+                    Some(ShaperInstance::from_variations(&font, [("wght", w as f32)]))
+                }
+                Embolden::None | Embolden::Synthetic => None,
+            };
+            let shaper = shaper_data
+                .shaper(&font)
+                .instance(instance.as_ref())
+                .build();
             let upem = shaper.units_per_em() as f32;
             let s = if upem > 0.0 { px / upem } else { 0.0 };
             let mut buffer = UnicodeBuffer::new();
@@ -912,6 +1020,7 @@ impl FontStore {
                 glyphs.push(ShapedGlyph {
                     face: face_id,
                     glyph: info.glyph_id as u16,
+                    emb,
                     x: pen + pos.x_offset as f32 * s,
                     y: pos.y_offset as f32 * s,
                 });
@@ -963,11 +1072,18 @@ impl FontStore {
     /// set is a few dozen entries at most, far under the cap, so the "zero
     /// re-rasterization on repaint of the same menu" invariant (spec §9)
     /// holds — no menu ever triggers a mid-frame eviction.
-    fn glyph_image(&self, face_id: FaceId, glyph: u16, px: f32) -> Option<Rc<GlyphImage>> {
+    fn glyph_image(
+        &self,
+        face_id: FaceId,
+        glyph: u16,
+        px: f32,
+        emb: Embolden,
+    ) -> Option<Rc<GlyphImage>> {
         let key = GlyphKey {
             face: face_id,
             glyph,
             size_bits: px.to_bits(),
+            emb,
         };
         {
             let cache = self.glyphs.borrow();
@@ -975,7 +1091,7 @@ impl FontStore {
                 return cached.clone();
             }
         }
-        let rendered = self.render_glyph(face_id, glyph, px);
+        let rendered = self.render_glyph(face_id, glyph, px, emb);
         let mut cache = self.glyphs.borrow_mut();
         if cache.len() >= GLYPH_CACHE_CAP && !cache.contains_key(&key) {
             cache.clear();
@@ -987,11 +1103,24 @@ impl FontStore {
     /// Rasterize one glyph with `swash`, matching the previous color-emoji +
     /// outline handling: color outline / color bitmap first, then a plain alpha
     /// outline mask.
-    fn render_glyph(&self, face_id: FaceId, glyph: u16, px: f32) -> Option<Rc<GlyphImage>> {
+    fn render_glyph(
+        &self,
+        face_id: FaceId,
+        glyph: u16,
+        px: f32,
+        emb: Embolden,
+    ) -> Option<Rc<GlyphImage>> {
         let bytes = self.face_bytes(face_id)?;
         let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
         let mut ctx = self.scale_ctx.borrow_mut();
-        let mut scaler = ctx.builder(font).size(px).hint(false).build();
+        // Instance the variable-font `wght` axis so the bold master's outline is
+        // scaled, matching how the shaper positioned it (#63). A no-op for a face
+        // with no `wght` axis or a non-variable emboldening.
+        let mut builder = ctx.builder(font).size(px).hint(false);
+        if let Embolden::Variable(w) = emb {
+            builder = builder.variations([("wght", w as f32)]);
+        }
+        let mut scaler = builder.build();
         let image = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),
@@ -1001,14 +1130,22 @@ impl FontStore {
         if image.placement.width == 0 || image.placement.height == 0 {
             return None;
         }
-        Some(Rc::new(GlyphImage {
+        let mut glyph_image = GlyphImage {
             left: image.placement.left,
             top: image.placement.top,
             width: image.placement.width,
             height: image.placement.height,
             content: image.content,
             data: image.data,
-        }))
+        };
+        // Faux-bold for a plain face with no `wght` axis: dilate the alpha
+        // coverage one device pixel horizontally so a bold request still visibly
+        // bolds where no real bold master exists (#63). Color glyphs (emoji) are
+        // left untouched — synthetic emboldening doesn't apply to them.
+        if emb == Embolden::Synthetic {
+            embolden_mask(&mut glyph_image);
+        }
+        Some(Rc::new(glyph_image))
     }
 }
 
@@ -1498,7 +1635,7 @@ impl SceneDrawer for RasterDrawer {
         for g in &shaped.glyphs {
             // Fetch (and cache) the glyph bitmap first, releasing the font-store
             // borrow before the disjoint `&mut self.fb` blit borrow.
-            let Some(image) = self.fonts.glyph_image(g.face, g.glyph, px) else {
+            let Some(image) = self.fonts.glyph_image(g.face, g.glyph, px, g.emb) else {
                 continue;
             };
             let gx = (ox + g.x).round() as i32 + image.left;
@@ -1590,6 +1727,36 @@ fn icon_cache_hit(entry: Option<&IconCacheEntry>, bytes: &Arc<[u8]>) -> Option<D
         // hit whose retained `Arc` is a different allocation (ABA), is a miss.
         _ => None,
     }
+}
+
+/// Synthesize bold on an alpha-coverage glyph mask (faux-bold) by dilating it one
+/// device pixel horizontally: the mask widens by one column and each output pixel
+/// takes the max coverage of itself and its left neighbor. This thickens stems
+/// visibly without a real bold master — the fallback for a bold request on a plain
+/// single-weight face with no `wght` axis (#63). Only [`Content::Mask`] /
+/// [`Content::SubpixelMask`] glyphs are dilated; color glyphs are left as-is.
+fn embolden_mask(image: &mut GlyphImage) {
+    if !matches!(image.content, Content::Mask | Content::SubpixelMask) {
+        return;
+    }
+    let w = image.width as usize;
+    let h = image.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let new_w = w + 1;
+    let mut out = vec![0u8; new_w * h];
+    for row in 0..h {
+        let src = &image.data[row * w..row * w + w];
+        let dst = &mut out[row * new_w..row * new_w + new_w];
+        for col in 0..new_w {
+            let here = if col < w { src[col] } else { 0 };
+            let left = if col > 0 { src[col - 1] } else { 0 };
+            dst[col] = here.max(left);
+        }
+    }
+    image.data = out;
+    image.width = new_w as u32;
 }
 
 /// Blit one rasterized glyph onto the framebuffer (premultiplied RGBA bytes) at
@@ -1855,6 +2022,111 @@ mod tests {
         // Memoized: re-resolving the same (family, weight) must not double-count.
         let _ = d.fonts.resolve_face(&FontFamily::System, 700);
         assert_eq!(d.weight_downgrade_count(), 1);
+    }
+
+    /// Sum the alpha coverage of a shaped run rendered at `ot_weight` on the
+    /// store `d`, so a test can compare how much ink a bold vs regular render of
+    /// the same text lays down on the *same* face (#63).
+    #[cfg(test)]
+    fn run_ink(
+        d: &RasterDrawer,
+        primary: Option<FaceId>,
+        text: &str,
+        ot_weight: u16,
+        px: f32,
+    ) -> u64 {
+        let line = d.fonts.shape(text, primary, ot_weight, px, 0.0);
+        let mut sum = 0u64;
+        for g in &line.glyphs {
+            if let Some(img) = d.fonts.glyph_image(g.face, g.glyph, px, g.emb) {
+                if matches!(img.content, Content::Mask | Content::SubpixelMask) {
+                    sum += img.data.iter().map(|&b| b as u64).sum::<u64>();
+                }
+            }
+        }
+        sum
+    }
+
+    /// #63 core (synthetic path, portable): a family with only a single static
+    /// face (no `wght` axis) still renders a `Weight::Bold` request visibly bold.
+    /// `fontdb` resolves bold to the same regular face (it never fails on
+    /// weight), so [`FontStore::face_embolden`] must choose faux-bold and the
+    /// bold render must ink strictly heavier than regular.
+    #[test]
+    fn single_static_face_synthesizes_bold_when_no_wght_axis() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU.to_vec());
+        let d = RasterDrawer::from_parts(1.0, db, Some("DejaVu Sans".to_string()));
+
+        let regular = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        let bold = d.fonts.resolve_face(&FontFamily::System, 700).unwrap();
+        assert_eq!(
+            regular, bold,
+            "one static face: fontdb resolves bold back to the only face"
+        );
+        assert_eq!(
+            d.fonts.face_embolden(bold, 700),
+            Embolden::Synthetic,
+            "a static face with no wght axis must synthesize bold (faux-bold), #63"
+        );
+
+        let px = 32.0;
+        let reg_ink = run_ink(&d, Some(regular), "Bold", 400, px);
+        let bold_ink = run_ink(&d, Some(regular), "Bold", 700, px);
+        assert!(
+            bold_ink > reg_ink,
+            "#63: synthesized bold must ink heavier than regular (bold {bold_ink} vs regular {reg_ink})"
+        );
+    }
+
+    /// #63 core (variable path, the real live-macOS scenario): the system UI
+    /// font on modern macOS is a single SF **variable** file (`SFNS.ttf`),
+    /// registered as ONE face with a `wght` axis. A `Weight::Bold` request
+    /// resolves to that same regular face, but [`FontStore::face_embolden`] must
+    /// now instance the `wght` axis at bold instead of downgrading, so the bold
+    /// render inks strictly heavier. Gated at runtime on the real SF file
+    /// existing (present on macOS hosts, absent elsewhere) rather than a
+    /// `cfg(target_os)` — ADR-0002 keeps `target_os` out of the render layer.
+    #[test]
+    fn native_sf_variable_font_renders_bold_via_wght_instancing() {
+        const SFNS: &str = "/System/Library/Fonts/SFNS.ttf";
+        if !std::path::Path::new(SFNS).exists() {
+            return; // SF variable file not present on this host
+        }
+        let mut db = Database::new();
+        let ids = db.load_font_source(DbSource::File(std::path::PathBuf::from(SFNS)));
+        let Some(&fid) = ids.first() else {
+            return;
+        };
+        let Some(family) = db
+            .face(fid)
+            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+        else {
+            return;
+        };
+        let d = RasterDrawer::from_parts(2.0, db, Some(family));
+
+        let regular = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        let bold = d.fonts.resolve_face(&FontFamily::System, 700).unwrap();
+        assert_eq!(
+            regular, bold,
+            "SFNS is one face; a bold request resolves to the same variable file"
+        );
+        let emb = d.fonts.face_embolden(bold, 700);
+        assert!(
+            matches!(emb, Embolden::Variable(_)),
+            "SFNS exposes a wght axis, so bold must be a variable-weight instance, not synthetic or downgraded: got {emb:?}"
+        );
+
+        let px = 30.0;
+        let reg_ink = run_ink(&d, Some(regular), "Bold", 400, px);
+        let bold_ink = run_ink(&d, Some(regular), "Bold", 700, px);
+        assert!(
+            bold_ink > reg_ink,
+            "#63: SF variable bold must ink heavier than regular on the live System path \
+             (bold {bold_ink} vs regular {reg_ink})"
+        );
     }
 
     /// spec §7.1's font-fallback layer: when a primary face is pinned but has
