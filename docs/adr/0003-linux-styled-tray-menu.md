@@ -1,8 +1,22 @@
 # ADR-0003 — Linux styled tray menu: presenter seam, X11 custom popup, Wayland layer-shell scaffold
 
-**Status:** Accepted (0.11.0). Partially implemented on the macOS host; the Wayland
-renderer and the accessibility wiring are **device-side** tasks (see the phased
-checklist at the end).
+**Status:** Accepted (0.11.0); implemented (0.11.1). The presenter seam, X11 custom
+popup, Wayland `wlr-layer-shell` renderer, the X11/Wayland `Activate` delivery fix,
+and the AT-SPI (`accesskit_unix`) wiring are all **code-complete and cross-checked on
+the `x86_64-unknown-linux-gnu` target**; the live surface/loop, the ksni host
+handshake, and Orca announcement remain **runtime `DEVICE-VERIFY`** (they need a real
+Linux compositor + AT-SPI bus). See the phased checklist at the end.
+
+**0.11.1 update.** The Wayland presenter is now real: `wayland.rs` opens a
+full-output `zwlr_layer_shell_v1` overlay, composites the popup + flyout stack into a
+`wl_shm` `Argb8888` buffer via `blit_argb8888`, and drives pointer/keyboard from the
+`wl_seat` (raw evdev keycodes — no `libxkbcommon` probe) through the shared
+`flyout`/`keynav` machines. The ksni `ItemIsMenu`/`Activate` gap is fixed with a
+const-generic `MuriSni<const MENU_ACTIVATE: bool>` split resolved before the
+`run_sni_loop` seam (right-click `ContextMenu` stays a ksni-0.3.6 limitation — a
+hard `UnknownMethod`). `accesskit_unix` is wired behind `a11y` for both the X11 and
+Wayland self-drawn popups. The Wayland client stack + `accesskit_unix` are
+Linux-target-gated optional deps, so the macOS `--all-features` gate stays green.
 
 **Context.** Through 0.10.x the Linux tray menu was *always* the native, host-drawn
 `com.canonical.dbusmenu` (SNI), and the only self-drawn styled surface was the X11
@@ -170,21 +184,30 @@ unlike the opaque X11 path); drive input from the seat handlers, reusing the sha
       for default, `--all-features`, `--no-default-features`, and
       `--features wayland-styled` all clean.
 
-**Device-side (a real Linux session must finish/verify):**
-- [ ] **X11:** confirm SNI-click → `XQueryPointer` → styled popup end-to-end; resolve
-      the ksni `MENU_ON_ACTIVATE`/`ItemIsMenu` switch (const-generic split or ksni
-      upstream / raw-zbus) so `activate` fires for `X11Popup`; decide right-click
-      handling (unreachable in ksni 0.3.6).
-- [ ] **Wayland deps:** add `wayland-client` + `smithay-client-toolkit` behind
-      `wayland-styled` (per the toml above); confirm the macOS gate is unaffected
-      (deps are Linux-target-gated).
-- [ ] **Wayland renderer:** implement `wayland::layer_shell_available` (registry
-      bind), `open_popup_session`, `cursor_position`; verify on sway/Hyprland + KWin
-      at 100%/150% scale, single + dual monitor.
-- [ ] **KDE SNI coord:** use the real `ContextMenu`/`Activate` coordinate to anchor
-      the layer-shell popup on Plasma/Waybar.
-- [ ] **Accessibility:** wire `accesskit_unix` in `PopupA11y` (feature `a11y`, Linux
-      target); feed the row `TreeUpdate`; verify with Orca; note the Wayland
-      window-bounds caveat.
-- [ ] **HiDPI / work area:** replace the `x11.rs` `SCALE = 1.0` and default work-area
-      with real `Xft.dpi`/RANDR and output geometry.
+**Implemented in 0.11.1 (code-complete, cross-checked on the Linux target):**
+- [x] **X11 activate delivery:** const-generic `MuriSni<const MENU_ACTIVATE: bool>`
+      split, resolved in `run_sni_loop` before the (non-generic-`fn`) `spawn_tray`
+      seam, so the styled presenters get `ItemIsMenu = false` + an empty exported
+      menu and the host forwards `Activate` to muri's own popup.
+- [x] **Wayland deps:** `wayland-client` + `smithay-client-toolkit` (default-features
+      off) behind `wayland-styled`, plus `accesskit_unix` behind `a11y` — all in the
+      `cfg(all(unix, not(target_os = "macos")))` table, so the macOS `--all-features`
+      gate is unaffected (verified green).
+- [x] **Wayland renderer:** `wayland::layer_shell_available` (registry probe),
+      `open_popup_session` (full-output overlay + `wl_shm` composite + seat input),
+      `cursor_position` (honest `None`). Raw evdev keycodes for nav (no libxkbcommon).
+- [x] **KDE SNI coord:** `MuriSni::activate(x, y)` → `open_wayland_popup_at` anchors
+      the layer-shell popup at the SNI-reported coordinate (Plasma/Waybar).
+- [x] **Accessibility:** `accesskit_unix` wired in `PopupA11y` (feature `a11y`, Linux
+      target); both the X11 `Session` and the Wayland popup attach the adapter and
+      push focus `TreeUpdate`s. Window-bounds (`set_root_window_bounds`) intentionally
+      unused (no reliable client screen rect on either backend — research §13 caveat).
+
+**Runtime `DEVICE-VERIFY` (a real Linux session must confirm):**
+- [ ] Live surface/loop on sway/Hyprland + KWin at 100%/150% scale, single + dual
+      monitor; the ksni host handshake actually forwarding `Activate`; Orca
+      announcing the pushed tree over a live AT-SPI bus.
+- [ ] Right-click `ContextMenu(x, y)` — still a hard `UnknownMethod` in ksni 0.3.6;
+      needs an upstream ksni capability or a raw-`zbus` SNI impl to intercept.
+- [ ] **HiDPI / work area:** replace the `SCALE = 1.0` (X11 + Wayland) and default
+      work-area with real `Xft.dpi`/RANDR and `wl_output`/`set_buffer_scale` geometry.

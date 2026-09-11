@@ -229,7 +229,13 @@ pub struct LinuxPlatform {
     /// A live SNI service registered by [`Platform::install_tray`], kept alive as
     /// long as the platform handle lives. The managed [`Platform::run_tray`] path
     /// spawns its own service instead and does not use this.
-    service: Option<Handle<MuriSni>>,
+    ///
+    /// Pinned to the `MENU_ON_ACTIVATE = true` (native-dbusmenu) variant of
+    /// [`MuriSni`]: `install_tray` registers a bare icon with an empty menu for
+    /// consumers running their own loop, so there is no styled popup to route an
+    /// `Activate` into — the host-drawn baseline is the right behavior here (the
+    /// styled-presenter split lives on the managed [`run_sni_loop`] path).
+    service: Option<Handle<MuriSni<true>>>,
 }
 
 impl std::fmt::Debug for LinuxPlatform {
@@ -277,7 +283,7 @@ impl Platform for LinuxPlatform {
         if let Some(tip) = tooltip {
             tray = tray.tooltip(tip);
         }
-        let handle = MuriSni {
+        let handle = MuriSni::<true> {
             tray,
             visible: true,
             presenter: detect_linux_presenter(),
@@ -316,6 +322,14 @@ impl Platform for LinuxPlatform {
                 return x11::cursor_position();
             }
         }
+        // A pure-Wayland session has no client pointer query (research doc §5): the
+        // styled layer-shell popup discovers the pointer within its own overlay
+        // surface instead, so this is honestly `None` here.
+        #[cfg(feature = "wayland-styled")]
+        {
+            return wayland::cursor_position();
+        }
+        #[allow(unreachable_code)]
         None
     }
 
@@ -410,12 +424,44 @@ pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
     };
     let anchor = LogicalRect::new(point, LogicalSize::new(0.0, 0.0));
     let dark = system_appearance().is_dark();
-    // Scaffold: attach the AT-SPI adapter for the self-drawn popup (inert until
-    // wired device-side — deliverable #5, `a11y` module).
-    let _a11y = a11y::PopupA11y::attach(&tray.menu);
     let dispatch = |id: &MenuId| tray.dispatch(id);
-    // Reuse the exact styled-popup backend `ContextMenu::open_at` funnels into.
+    // Reuse the exact styled-popup backend `ContextMenu::open_at` funnels into (it
+    // attaches the AT-SPI adapter itself — deliverable #5).
     let _ = x11::open_popup_session(
+        tray.menu.clone(),
+        tray.options.clone(),
+        &dispatch,
+        anchor,
+        Edge::Bottom,
+        dark,
+    );
+}
+
+/// Open muri's OWN `wlr-layer-shell` styled popup for the
+/// [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell) presenter
+/// (deliverable #1): anchor at the SNI-reported `(x, y)` — the one real coordinate
+/// channel on Wayland (research doc §5), meaningful on Plasma/Waybar and a
+/// best-effort top-left fallback (0,0) elsewhere — and route to the shared
+/// [`wayland::open_popup_session`], with the menu, options and click dispatch off the
+/// live [`Tray`]. Blocks the calling (SNI service) thread until the popup dismisses.
+///
+/// DEVICE-VERIFY(0.11.1): end-to-end SNI-click → layer-shell popup on a real
+/// wlroots/KWin session; the SNI coordinate quality is the host's (research doc §5).
+#[cfg(feature = "wayland-styled")]
+pub(super) fn open_wayland_popup_at(tray: &Tray, x: i32, y: i32) {
+    // Authoritative confirmation (beyond the env heuristic used to pre-select the
+    // presenter) that this compositor actually advertises `zwlr_layer_shell_v1`
+    // before a surface is created (ADR-0003 §2). Refuse cleanly otherwise.
+    if !wayland::layer_shell_available() {
+        return;
+    }
+    let anchor = LogicalRect::new(
+        LogicalPoint::new(x.max(0) as f32, y.max(0) as f32),
+        LogicalSize::new(0.0, 0.0),
+    );
+    let dark = system_appearance().is_dark();
+    let dispatch = |id: &MenuId| tray.dispatch(id);
+    let _ = wayland::open_popup_session(
         tray.menu.clone(),
         tray.options.clone(),
         &dispatch,
@@ -435,6 +481,38 @@ pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
 /// A condvar woken by the tray's installed waker keeps the drain responsive, with
 /// a periodic timeout as a backstop so a missed wake never wedges the loop.
 fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
+    // Resolve the presenter — and therefore ksni's type-level `MENU_ON_ACTIVATE` /
+    // `ItemIsMenu` — *before* the service is spawned (deliverable #2, ADR-0003 §3):
+    // the two `MuriSni<const>` instantiations are distinct types, and
+    // `spawn_tray_thread` handed us a non-generic `fn` pointer, so the const must be
+    // fixed here, at the seam. The styled presenters (X11/Wayland) want
+    // `MENU_ON_ACTIVATE = false` so the host forwards `Activate` to muri's own popup;
+    // the native-dbusmenu baseline wants `true` so the host draws the exported menu.
+    let presenter = detect_linux_presenter();
+    if presenter_uses_custom_popup(presenter) {
+        run_sni_loop_impl::<false>(tray, presenter, report)
+    } else {
+        run_sni_loop_impl::<true>(tray, presenter, report)
+    }
+}
+
+/// Whether `presenter` draws muri's OWN styled popup (so ksni must expose the tray
+/// as a plain activatable item — `ItemIsMenu = false` — and forward `Activate`),
+/// rather than deferring to the host-drawn dbusmenu.
+fn presenter_uses_custom_popup(presenter: LinuxMenuPresenter) -> bool {
+    matches!(
+        presenter,
+        LinuxMenuPresenter::X11Popup | LinuxMenuPresenter::WaylandLayerShell
+    )
+}
+
+/// The `MuriSni<M>`-monomorphized SNI service + command-drain loop. `M` is ksni's
+/// `MENU_ON_ACTIVATE`, fixed by [`run_sni_loop`] from the resolved presenter.
+fn run_sni_loop_impl<const M: bool>(
+    tray: Tray,
+    presenter: LinuxMenuPresenter,
+    report: &super::InstallReport,
+) -> Result<()> {
     // Keep the shared command queue + waker slot; the rest of the tray moves into
     // the SNI adapter.
     let commands = Arc::clone(&tray.commands);
@@ -445,10 +523,10 @@ fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
     // loop — so a spawn-path caller (the native `Tray::spawn`) learns
     // the item never registered instead of seeing a false `Ok`. The blocking
     // `run_tray` path also propagates it via the return value.
-    let handle = match (MuriSni {
+    let handle = match (MuriSni::<M> {
         tray,
         visible: true,
-        presenter: detect_linux_presenter(),
+        presenter,
     }
     .spawn())
     {
@@ -530,7 +608,7 @@ fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
 /// Apply one [`TrayCommand`] to the live SNI item. Each
 /// [`Handle::update`] mutates the adapter and triggers `ksni` to re-export the
 /// changed SNI properties / dbusmenu tree.
-fn apply_command(handle: &Handle<MuriSni>, command: TrayCommand) {
+fn apply_command<const M: bool>(handle: &Handle<MuriSni<M>>, command: TrayCommand) {
     match command {
         TrayCommand::SetMenu(menu) => {
             handle.update(move |s| s.tray.menu = menu);
@@ -638,11 +716,11 @@ fn system_menu_font() -> Option<crate::platform::SystemFont> {
 /// RGB, or `None` if unavailable/unrecognized. Injected into `Color::Accent`
 /// (#14). Best-effort.
 ///
-/// Only the styled X11 popup path reads the accent (the SNI tray defers all
-/// styling to the host's dbusmenu renderer), so this is gated to the
-/// `x11-popup` feature — a tray-only build (`default-features = false`) compiles
-/// neither the `x11` submodule nor this reader (#21).
-#[cfg(feature = "x11-popup")]
+/// Only the styled popup paths read the accent (the SNI tray defers all styling to
+/// the host's dbusmenu renderer), so this is gated to the styled-popup features — a
+/// tray-only build (`default-features = false`, no styled popup) compiles neither
+/// the `x11`/`wayland` submodules nor this reader (#21).
+#[cfg(any(feature = "x11-popup", feature = "wayland-styled"))]
 pub(super) fn system_accent() -> Option<(u8, u8, u8, u8)> {
     let out = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "accent-color"])

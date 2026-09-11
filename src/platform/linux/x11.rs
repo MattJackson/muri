@@ -131,6 +131,10 @@ struct Session<'conn, 'cb> {
     min_keycode: u8,
     keysyms_per_keycode: u8,
     done: bool,
+    /// AT-SPI adapter for this self-drawn popup (deliverable #5). `None` when the
+    /// `a11y` feature is off or no assistive tech is listening; publishes the same
+    /// AccessKit tree muri builds on macOS/Windows.
+    a11y: Option<super::a11y::PopupA11y>,
 }
 
 impl<'conn, 'cb> Session<'conn, 'cb> {
@@ -195,6 +199,9 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
         let (keymap, min_keycode, keysyms_per_keycode) = load_keymap(conn)?;
 
         let theme = resolve_theme(&options, dark);
+        // Attach the AT-SPI adapter for the self-drawn popup (deliverable #5); it
+        // publishes the initial tree lazily and no-ops until an AT attaches.
+        let a11y = super::a11y::PopupA11y::attach(&menu);
 
         Ok(Session {
             conn,
@@ -210,6 +217,7 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             min_keycode,
             keysyms_per_keycode,
             done: false,
+            a11y,
         })
     }
 
@@ -257,6 +265,11 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             .flush()
             .map_err(|e| Error::Platform(format!("X11 flush failed: {e}")))?;
 
+        // The popup now holds the grab: tell the AT it is focused.
+        if let Some(a) = self.a11y.as_mut() {
+            a.set_focused(true);
+        }
+
         while !self.done {
             let event = self
                 .conn
@@ -301,6 +314,9 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
                 //
                 // DEVICE-VERIFY(0.9.0): FocusOut vs. grab interactions differ across
                 // window managers; outside-click + Esc are the primary dismiss paths.
+                if let Some(a) = self.a11y.as_mut() {
+                    a.set_focused(false);
+                }
                 self.done = true;
             }
             _ => {}
@@ -485,7 +501,16 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             // The panel may have been truncated away; guard in redraw.
             self.redraw(level)?;
         }
+        self.sync_a11y_focus();
         Ok(())
+    }
+
+    /// Push the current top-level focus to the AT (if an adapter is attached).
+    fn sync_a11y_focus(&mut self) {
+        let top = self.popup.as_ref().and_then(|p| p.hovered);
+        if let Some(a) = self.a11y.as_mut() {
+            a.focus_row(top);
+        }
     }
 
     fn on_click(&mut self, pt: LogicalPoint) -> Result<()> {
@@ -552,6 +577,7 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
                 f.panel.hovered = ff.child;
             }
         }
+        self.sync_a11y_focus();
         self.redraw_all()
     }
 

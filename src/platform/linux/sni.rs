@@ -41,7 +41,26 @@ use crate::Tray;
 /// onto the SNI `Status`. `ksni` runs this on a background D-Bus service thread,
 /// re-reading its properties whenever a
 /// [`Handle::update`](ksni::blocking::Handle::update) mutates it.
-pub(crate) struct MuriSni {
+///
+/// The `MENU_ACTIVATE` const parameter is threaded straight into ksni's
+/// [`ksni::Tray::MENU_ON_ACTIVATE`] (which ksni 0.3.6 exposes only as a *type-level*
+/// const, and from which it derives the SNI `ItemIsMenu` property). It is the
+/// load-bearing fix for the styled presenters (deliverable #2, ADR-0003 §3):
+///
+/// - `true` (the [`NativeDbusMenu`](LinuxMenuPresenter::NativeDbusMenu) baseline):
+///   `ItemIsMenu = true`, so a left-click makes the host draw the exported dbusmenu
+///   and ksni answers `Activate` with `UnknownMethod` — muri's [`Self::activate`] is
+///   never called, which is correct (the host owns the menu).
+/// - `false` (the styled [`X11Popup`](LinuxMenuPresenter::X11Popup) /
+///   [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell) presenters):
+///   `ItemIsMenu = false` and the exported [`Self::menu`] is empty, so the host
+///   forwards the left-click as `Activate` — which muri intercepts to open its own
+///   styled popup.
+///
+/// The two instantiations are distinct types, so the choice is resolved once (from
+/// [`super::detect_linux_presenter`]) *before* the `ksni` service is spawned — see
+/// [`super::run_sni_loop`], which branches into the right `const` up front.
+pub(crate) struct MuriSni<const MENU_ACTIVATE: bool> {
     /// The muri tray: source of the menu, icon, tooltip and dispatch handler.
     pub(crate) tray: Tray,
     /// Best-effort show/hide, surfaced as the SNI `Status` (Active/Passive).
@@ -52,7 +71,7 @@ pub(crate) struct MuriSni {
     pub(crate) presenter: LinuxMenuPresenter,
 }
 
-impl MuriSni {
+impl<const MENU_ACTIVATE: bool> MuriSni<MENU_ACTIVATE> {
     /// Route a row activation through the muri tray's unified dispatch path so
     /// `on_click` fires. Inert ids ([`MenuId::none`]) never dispatch.
     fn dispatch(&self, id: &MenuId) {
@@ -97,7 +116,7 @@ fn leading_png(icon: &Option<Icon>) -> Vec<u8> {
 /// Build the `ksni` menu items for one [`Menu`] level. Recurses through
 /// [`Item::Submenu`], so muri's N-level nesting (decision #8) is carried for free
 /// — dbusmenu nests arbitrarily deep and the host draws the whole tree.
-fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
+fn build_items<const M: bool>(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni<M>>> {
     use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
     menu.items
@@ -135,7 +154,7 @@ fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
                         enabled,
                         checked,
                         icon_data,
-                        activate: Box::new(move |s: &mut MuriSni| s.dispatch(&id)),
+                        activate: Box::new(move |s: &mut MuriSni<M>| s.dispatch(&id)),
                         ..Default::default()
                     }
                     .into()
@@ -144,7 +163,7 @@ fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
                         label,
                         enabled,
                         icon_data,
-                        activate: Box::new(move |s: &mut MuriSni| s.dispatch(&id)),
+                        activate: Box::new(move |s: &mut MuriSni<M>| s.dispatch(&id)),
                         ..Default::default()
                     }
                     .into()
@@ -154,7 +173,7 @@ fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
                 label: label.accessible_name(),
                 enabled: label.enabled,
                 icon_data: leading_png(&label.leading),
-                submenu: build_items(menu),
+                submenu: build_items::<M>(menu),
                 ..Default::default()
             }
             .into(),
@@ -162,10 +181,12 @@ fn build_items(menu: &Menu) -> Vec<ksni::menu::MenuItem<MuriSni>> {
         .collect()
 }
 
-impl ksni::Tray for MuriSni {
-    /// A left-click should surface the same menu the host draws on right-click:
-    /// a menu-only tray has no other primary action.
-    const MENU_ON_ACTIVATE: bool = true;
+impl<const MENU_ACTIVATE: bool> ksni::Tray for MuriSni<MENU_ACTIVATE> {
+    /// Threaded from the type parameter into ksni's `ItemIsMenu` derivation (see the
+    /// [`MuriSni`] type docs): `true` for the native-dbusmenu baseline (host draws
+    /// the menu on left-click), `false` for the styled X11/Wayland presenters (the
+    /// host forwards `Activate` and muri draws its own popup).
+    const MENU_ON_ACTIVATE: bool = MENU_ACTIVATE;
 
     fn id(&self) -> String {
         // A stable, process-wide SNI id. Not user-visible.
@@ -209,42 +230,47 @@ impl ksni::Tray for MuriSni {
         }
     }
 
-    /// A left-click (SNI `Activate`). For the custom
-    /// [`X11Popup`](LinuxMenuPresenter::X11Popup) presenter, open muri's OWN
-    /// styled popup: **ignore** the host-supplied `(x, y)` (an SNI hint that is
-    /// unreliable / often `0,0` off KDE/Waybar — research doc §5) and anchor at
-    /// the live pointer via `XQueryPointer` instead (deliverable #3). For every
-    /// other presenter this is a no-op: the host draws the exported `dbusmenu`.
+    /// A left-click (SNI `Activate`). This method is only *reached* when
+    /// `MENU_ON_ACTIVATE`/`ItemIsMenu` is `false` — i.e. for the styled presenters,
+    /// which is exactly what the const-generic split arranges (deliverable #2):
     ///
-    /// ksni-0.3.6 constraint (DEVICE-VERIFY, ADR-0003): ksni derives `ItemIsMenu`
-    /// from the type-level `MENU_ON_ACTIVATE` const and, when it is `true`, makes
-    /// `Activate` return `UnknownMethod` so the host shows the dbusmenu instead of
-    /// calling this method. So to actually *receive* this activate for the X11
-    /// presenter, the device-side task must select a `MENU_ON_ACTIVATE = false`
-    /// adapter for `X11Popup` (e.g. a const-generic split of `MuriSni`, threaded
-    /// through the non-fn-pointer `run_sni_loop` seam) or move to a raw-`zbus` SNI
-    /// impl. The routing itself is wired here and is correct the moment activate
-    /// fires; right-click `ContextMenu` is unreachable in ksni 0.3.6 (hard
-    /// `UnknownMethod`) and is the same upstream/raw-zbus task.
-    fn activate(&mut self, _x: i32, _y: i32) {
-        #[cfg(feature = "x11-popup")]
-        if self.presenter == LinuxMenuPresenter::X11Popup {
-            super::open_x11_popup_at_cursor(&self.tray);
+    /// - [`X11Popup`](LinuxMenuPresenter::X11Popup): open muri's own override-redirect
+    ///   popup, **ignoring** the host-supplied `(x, y)` (an SNI hint that is unreliable
+    ///   / often `0,0` off KDE/Waybar — research doc §5) and anchoring at the live
+    ///   pointer via `XQueryPointer` instead.
+    /// - [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell): open muri's
+    ///   `wlr-layer-shell` popup anchored at the SNI-reported `(x, y)` — the one real
+    ///   coordinate channel on Wayland (research doc §5), meaningful on Plasma/Waybar.
+    ///
+    /// The [`NativeDbusMenu`](LinuxMenuPresenter::NativeDbusMenu) baseline never
+    /// reaches here (its `ItemIsMenu = true` makes ksni answer `Activate` with
+    /// `UnknownMethod` so the host draws the exported dbusmenu instead).
+    ///
+    /// Right-click `ContextMenu(x, y)` is a hard `UnknownMethod` in ksni 0.3.6
+    /// (`dbus_interface.rs`), so it cannot be intercepted without a raw-`zbus` SNI
+    /// impl or an upstream ksni capability — the one remaining device-side caveat for
+    /// a fully host-agnostic right-click (ADR-0003 §3).
+    fn activate(&mut self, x: i32, y: i32) {
+        match self.presenter {
+            #[cfg(feature = "x11-popup")]
+            LinuxMenuPresenter::X11Popup => super::open_x11_popup_at_cursor(&self.tray),
+            #[cfg(feature = "wayland-styled")]
+            LinuxMenuPresenter::WaylandLayerShell => super::open_wayland_popup_at(&self.tray, x, y),
+            _ => {
+                let _ = (x, y);
+            }
         }
     }
 
     fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
         match self.presenter {
-            // When muri draws its own styled popup (the X11 custom presenter),
-            // don't *also* export a host-drawn dbusmenu tree — return an empty menu
-            // so the custom popup is the only surface (deliverable #3).
-            LinuxMenuPresenter::X11Popup => Vec::new(),
-            // The native dbusmenu baseline (GNOME + universal fallback), and — until
-            // the layer-shell path is wired device-side — the Wayland presenter too:
-            // export the full native menu (the accessible, host-drawn baseline).
-            LinuxMenuPresenter::NativeDbusMenu | LinuxMenuPresenter::WaylandLayerShell => {
-                build_items(&self.tray.menu)
-            }
+            // When muri draws its own styled popup (the X11 or Wayland custom
+            // presenter), don't *also* export a host-drawn dbusmenu tree — return an
+            // empty menu so the custom popup is the only surface (deliverable #2/#3).
+            LinuxMenuPresenter::X11Popup | LinuxMenuPresenter::WaylandLayerShell => Vec::new(),
+            // The native dbusmenu baseline (GNOME + universal fallback): export the
+            // full native menu (the accessible, host-drawn baseline).
+            LinuxMenuPresenter::NativeDbusMenu => build_items(&self.tray.menu),
         }
     }
 }

@@ -182,6 +182,26 @@ zbus = { version = "5", features = ["blocking-api"] }
 # needs none of it, and the tray-anchored styled popup is impossible by design
 # (spec 22 §1). See spec 22 §7 item 3 (#21).
 x11rb = { version = "0.13", default-features = false, optional = true }
+# Wayland client stack for the styled `wlr-layer-shell` popup (feature
+# `wayland-styled`, OFF by default — spec 22 §2 Path 2 Tier 1, ADR-0003). Both are
+# **Linux-target-gated** (this whole table is `cfg(all(unix, not macos))`), so they
+# are absent from macOS builds even under `--all-features` — the hard constraint
+# that keeps the macOS gate green. `smithay-client-toolkit` with
+# `default-features = false` drops its `calloop`/`xkbcommon` defaults: muri drives
+# the `wayland-client` event queue directly and maps raw evdev keycodes for menu
+# navigation, so no `libxkbcommon` system-library build probe is pulled — pure Rust
+# except for the runtime `wl_display` socket. sctk gives the ergonomic
+# `zwlr_layer_shell_v1` + `wl_shm` slot-pool wrappers; `wayland-client` is the core
+# protocol + `wl_shm::Format::Argb8888`. MSRV is at/under muri's 1.87 floor.
+smithay-client-toolkit = { version = "0.19", default-features = false, optional = true }
+wayland-client = { version = "0.31", optional = true }
+# AT-SPI2 accessibility for the self-drawn X11/Wayland popups (feature `a11y` on
+# Linux — research doc §13, ADR-0003 §5). `accesskit_unix` speaks AT-SPI2 over
+# D-Bus (`zbus`), display-server-agnostic and never touching the compositor, so it
+# works identically under X11 and Wayland. Target-gated + optional, so the default
+# build and the non-Linux `a11y` builds (which use `accesskit_macos`/`_windows`)
+# carry none of it. 0.13 pairs with accesskit 0.17.
+accesskit_unix = { version = "0.13", optional = true }
 
 [features]
 default = ["x11-popup"]
@@ -192,23 +212,31 @@ default = ["x11-popup"]
 # keep just the SNI tray (Path 1). Inert on non-Linux targets — `x11rb` is a
 # Linux-target dependency, so `dep:x11rb` is a no-op elsewhere (#21).
 x11-popup = ["dep:x11rb"]
-# Linux only (0.11.0): scaffolding for the self-drawn, styled tray/context menu on
-# Wayland via `zwlr_layer_shell_v1` (wlroots compositors + KWin/Plasma). OFF by
-# default. For now this feature ONLY gates the `cfg(unix, not macos)` Wayland
-# scaffold module (`src/platform/linux/wayland.rs`) and pulls **no** external
-# crates — the heavy Wayland client stack (`smithay-client-toolkit` +
-# `wayland-client`) is a device-side addition (see ADR-0003 and the research
-# doc's device-task list) so `cargo build --all-features` stays green on macOS,
-# where these Linux-only deps do not build. Inert on non-Linux targets (the
-# gated module is only compiled under `all(unix, not(target_os = "macos"))`).
-wayland-styled = []
+# Linux only (0.11.1): the self-drawn, styled tray/context menu on Wayland via
+# `zwlr_layer_shell_v1` (wlroots compositors + KWin/Plasma). OFF by default. Gates
+# the `cfg(unix, not macos)` Wayland presenter module
+# (`src/platform/linux/wayland.rs`) *and* pulls the Wayland client stack
+# (`smithay-client-toolkit` + `wayland-client`). Those deps live in the
+# `cfg(all(unix, not(target_os = "macos")))` dependency table, so `dep:` activation
+# here is a no-op on macOS/Windows — `cargo build --all-features` stays green on the
+# macOS gate host because the crates are simply not present for that target (the
+# hard constraint, ADR-0003). Inert on non-Linux targets (the gated module is only
+# compiled under `all(unix, not(target_os = "macos"))`).
+wayland-styled = ["dep:smithay-client-toolkit", "dep:wayland-client"]
 # Screen-reader integration via AccessKit on the raster backend (see README).
 # On macOS this activates the `accesskit_macos` platform adapter; the `dep:`
 # reference to a target-specific optional dependency is inert on other targets.
 # `dep:accesskit_macos` / `dep:accesskit_windows` are the per-OS platform
 # adapters; each is a target-gated optional dependency, so referencing it here is
 # inert on the other targets.
-a11y = ["dep:accesskit", "dep:accesskit_macos", "dep:accesskit_windows"]
+# `dep:accesskit_unix` is the Linux (X11/Wayland self-drawn popup) AT-SPI adapter —
+# a target-gated optional dep, so referencing it here is inert on macOS/Windows.
+a11y = [
+    "dep:accesskit",
+    "dep:accesskit_macos",
+    "dep:accesskit_windows",
+    "dep:accesskit_unix",
+]
 # The muda + tray-icon compatibility facade (`compat::muda` / `compat::tray_icon`,
 # spec 02/60). It maps entirely onto muri's native model and does NOT pull in the
 # real `muda` / `tray-icon` crates (locked decision #5). The global `MenuEvent`
