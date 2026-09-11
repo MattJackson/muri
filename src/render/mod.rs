@@ -35,6 +35,13 @@
 //!
 //! [§7.1]: ../../../docs/design/spec/10-rendering-layout.md
 
+/// Display-free, one-call offscreen rendering of a built menu to pixels
+/// (issue #59): [`render_menu_to_png`] / [`render_menu_to_rgba`], re-exported at
+/// the crate root. No tray/window/display/TCC required; resolves the theme from
+/// [`MenuOptions`](crate::MenuOptions) internally.
+mod offscreen;
+pub use offscreen::{render_menu_to_png, render_menu_to_rgba};
+
 pub mod paint;
 // Not `pub`: this module's blit primitives (`blend_pixel`, `fill_round_rect`,
 // `fill_rect`, `scaled`) are internal-only implementation details with no

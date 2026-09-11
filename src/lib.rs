@@ -156,6 +156,7 @@ pub use menu::{
     Stack, StyleRun, TextContent,
 };
 pub use platform::{Appearance, Platform, PlatformEvent};
+pub use render::{render_menu_to_png, render_menu_to_rgba};
 pub use style::{Color, Font, FontFamily, Rgba, Weight};
 pub use theme::{GutterPolicy, MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
 

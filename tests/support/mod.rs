@@ -51,6 +51,7 @@ fn target_dir() -> PathBuf {
 /// within [`CHANNEL_TOLERANCE`] per channel, with at most [`MAX_MISMATCH_FRACTION`]
 /// of pixels allowed to exceed it. On any failure the actual render is written
 /// to `target/<name>-actual.png` for inspection and the panic message says so.
+#[allow(dead_code)]
 pub fn assert_golden(name: &str, actual: &Framebuffer) {
     let path = snapshots_dir().join(format!("{name}.png"));
 
@@ -110,6 +111,76 @@ pub fn assert_golden(name: &str, actual: &Framebuffer) {
     }
 }
 
+/// Like [`assert_golden`], but compares a straight-alpha RGBA8 **PNG** (as
+/// produced by the display-free public API [`muri::render_menu_to_png`]) against
+/// the committed golden, rather than a live [`Framebuffer`]. Both sides are
+/// decoded to straight RGBA and compared with the same tolerance budget, so this
+/// exercises the real public entry point end-to-end. Honors
+/// `MURI_UPDATE_SNAPSHOTS` the same way.
+#[allow(dead_code)]
+pub fn assert_golden_png(name: &str, png: &[u8]) {
+    let path = snapshots_dir().join(format!("{name}.png"));
+
+    if std::env::var_os(UPDATE_ENV_VAR).is_some() {
+        std::fs::create_dir_all(path.parent().expect("snapshots dir"))
+            .expect("create tests/snapshots/");
+        std::fs::write(&path, png)
+            .unwrap_or_else(|e| panic!("write golden {}: {e}", path.display()));
+        eprintln!("wrote golden {}", path.display());
+        return;
+    }
+
+    let (act_rgba, act_w, act_h) = decode_png(png).expect("decode actual PNG");
+    let reference_bytes = std::fs::read(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing golden reference {} ({e}); run with {UPDATE_ENV_VAR}=1 once to create it",
+            path.display()
+        )
+    });
+    let (ref_rgba, ref_w, ref_h) = decode_png(&reference_bytes)
+        .unwrap_or_else(|| panic!("decode golden reference {}", path.display()));
+
+    if (ref_w, ref_h) != (act_w, act_h) {
+        write_actual_png(name, png);
+        panic!(
+            "golden '{name}' size mismatch: reference {ref_w}x{ref_h}, actual {act_w}x{act_h} \
+             (actual written to target/{name}-actual.png)"
+        );
+    }
+
+    let total = (act_w as usize) * (act_h as usize);
+    let mismatched = ref_rgba
+        .chunks_exact(4)
+        .zip(act_rgba.chunks_exact(4))
+        .filter(|(r, a)| {
+            r[0].abs_diff(a[0]) > CHANNEL_TOLERANCE
+                || r[1].abs_diff(a[1]) > CHANNEL_TOLERANCE
+                || r[2].abs_diff(a[2]) > CHANNEL_TOLERANCE
+                || r[3].abs_diff(a[3]) > CHANNEL_TOLERANCE
+        })
+        .count();
+
+    let fraction = mismatched as f64 / total as f64;
+    if fraction > MAX_MISMATCH_FRACTION {
+        write_actual_png(name, png);
+        panic!(
+            "golden '{name}' mismatch: {mismatched}/{total} pixels ({:.4}%) differ by more than \
+             {CHANNEL_TOLERANCE}/255 in some channel (max allowed {:.4}%); actual written to \
+             target/{name}-actual.png for inspection",
+            fraction * 100.0,
+            MAX_MISMATCH_FRACTION * 100.0
+        );
+    }
+}
+
+#[allow(dead_code)]
+fn write_actual_png(name: &str, png: &[u8]) {
+    let dir = target_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(format!("{name}-actual.png")), png);
+}
+
+#[allow(dead_code)]
 fn write_actual(name: &str, fb: &Framebuffer) {
     let dir = target_dir();
     let _ = std::fs::create_dir_all(&dir);
