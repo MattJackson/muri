@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-09-11
+
+### Fixed
+
+- **Live macOS popup background now shows the `Material::Menu` vibrancy (#64).** A
+  native `NSMenu` paints no bulk background over its vibrancy backdrop, but muri's
+  live System-theme popup filled its whole rounded rect with the preset's
+  ~0.80-alpha background *on top of* the `NSVisualEffectView(Material::Menu)`,
+  masking ~80% of the blur and reading as flat gray. On the live System path with
+  transparency enabled, the bulk fill is now fully transparent so the rounded
+  vibrancy is the surface — matching native. The offscreen renderer and
+  forced/preset/custom themes keep their translucent fill (no vibrancy backdrop
+  exists there), so goldens are unchanged; the reduce-transparency path still goes
+  opaque.
+
 ## [0.11.2] - 2026-09-11
 
 Audit-hardening release before wider testing. A 10-lens code audit of the
