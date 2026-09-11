@@ -518,8 +518,11 @@ impl MacosAnchor {
     /// menu-bar text `title`. A valid PNG/SVG becomes the button image; a
     /// non-empty `title` is drawn as the button's text (the macOS menu-bar text,
     /// e.g. a live "45%"), composing with the image when both are present. When
-    /// neither a drawable image nor a title is available, a bullet placeholder
-    /// keeps the item visible and clickable (an empty status item is invisible).
+    /// both a drawable image and a non-empty title are present they render
+    /// together **icon leading, title trailing** (`NSImageLeft`), matching native
+    /// menu-bar extras (#58). When neither a drawable image nor a title is
+    /// available, a bullet placeholder keeps the item visible and clickable (an
+    /// empty status item is invisible).
     fn set_status(&self, icon: &Icon, title: Option<&str>, tooltip: Option<&str>) {
         let Some(item) = &self.status_item else {
             return;
@@ -558,6 +561,15 @@ impl MacosAnchor {
             None => "●",
         };
         button.setTitle(&NSString::from_str(text));
+        // With both a glyph and a label, lay them out like a native menu-bar
+        // extra: icon leading, text trailing (#58). AppKit's default image
+        // position can otherwise let one dominate; pin it explicitly. When only
+        // the image is present the title is empty, so the position is moot.
+        // DEVICE-VERIFY(0.10.8): confirm the icon+title side-by-side layout on a
+        // real menu bar.
+        if has_image && title.is_some() {
+            button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
+        }
         if let Some(tip) = tooltip {
             button.setToolTip(Some(&NSString::from_str(tip)));
         }
