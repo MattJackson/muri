@@ -408,11 +408,12 @@ impl TrayIconBuilder {
     /// Spawn the configured tray, returning the live handle or the real error.
     fn spawn_handle(&self) -> super::muda::Result<crate::TrayHandle> {
         let tray = self.configured_tray();
-        let marker = crate::MainThreadMarker::new().ok_or_else(|| {
-            super::muda::Error::Platform("a tray must be built on the main thread".into())
-        })?;
-        tray.spawn(marker)
-            .map_err(|e| super::muda::Error::Platform(e.to_string()))
+        let marker = crate::MainThreadMarker::new().ok_or(super::muda::Error::MainThread)?;
+        // Preserve the structured failure kind (EH-1/EH-2): on Windows/Linux the
+        // install handshake makes `spawn` return `Error::TrayInstall` when the OS
+        // tray never installed, so `build_result` surfaces that exact variant
+        // instead of a stringly-typed `Platform` catch-all.
+        tray.spawn(marker).map_err(super::muda::Error::from)
     }
 
     /// Assemble the facade `TrayIcon` around an (optional) live handle.
@@ -909,6 +910,40 @@ mod tests {
             ok, live,
             "build_result() must succeed exactly when build() yields a live tray"
         );
+    }
+
+    #[test]
+    fn build_result_reports_a_structured_error_when_the_tray_is_not_live() {
+        // EH-1/EH-2: when the tray cannot install, `build()` must degrade to a
+        // non-live facade without panicking, and `build_result()` must surface a
+        // *structured* error kind (MainThread off the main thread; TrayInstall on a
+        // real Windows/Linux install failure) rather than the old stringly
+        // `Platform` catch-all — so a consumer can `match` on the failure.
+        // DEVICE-VERIFY(0.10.8): the Windows/Linux TrayInstall path (a genuine
+        // Shell_NotifyIcon(NIM_ADD)/SNI failure on a real session), exercised at
+        // the seam by platform::handshake_tests here.
+        let facade = TrayIconBuilder::new()
+            .build()
+            .expect("build() is infallible");
+        if facade.is_live() {
+            // A live tray means the environment could install it; then
+            // build_result() must succeed and there is no error to classify.
+            assert!(TrayIconBuilder::new().build_result().is_ok());
+            return;
+        }
+        match TrayIconBuilder::new().build_result() {
+            Ok(_) => panic!("build_result() must be Err when build() is not live"),
+            Err(e) => assert!(
+                matches!(
+                    e,
+                    super::super::muda::Error::MainThread
+                        | super::super::muda::Error::TrayInstall(_)
+                        | super::super::muda::Error::ThreadSpawn(_)
+                        | super::super::muda::Error::Unsupported(_)
+                ),
+                "the non-live build_result error must be a structured kind, got {e:?}"
+            ),
+        }
     }
 
     #[test]

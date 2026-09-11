@@ -1646,8 +1646,7 @@ impl MacPlatform {
     }
 
     fn require_mtm(&self) -> Result<MainThreadMarker> {
-        self.mtm
-            .ok_or_else(|| Error::Platform("must be called on the main thread".into()))
+        self.mtm.ok_or(Error::MainThread)
     }
 }
 
@@ -1777,8 +1776,7 @@ fn stop_run_loop(mtm: MainThreadMarker) {
 /// styled popup on click and dispatching row clicks to the tray's handler.
 /// Consumes the [`Tray`]; returns when the loop exits.
 fn run_event_loop(tray: Tray) -> Result<()> {
-    let mtm = MainThreadMarker::new()
-        .ok_or_else(|| Error::Platform("Tray::run must be called on the main thread".into()))?;
+    let mtm = MainThreadMarker::new().ok_or(Error::MainThread)?;
 
     // A tray-only native app is an Accessory: no Dock icon, no app menu bar
     // (spec 20 §5). The muda-compat menu-bar path chooses Regular elsewhere.
@@ -1951,6 +1949,34 @@ fn sf_ui_tracking(size_pt: f32) -> f32 {
     size_pt * SF_TRACKING_FRACTION
 }
 
+/// Resolve the bold companion of the system menu `font` and, when it is a
+/// genuinely distinct on-disk face, pack the regular+bold file bytes into a
+/// single [`SystemFontSource`] (issue #56) so the render layer registers a real
+/// bold face rather than silently downgrading bold rows to the regular file.
+///
+/// `NSFontManager::convertFont:toHaveTrait:` returns the *original* font when no
+/// bold variant exists, so we only pack when the bold face resolves to a
+/// different file than `regular_path`. `None` (→ caller keeps the single regular
+/// `Path`) when there is no distinct bold face or either file can't be read.
+///
+/// DEVICE-VERIFY(0.10.8): confirm bold menu rows render with the real SF bold
+/// face on a physical device.
+fn dual_face_source(
+    mtm: MainThreadMarker,
+    font: &objc2_app_kit::NSFont,
+    regular_path: &str,
+) -> Option<crate::platform::SystemFontSource> {
+    let manager = objc2_app_kit::NSFontManager::sharedFontManager(mtm);
+    let bold = manager.convertFont_toHaveTrait(font, objc2_app_kit::NSFontTraitMask::BoldFontMask);
+    let bold_path = system_ui_font_path(&bold)?;
+    if bold_path == regular_path {
+        return None;
+    }
+    let regular_bytes = std::fs::read(regular_path).ok()?;
+    let bold_bytes = std::fs::read(&bold_path).ok()?;
+    Some(crate::render::pack_dual_face(regular_bytes, bold_bytes))
+}
+
 /// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],
 /// resolving the real SF file via CoreText's URL attribute so fontdb loads the
 /// actual system face (falling back to the family name if the file has no URL).
@@ -1958,11 +1984,17 @@ fn sf_ui_tracking(size_pt: f32) -> f32 {
 /// Callers must already be on the main thread (AppKit).
 fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
     use crate::platform::{SystemFont, SystemFontSource};
-    MainThreadMarker::new()?;
+    let mtm = MainThreadMarker::new()?;
     let font = objc2_app_kit::NSFont::menuFontOfSize(0.0);
     let point_size = font.pointSize() as f32;
     let source = match system_ui_font_path(&font) {
-        Some(path) => SystemFontSource::Path(std::path::PathBuf::from(path)),
+        // #56: the macOS system menu font resolves to a single regular file, so a
+        // bold row would otherwise silently downgrade (fontdb has no bold face to
+        // pick). When a distinct bold variant exists on disk, pack regular+bold
+        // into one source so the render layer registers a real bold face; fall
+        // back to the single regular file when there is no distinct bold.
+        Some(path) => dual_face_source(mtm, &font, &path)
+            .unwrap_or_else(|| SystemFontSource::Path(std::path::PathBuf::from(path))),
         None => {
             let family = font.familyName()?.to_string();
             if family.is_empty() {

@@ -83,7 +83,18 @@ pub enum Error {
     BadIcon(String),
     /// A capability unavailable on the current platform.
     Unsupported(crate::Unsupported),
-    /// A platform API call failed.
+    /// The OS tray/status-item install failed (`Shell_NotifyIcon(NIM_ADD)` /
+    /// SNI registration). Mirrors [`crate::Error::TrayInstall`]; surfaced by
+    /// [`TrayIconBuilder::build_result`](super::tray_icon::TrayIconBuilder::build_result)
+    /// when the tray genuinely never installed.
+    TrayInstall(String),
+    /// A tray/surface that must be built on the main thread was requested off it.
+    /// Mirrors [`crate::Error::MainThread`].
+    MainThread,
+    /// The background muri tray thread could not be spawned. Mirrors
+    /// [`crate::Error::ThreadSpawn`].
+    ThreadSpawn(String),
+    /// A platform API call failed and does not fit a more specific variant.
     Platform(String),
 }
 
@@ -95,12 +106,33 @@ impl std::fmt::Display for Error {
             Error::AcceleratorParse(s) => write!(f, "failed to parse accelerator: {s}"),
             Error::BadIcon(s) => write!(f, "bad icon: {s}"),
             Error::Unsupported(u) => write!(f, "unsupported on this platform: {u}"),
+            Error::TrayInstall(s) => write!(f, "tray install failed: {s}"),
+            Error::MainThread => f.write_str("must be called on the main thread"),
+            Error::ThreadSpawn(s) => write!(f, "failed to spawn the muri tray thread: {s}"),
             Error::Platform(s) => write!(f, "platform error: {s}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Map muri's core [`crate::Error`] onto the facade error, **preserving the
+/// structured kind** so a migrated consumer can `match` on
+/// [`Error::TrayInstall`] / [`Error::MainThread`] / [`Error::Unsupported`]
+/// instead of string-matching a message. Any residual generic
+/// [`crate::Error::Platform`] stays a [`Error::Platform`].
+impl From<crate::Error> for Error {
+    fn from(e: crate::Error) -> Self {
+        match e {
+            crate::Error::Unsupported(u) => Error::Unsupported(u),
+            crate::Error::BadIcon(s) => Error::BadIcon(s),
+            crate::Error::TrayInstall(s) => Error::TrayInstall(s),
+            crate::Error::MainThread => Error::MainThread,
+            crate::Error::ThreadSpawn(s) => Error::ThreadSpawn(s),
+            crate::Error::Platform(s) => Error::Platform(s),
+        }
+    }
+}
 
 /// The facade result alias, mirroring `muda::Result`.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1445,10 +1477,7 @@ fn open_custom(menu: &Menu, position: Option<Position>) -> Result<()> {
     let point = cursor_or_origin(position);
     surface
         .open_at(point, crate::Edge::Bottom)
-        .map_err(|e| match e {
-            crate::Error::Unsupported(u) => Error::Unsupported(u),
-            other => Error::Platform(other.to_string()),
-        })
+        .map_err(Error::from)
 }
 
 /// The open point for a compat context menu: an explicit muda `position`, else the
@@ -1485,10 +1514,7 @@ impl Menu {
         let point = cursor_or_origin(position);
         surface
             .open_at(point, crate::Edge::Bottom)
-            .map_err(|e| match e {
-                crate::Error::Unsupported(u) => Error::Unsupported(u),
-                other => Error::Platform(other.to_string()),
-            })
+            .map_err(Error::from)
     }
 }
 

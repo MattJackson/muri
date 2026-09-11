@@ -299,12 +299,27 @@ impl RasterDrawer {
     /// `theme_source.forced_family()` — `Some(family)` calls this,
     /// `None` calls `new_native`.
     pub fn with_forced_theme(scale: f32, family: OsFamily) -> Self {
-        let db = cached_system_fonts_db();
-        let ui_family = resolve_forced_ui_family(
-            &db,
-            family.ui_font_families(),
-            family.fallback_font_families(),
-        );
+        // With `bundled-fonts` on, resolution gains a middle tier: the vendored
+        // OSS substitute (registered into `db`, hence the `&mut`) is tried after
+        // the real target font is found absent and before any free host fallback
+        // (issue #54). With the feature off this is byte-for-byte the original
+        // read-only two-tier resolution — no regression.
+        #[cfg(feature = "bundled-fonts")]
+        let (db, ui_family) = {
+            let mut db = cached_system_fonts_db();
+            let ui_family = resolve_forced_ui_family_bundled(&mut db, family);
+            (db, ui_family)
+        };
+        #[cfg(not(feature = "bundled-fonts"))]
+        let (db, ui_family) = {
+            let db = cached_system_fonts_db();
+            let ui_family = resolve_forced_ui_family(
+                &db,
+                family.ui_font_families(),
+                family.fallback_font_families(),
+            );
+            (db, ui_family)
+        };
         Self::from_parts(scale, db, ui_family)
     }
 
@@ -392,6 +407,15 @@ impl RasterDrawer {
     #[cfg(test)]
     pub(crate) fn shape_miss_count(&self) -> usize {
         self.fonts.shape_misses.get()
+    }
+
+    /// Test-only: how many times a heavy-weight font request (e.g.
+    /// `Weight::Bold`) silently resolved to a light face instead — see
+    /// [`FontStore::weight_downgrade_count`] (issue #56), proving the
+    /// downgrade is now detectable/assertable rather than silent.
+    #[cfg(test)]
+    pub(crate) fn weight_downgrade_count(&self) -> usize {
+        self.fonts.weight_downgrade_count()
     }
 }
 
@@ -497,6 +521,18 @@ struct FontStore {
     /// assert a repaint of unchanged text re-shapes nothing.
     #[cfg(test)]
     shape_misses: std::cell::Cell<usize>,
+    /// Test-only counter of times [`FontStore::resolve_face`] requested a
+    /// heavy weight (`ot_weight >= 600`, e.g. `Weight::Bold`) but the
+    /// database's best match resolved to a substantially lighter face
+    /// (`< 500`) — a silent weight downgrade, the exact failure mode behind
+    /// issue #56 (`fontdb::Database::query`'s CSS `find_best_match` never
+    /// fails on weight; with only a regular face registered it just returns
+    /// that face for every request). Per this crate's error philosophy (no
+    /// `log` crate dependency), this is how that downgrade is surfaced
+    /// instead of logged: a queryable counter so a test can assert on it
+    /// rather than it being silent. See [`FontStore::weight_downgrade_count`].
+    #[cfg(test)]
+    weight_downgrades: std::cell::Cell<usize>,
     scale_ctx: RefCell<ScaleContext>,
     /// Every face id in the db, in a stable order, scanned as the last-resort
     /// fallback when no [`FALLBACK_FAMILIES`] entry covers a codepoint.
@@ -518,6 +554,8 @@ impl FontStore {
             shaped: RefCell::new(HashMap::new()),
             #[cfg(test)]
             shape_misses: std::cell::Cell::new(0),
+            #[cfg(test)]
+            weight_downgrades: std::cell::Cell::new(0),
             scale_ctx: RefCell::new(ScaleContext::new()),
             fallback_order,
         }
@@ -563,8 +601,47 @@ impl FontStore {
             return cached;
         }
         let result = query_face(&self.db, self.db_family(family), ot_weight);
+        #[cfg(test)]
+        if let Some(id) = result {
+            self.record_weight_downgrade(ot_weight, id);
+        }
         self.face_cache.borrow_mut().insert(key, result);
         result
+    }
+
+    /// Weight requested >= this is "asking for bold or heavier" (matches
+    /// `Weight::Bold`'s `700`, with headroom for `Weight::Custom` in between).
+    #[cfg(test)]
+    const HEAVY_WEIGHT: u16 = 600;
+    /// A resolved face below this is "substantially lighter than requested" —
+    /// i.e. the caller got a regular-ish face back for a heavy-weight ask.
+    #[cfg(test)]
+    const LIGHT_WEIGHT: u16 = 500;
+
+    /// Record a weight downgrade (#56): `ot_weight` was heavy
+    /// (`>= HEAVY_WEIGHT`) but `resolved`'s actual registered weight in `db`
+    /// is light (`< LIGHT_WEIGHT`) — `fontdb`'s CSS matching returned the
+    /// closest available face rather than failing, so this is the only place
+    /// that mismatch can be caught. Called once per fresh (non-cached)
+    /// `resolve_face` resolution, never per cache hit.
+    #[cfg(test)]
+    fn record_weight_downgrade(&self, ot_weight: u16, resolved: FaceId) {
+        if ot_weight < Self::HEAVY_WEIGHT {
+            return;
+        }
+        let actual_weight = self.db.face(resolved).map_or(ot_weight, |f| f.weight.0);
+        if actual_weight < Self::LIGHT_WEIGHT {
+            self.weight_downgrades.set(self.weight_downgrades.get() + 1);
+        }
+    }
+
+    /// Test-only: how many times [`resolve_face`](Self::resolve_face) silently
+    /// downgraded a heavy-weight request (e.g. `Weight::Bold`) to a light
+    /// resolved face — see [`weight_downgrades`](Self::weight_downgrades) for
+    /// why this exists instead of a log line.
+    #[cfg(test)]
+    fn weight_downgrade_count(&self) -> usize {
+        self.weight_downgrades.get()
     }
 
     /// Whether `id` has a glyph for `ch` in its cmap.
@@ -842,10 +919,17 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
             return query_face(db, DbFamily::Name(&name), 400).map(|_| name);
         }
         SystemFontSource::Path(path) => db.load_font_source(DbSource::File(path)).first().copied(),
-        SystemFontSource::Data(data) => db
-            .load_font_source(DbSource::Binary(Arc::new(data)))
-            .first()
-            .copied(),
+        SystemFontSource::Data(data) => {
+            // A macOS regular+bold pair packed by `pack_dual_face` (#56) gets its
+            // own two-face registration path; anything else is the plain
+            // single-face byte load this variant has always supported.
+            if let Some((regular, bold)) = unpack_dual_face(&data) {
+                return register_dual_face(db, regular, bold);
+            }
+            db.load_font_source(DbSource::Binary(Arc::new(data)))
+                .first()
+                .copied()
+        }
     };
     // Pin the registered face's family only if it is resolvable by that name (so
     // a malformed face falls back).
@@ -853,6 +937,76 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
         .face(loaded?)
         .and_then(|f| f.families.first().map(|(n, _)| n.clone()))?;
     query_face(db, DbFamily::Name(&name), 400).map(|_| name)
+}
+
+/// Magic prefix identifying a [`SystemFontSource::Data`] payload as a packed
+/// regular+bold pair rather than a single face's raw bytes (issue #56).
+///
+/// [`SystemFontSource`] (defined in `src/platform/mod.rs`, part of the
+/// cross-platform `Platform` seam) has no field for a second face, so the
+/// live macOS backend (`src/platform/mac.rs`) that resolves a distinct bold
+/// system-menu face packs both faces' bytes into one `Data` blob with this
+/// header; [`unpack_dual_face`] is the matching decoder read only here, on
+/// the render side of the same seam. Not a real font-container format (no
+/// other platform produces or needs to parse it) — a private encoding
+/// between exactly these two call sites.
+const DUAL_FACE_MAGIC: &[u8; 8] = b"MURIDUOF";
+
+/// Pack a regular + bold face's raw font bytes into one
+/// [`SystemFontSource::Data`] blob: [`DUAL_FACE_MAGIC`], a little-endian
+/// `u32` byte length of `regular`, then `regular`'s bytes, then `bold`'s
+/// bytes. See [`unpack_dual_face`] for the decoder and [`DUAL_FACE_MAGIC`]
+/// for why this exists instead of a new [`SystemFontSource`] variant.
+pub(crate) fn pack_dual_face(regular: Vec<u8>, bold: Vec<u8>) -> SystemFontSource {
+    let mut buf = Vec::with_capacity(DUAL_FACE_MAGIC.len() + 4 + regular.len() + bold.len());
+    buf.extend_from_slice(DUAL_FACE_MAGIC);
+    buf.extend_from_slice(&(regular.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&regular);
+    buf.extend_from_slice(&bold);
+    SystemFontSource::Data(buf)
+}
+
+/// Decode a [`pack_dual_face`] blob back into its `(regular, bold)` byte
+/// slices. `None` if `data` doesn't start with [`DUAL_FACE_MAGIC`] or is
+/// truncated — callers treat that as "not a dual-face blob, load it as a
+/// single plain face" rather than an error.
+fn unpack_dual_face(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let rest = data.strip_prefix(DUAL_FACE_MAGIC.as_slice())?;
+    let (len_bytes, rest) = rest.split_first_chunk::<4>()?;
+    let regular_len = u32::from_le_bytes(*len_bytes) as usize;
+    if regular_len > rest.len() {
+        return None;
+    }
+    let (regular, bold) = rest.split_at(regular_len);
+    if bold.is_empty() {
+        return None;
+    }
+    Some((regular, bold))
+}
+
+/// Load a macOS regular+bold face pair (see [`pack_dual_face`]) into `db` and
+/// pin the family the regular face resolves to (#56). Registers the bold
+/// bytes best-effort: if the bold face's own name-table family doesn't match
+/// the regular one's — so `query_face` at weight 700 still can't find it —
+/// this still returns the regular face's family rather than failing outright,
+/// exactly like a bold-less single-face registration always has; the
+/// resulting weight downgrade is then caught (not silent) by
+/// [`FontStore::resolve_face`]'s downgrade detection instead of by this
+/// function refusing to register anything.
+fn register_dual_face(db: &mut Database, regular: &[u8], bold: &[u8]) -> Option<String> {
+    let regular_id = db
+        .load_font_source(DbSource::Binary(Arc::new(regular.to_vec())))
+        .first()
+        .copied()?;
+    let name = db
+        .face(regular_id)
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()))?;
+    query_face(db, DbFamily::Name(&name), 400)?;
+    // Best-effort: a parse failure or family mismatch here just means the
+    // bold weight later resolves back to the regular face (caught by
+    // `resolve_face`'s downgrade detection), not a registration failure.
+    db.load_font_source(DbSource::Binary(Arc::new(bold.to_vec())));
+    Some(name)
 }
 
 /// Resolve the UI family to pin for a **forced** OS theme (issue #54):
@@ -877,16 +1031,114 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
 /// muri, so `target_families` only wins when the real target font happens to
 /// be installed on this host; otherwise the free `fallback_families` face is
 /// used, which is *not* metrically identical to the target font.
+// Under `bundled-fonts` the library routes forced resolution through
+// [`resolve_forced_ui_family_bundled`] instead, so this read-only two-tier
+// resolver is reached only by the feature-off build and by unit tests — hence
+// the `dead_code` allow for the feature-on lib build (tests still use it).
+#[cfg_attr(feature = "bundled-fonts", allow(dead_code))]
 pub(crate) fn resolve_forced_ui_family(
     db: &Database,
     target_families: &[&str],
     fallback_families: &[&str],
 ) -> Option<String> {
-    target_families
+    first_installed_family(db, target_families)
+        .or_else(|| first_installed_family(db, fallback_families))
+}
+
+/// The first family name in `families` that is actually installed in `db` (a
+/// plain family-query hit at weight 400), as an owned `String`. The shared
+/// building block of forced-UI-family resolution: [`resolve_forced_ui_family`]
+/// chains a target tier and a free-fallback tier through it, and (with the
+/// `bundled-fonts` feature) [`resolve_forced_ui_family_bundled`] slots the
+/// vendored OSS substitute *between* those two tiers.
+fn first_installed_family(db: &Database, families: &[&str]) -> Option<String> {
+    families
         .iter()
-        .chain(fallback_families.iter())
         .find(|name| query_face(db, DbFamily::Name(name), 400).is_some())
         .map(|name| name.to_string())
+}
+
+/// Forced-UI-family resolution **with the `bundled-fonts` fallback tier**
+/// (issue #54). The resolution order is exactly:
+///
+/// 1. the real target OS font ([`OsFamily::ui_font_families`]) if installed on
+///    the host (OEM parity — e.g. an actual Segoe UI / SF Pro present) — used;
+/// 2. else the vendored OSS substitute for this [`OsFamily`]
+///    ([`bundled_fonts`]: Inter for macOS, Microsoft's OFL Selawik for Windows,
+///    genuine Cantarell for GNOME), registered into `db` and used;
+/// 3. else the free host fallback family ([`OsFamily::fallback_font_families`]);
+/// 4. else `None` (never the wrong-platform host UI font).
+///
+/// Registering the substitute needs `&mut db`, which is why this is a distinct
+/// entry point from the read-only [`resolve_forced_ui_family`]; the feature-off
+/// build never compiles it (and `with_forced_theme` uses the read-only path
+/// unchanged, so behavior with the feature off is exactly as before).
+#[cfg(feature = "bundled-fonts")]
+pub(crate) fn resolve_forced_ui_family_bundled(
+    db: &mut Database,
+    family: OsFamily,
+) -> Option<String> {
+    first_installed_family(db, family.ui_font_families())
+        .or_else(|| bundled_fonts::register_substitute(db, family))
+        .or_else(|| first_installed_family(db, family.fallback_font_families()))
+}
+
+/// The freely-redistributable OSS UI-font substitutes embedded by the
+/// `bundled-fonts` feature, and the wiring that registers the right one for a
+/// forced [`OsFamily`] into a [`fontdb::Database`].
+///
+/// muri cannot bundle the proprietary originals (Apple SF Pro / Microsoft Segoe
+/// UI forbid redistribution), so it vendors the closest OFL substitutes instead —
+/// Inter (SF Pro), Microsoft's own metric-compatible Selawik (Segoe UI), and the
+/// genuine, already-OFL Cantarell (GNOME). All are SIL OFL 1.1; see
+/// `assets/fonts/README.md` for licenses and sources. The `.ttf` bytes are
+/// `include_bytes!`-embedded only under this feature, so the default build
+/// carries none of them. This is cross-platform, feature-gated code — never
+/// `cfg(target_os)`-gated (ADR-0002) — living in the render layer, not
+/// `src/platform/`.
+#[cfg(feature = "bundled-fonts")]
+pub(crate) mod bundled_fonts {
+    use super::{query_face, Arc, Database, DbFamily, DbSource};
+    use crate::theme::OsFamily;
+
+    const INTER_REGULAR: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-Regular.ttf");
+    const INTER_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-SemiBold.ttf");
+    const INTER_BOLD: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-Bold.ttf");
+
+    const SELAWIK_REGULAR: &[u8] = include_bytes!("../../assets/fonts/selawik/Selawik-Regular.ttf");
+    const SELAWIK_SEMIBOLD: &[u8] =
+        include_bytes!("../../assets/fonts/selawik/Selawik-SemiBold.ttf");
+    const SELAWIK_BOLD: &[u8] = include_bytes!("../../assets/fonts/selawik/Selawik-Bold.ttf");
+
+    const CANTARELL_REGULAR: &[u8] =
+        include_bytes!("../../assets/fonts/cantarell/Cantarell-Regular.ttf");
+    const CANTARELL_BOLD: &[u8] = include_bytes!("../../assets/fonts/cantarell/Cantarell-Bold.ttf");
+
+    /// The vendored substitute (family name + embedded face bytes) for a forced
+    /// [`OsFamily`]: macOS → Inter, Windows → Selawik, GNOME → Cantarell.
+    fn substitute(family: OsFamily) -> (&'static str, &'static [&'static [u8]]) {
+        match family {
+            OsFamily::MacOs => ("Inter", &[INTER_REGULAR, INTER_SEMIBOLD, INTER_BOLD]),
+            OsFamily::Windows => (
+                "Selawik",
+                &[SELAWIK_REGULAR, SELAWIK_SEMIBOLD, SELAWIK_BOLD],
+            ),
+            OsFamily::Gnome => ("Cantarell", &[CANTARELL_REGULAR, CANTARELL_BOLD]),
+        }
+    }
+
+    /// Register the vendored substitute's faces for `family` into `db` and return
+    /// the family name to pin (`Some` iff the family is resolvable afterwards, so
+    /// a parse failure falls through to the free host fallback rather than
+    /// pinning an unusable name). Idempotent enough for muri's use: `db` is a
+    /// fresh per-drawer clone, registered into once.
+    pub(crate) fn register_substitute(db: &mut Database, family: OsFamily) -> Option<String> {
+        let (name, faces) = substitute(family);
+        for face in faces {
+            db.load_font_source(DbSource::Binary(Arc::new(face.to_vec())));
+        }
+        query_face(db, DbFamily::Name(name), 400).map(|_| name.to_string())
+    }
 }
 
 /// Resolve a concrete UI font family whose **regular and bold are distinct,
@@ -1231,6 +1483,104 @@ mod tests {
         );
     }
 
+    /// Issue #56: the live macOS System-font path now pairs the regular menu
+    /// face with its bold counterpart, packed into one
+    /// `SystemFontSource::Data` blob (see `dual_face_source` in
+    /// `src/platform/mac.rs`). `register_system_font` must unpack that and
+    /// register BOTH faces under the same family, so `resolve_face(..., 700)`
+    /// has a real bold candidate instead of only ever finding the regular one.
+    #[test]
+    fn register_system_font_unpacks_a_dual_face_blob_into_both_weights() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        const DEJAVU_BOLD: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans-Bold.ttf");
+        let mut db = Database::new();
+        let blob = pack_dual_face(DEJAVU.to_vec(), DEJAVU_BOLD.to_vec());
+        let name = register_system_font(&mut db, blob);
+        assert_eq!(name.as_deref(), Some("DejaVu Sans"));
+
+        let regular = query_face(&db, DbFamily::Name("DejaVu Sans"), 400);
+        let bold = query_face(&db, DbFamily::Name("DejaVu Sans"), 700);
+        assert!(regular.is_some() && bold.is_some());
+        assert_ne!(
+            regular, bold,
+            "a packed bold face must resolve as a distinct face from regular"
+        );
+        assert!(db.face(bold.unwrap()).unwrap().weight >= DbWeight(600));
+    }
+
+    /// A `Data` blob that doesn't start with the dual-face magic (every other
+    /// platform's plain single-face bytes, and macOS's own pre-#56 fallback
+    /// when no distinct bold file was found) must still register exactly as
+    /// before — `unpack_dual_face` returning `None` must not be mistaken for
+    /// a registration failure.
+    #[test]
+    fn register_system_font_treats_a_plain_data_blob_as_single_face() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        assert_eq!(
+            register_system_font(&mut db, SystemFontSource::Data(DEJAVU.to_vec())).as_deref(),
+            Some("DejaVu Sans")
+        );
+    }
+
+    /// Core #56 regression test: with a real bold face registered alongside
+    /// regular (exactly what the fixed macOS path now does), resolving weight
+    /// 700 must return a face DISTINCT from weight 400 — proving resolution
+    /// actually picks bold instead of degrading to regular — and must not
+    /// record a weight downgrade.
+    #[test]
+    fn resolve_face_picks_the_bold_face_when_one_is_registered() {
+        let d = RasterDrawer::new_headless(1.0);
+        let regular = d.fonts.resolve_face(&FontFamily::System, 400);
+        let bold = d.fonts.resolve_face(&FontFamily::System, 700);
+        assert!(regular.is_some(), "headless db must resolve a regular face");
+        assert!(bold.is_some(), "headless db must resolve a bold face");
+        assert_ne!(
+            regular, bold,
+            "bold must resolve to a face distinct from regular, not degrade to it (#56)"
+        );
+        assert_eq!(
+            d.weight_downgrade_count(),
+            0,
+            "a real bold face is available — this must not count as a downgrade"
+        );
+    }
+
+    /// The failure #56 reports: when a family has ONLY a regular face (no
+    /// bold), `fontdb`'s CSS weight matching never fails — it returns the
+    /// closest available face, silently, for a bold request too. This must no
+    /// longer be silent: `weight_downgrade_count` must record it.
+    #[test]
+    fn resolve_face_records_a_downgrade_when_no_bold_face_is_available() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU.to_vec());
+        let d = RasterDrawer::from_parts(1.0, db, Some("DejaVu Sans".to_string()));
+
+        let regular = d.fonts.resolve_face(&FontFamily::System, 400);
+        assert!(regular.is_some());
+        assert_eq!(
+            d.weight_downgrade_count(),
+            0,
+            "a regular-weight request is never a downgrade"
+        );
+
+        let bold_request = d.fonts.resolve_face(&FontFamily::System, 700);
+        assert_eq!(
+            bold_request, regular,
+            "with no bold face, fontdb's best-match falls back to the only face"
+        );
+        assert_eq!(
+            d.weight_downgrade_count(),
+            1,
+            "requesting bold with no bold face registered must be recorded, never silent (#56)"
+        );
+
+        // Memoized: re-resolving the same (family, weight) must not double-count.
+        let _ = d.fonts.resolve_face(&FontFamily::System, 700);
+        assert_eq!(d.weight_downgrade_count(), 1);
+    }
+
     /// spec §7.1's font-fallback layer: when a primary face is pinned but has
     /// no glyph for a codepoint, and the headless (DejaVu-only) db has no
     /// dedicated fallback family that covers it either (no color-emoji face
@@ -1367,6 +1717,101 @@ mod tests {
                 "{family:?} should land on its free fallback face on a DejaVu-only db"
             );
         }
+    }
+
+    /// `bundled-fonts`, tier (2): with the feature on and NEITHER the real
+    /// target font NOR any free fallback installed (an empty db), forcing each
+    /// OS look registers and resolves to that OS's vendored OSS substitute —
+    /// Inter for macOS, Selawik for Windows, Cantarell for GNOME — never a
+    /// wrong-platform host face.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn bundled_forced_family_resolves_to_the_vendored_substitute_when_target_absent() {
+        for (family, expected) in [
+            (OsFamily::MacOs, "Inter"),
+            (OsFamily::Windows, "Selawik"),
+            (OsFamily::Gnome, "Cantarell"),
+        ] {
+            // Empty db: no SF Pro / Segoe UI / Cantarell, and no free fallback
+            // face either — the substitute is the only thing that can resolve.
+            let mut db = Database::new();
+            let resolved = resolve_forced_ui_family_bundled(&mut db, family);
+            assert_eq!(
+                resolved.as_deref(),
+                Some(expected),
+                "{family:?} with no target/fallback installed must use its bundled substitute"
+            );
+            // And the substitute really is resolvable at both weights (regular +
+            // bold are distinct faces, so a bold header and regular row match).
+            let regular = query_face(&db, DbFamily::Name(expected), 400);
+            let bold = query_face(&db, DbFamily::Name(expected), 700);
+            assert!(regular.is_some() && bold.is_some());
+            assert_ne!(regular, bold, "{expected} must expose a distinct bold face");
+        }
+    }
+
+    /// `bundled-fonts`, tier ordering (2) before (3): the bundled substitute is
+    /// tried BEFORE the free host fallback list, so even when a fallback-list
+    /// face is installed the substitute still wins. DejaVu Sans is in Windows'
+    /// `fallback_font_families`, yet forcing Windows must land on Selawik, not
+    /// DejaVu.
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn bundled_substitute_beats_the_free_host_fallback() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU.to_vec()); // a Windows free-fallback face is present
+        assert!(
+            query_face(&db, DbFamily::Name("DejaVu Sans"), 400).is_some(),
+            "precondition: the free fallback face is installed"
+        );
+        let resolved = resolve_forced_ui_family_bundled(&mut db, OsFamily::Windows);
+        assert_eq!(
+            resolved.as_deref(),
+            Some("Selawik"),
+            "the bundled substitute must be preferred over the free host fallback"
+        );
+    }
+
+    /// `bundled-fonts`, tier (1) OEM-present wins: when the real target font IS
+    /// installed, it is used and the bundled substitute is never reached. On
+    /// macOS the target list's "Helvetica Neue"/SF faces are installed, so
+    /// forcing the macOS look over the live system db must resolve to a real
+    /// target face, not "Inter".
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn bundled_oem_target_present_wins_over_the_substitute() {
+        let mut db = cached_system_fonts_db();
+        // Precondition for this assertion to be meaningful: at least one macOS
+        // target face is actually installed on the host.
+        if first_installed_family(&db, OsFamily::MacOs.ui_font_families()).is_none() {
+            return; // no target face installed (non-macOS host); nothing to prove
+        }
+        let resolved = resolve_forced_ui_family_bundled(&mut db, OsFamily::MacOs);
+        assert!(resolved.is_some());
+        assert_ne!(
+            resolved.as_deref(),
+            Some("Inter"),
+            "an installed real target face must win over the bundled substitute"
+        );
+    }
+
+    /// Feature-off contrast (always compiled): the read-only two-tier resolver
+    /// has no bundled middle tier, so with only a free-fallback face installed
+    /// (DejaVu Sans, in Windows' fallback list) forcing Windows lands on that
+    /// fallback — proving the bundled substitute is purely additive and the
+    /// feature-off path is unchanged.
+    #[test]
+    fn forced_resolution_without_bundling_uses_the_free_fallback() {
+        const DEJAVU: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        let mut db = Database::new();
+        db.load_font_data(DEJAVU.to_vec());
+        let resolved = resolve_forced_ui_family(
+            &db,
+            OsFamily::Windows.ui_font_families(),
+            OsFamily::Windows.fallback_font_families(),
+        );
+        assert_eq!(resolved.as_deref(), Some("DejaVu Sans"));
     }
 
     fn solid_png(color: Rgba) -> Arc<[u8]> {

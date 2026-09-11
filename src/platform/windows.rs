@@ -790,7 +790,7 @@ impl WindowsAnchor {
             null_mut(),
         );
         if hwnd.is_null() {
-            return Err(Error::Platform(
+            return Err(Error::TrayInstall(
                 "failed to create tray message window".into(),
             ));
         }
@@ -896,7 +896,9 @@ impl WindowsAnchor {
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
                 let _ = DestroyWindow(self.hwnd);
                 self.hwnd = null_mut();
-                return Err(Error::Platform("Shell_NotifyIcon(NIM_ADD) failed".into()));
+                return Err(Error::TrayInstall(
+                    "Shell_NotifyIcon(NIM_ADD) failed".into(),
+                ));
             }
             self.installed = true;
         }
@@ -917,7 +919,7 @@ impl WindowsAnchor {
                 Self::fill_tip(&tip, &mut nid.szTip);
             }
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
-                return Err(Error::Platform("Shell_NotifyIcon re-add failed".into()));
+                return Err(Error::TrayInstall("Shell_NotifyIcon re-add failed".into()));
             }
             self.installed = true;
         }
@@ -2320,14 +2322,20 @@ impl Platform for WindowsPlatform {
     }
 
     fn run_tray(self, tray: Tray) -> Result<()> {
-        run_event_loop(tray)
+        // Blocking path: an install failure surfaces directly through the return
+        // value, so the install handshake fires into a local channel we don't
+        // consume (`_wait` stays alive for the duration of the call).
+        let (report, _wait) = std::sync::mpsc::channel();
+        run_event_loop(tray, &report)
     }
 
     fn spawn_tray(self, tray: Tray) -> Result<()> {
         // The tray's HWND, message pump and thread-local state all live on the
         // thread that runs `run_event_loop`, so a dedicated background thread is
         // fully self-consistent; a `TrayHandle` drives it cross-thread by
-        // `PostMessageW`-ing the (thread-safe) owner window.
+        // `PostMessageW`-ing the (thread-safe) owner window. `spawn_tray_thread`
+        // blocks until `run_event_loop` has fired the install handshake, so a
+        // real `Shell_NotifyIcon(NIM_ADD)` failure is surfaced synchronously here.
         super::spawn_tray_thread(tray, run_event_loop)
     }
 
@@ -2346,7 +2354,7 @@ impl Platform for WindowsPlatform {
 /// Install the tray icon and run the native Win32 message pump, opening the
 /// styled popup on click and dispatching row clicks to the tray's handler.
 /// Consumes the [`Tray`]; returns when the pump exits (a `WM_QUIT`).
-fn run_event_loop(mut tray: Tray) -> Result<()> {
+fn run_event_loop(mut tray: Tray, report: &super::InstallReport) -> Result<()> {
     let hinstance = unsafe { GetModuleHandleW(null_mut()) };
 
     // Resolve the Explorer-restart broadcast id once.
@@ -2354,7 +2362,20 @@ fn run_event_loop(mut tray: Tray) -> Result<()> {
     TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::SeqCst);
 
     let mut anchor = WindowsAnchor::new();
-    anchor.install(&tray.icon, tray.tooltip.as_deref())?;
+    // Install handshake (EH-1): report the real `Shell_NotifyIcon(NIM_ADD)` result
+    // synchronously — *before* entering the blocking pump — so a spawn-path caller
+    // (the compat facade's `build_result`) learns the icon never installed instead
+    // of seeing a false `Ok`. The blocking `run_tray` path also propagates it via
+    // the return value.
+    if let Err(e) = anchor.install(&tray.icon, tray.tooltip.as_deref()) {
+        let msg = match &e {
+            Error::TrayInstall(m) => m.clone(),
+            other => other.to_string(),
+        };
+        let _ = report.send(Err(Error::TrayInstall(msg)));
+        return Err(e);
+    }
+    let _ = report.send(Ok(()));
     let owner = anchor.hwnd as isize;
     OWNER_HWND.with(|h| h.set(owner));
     // Also publish the owner in the thread-safe static so a UIA action raised on a

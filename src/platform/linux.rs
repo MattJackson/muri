@@ -156,7 +156,9 @@ impl Platform for LinuxPlatform {
             visible: true,
         }
         .spawn()
-        .map_err(|e| Error::Platform(format!("SNI/StatusNotifierItem registration failed: {e}")))?;
+        .map_err(|e| {
+            Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"))
+        })?;
         // Re-install: shut the prior ksni service down before replacing it (#35).
         // ksni's blocking `Handle` has no `Drop` that unregisters, so simply
         // overwriting `self.service` would leak the old D-Bus service + thread and
@@ -207,14 +209,20 @@ impl Platform for LinuxPlatform {
     }
 
     fn run_tray(self, tray: Tray) -> Result<()> {
-        run_sni_loop(tray)
+        // Blocking path: a registration failure surfaces directly through the
+        // return value, so the install handshake fires into a local channel we
+        // don't consume (`_wait` stays alive for the duration of the call).
+        let (report, _wait) = std::sync::mpsc::channel();
+        run_sni_loop(tray, &report)
     }
 
     fn spawn_tray(self, tray: Tray) -> Result<()> {
         // `ksni` already runs its D-Bus service on its own thread; `run_sni_loop`
         // only parks draining `TrayHandle` commands, so hosting that drain on a
         // dedicated background thread is self-consistent and lets build() return
-        // immediately.
+        // immediately. `spawn_tray_thread` blocks until `run_sni_loop` has fired
+        // the install handshake, so a real SNI registration failure is surfaced
+        // synchronously here rather than only `eprintln!`'d.
         super::spawn_tray_thread(tray, run_sni_loop)
     }
 
@@ -261,18 +269,36 @@ impl Platform for LinuxPlatform {
 /// [`Handle::update`], which re-exports the affected SNI properties / dbusmenu.
 /// A condvar woken by the tray's installed waker keeps the drain responsive, with
 /// a periodic timeout as a backstop so a missed wake never wedges the loop.
-fn run_sni_loop(tray: Tray) -> Result<()> {
+fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
     // Keep the shared command queue + waker slot; the rest of the tray moves into
     // the SNI adapter.
     let commands = Arc::clone(&tray.commands);
     let waker_slot = Arc::clone(&tray.waker);
 
-    let handle = MuriSni {
+    // Install handshake (EH-1): report the real SNI/`StatusNotifierItem`
+    // registration result synchronously — *before* entering the blocking drain
+    // loop — so a spawn-path caller (the compat facade's `build_result`) learns
+    // the item never registered instead of seeing a false `Ok`. The blocking
+    // `run_tray` path also propagates it via the return value.
+    let handle = match (MuriSni {
         tray,
         visible: true,
     }
-    .spawn()
-    .map_err(|e| Error::Platform(format!("SNI/StatusNotifierItem registration failed: {e}")))?;
+    .spawn())
+    {
+        Ok(handle) => {
+            let _ = report.send(Ok(()));
+            handle
+        }
+        Err(e) => {
+            let err =
+                Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"));
+            let _ = report.send(Err(Error::TrayInstall(format!(
+                "SNI/StatusNotifierItem registration failed: {e}"
+            ))));
+            return Err(err);
+        }
+    };
 
     // Wake primitive: the waker flips the flag + notifies; the loop parks on it.
     let wake: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
