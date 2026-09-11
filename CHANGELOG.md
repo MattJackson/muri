@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-11
+
+Live-macOS OEM parity + the real Linux Wayland styled menu. Non-breaking.
+
+### Fixed
+
+- **Live macOS popup renders bold (#63/#56).** On modern macOS the system UI
+  font is a single SF *variable* file, so `Weight::Bold` silently downgraded to
+  regular on the live `ThemeSource::System` path (the offscreen forced-`MacOs`
+  path was unaffected). muri now **instances the `wght` axis** (700) through both
+  shaping (harfrust) and rasterization (swash) for a variable face, and falls
+  back to **synthetic emboldening** for a static face with no weight axis — so
+  `Row::bold()` renders bold in the live popup, matching the offscreen renderer.
+- **Live macOS row metrics (#63).** The live System-theme popup was ~10% tighter
+  than native `NSMenu`; the System path now scales its row height to the native
+  pitch (only the live path — the forced-`MacOs` offscreen goldens are unchanged).
+  `DEVICE-VERIFY(0.11.1)`: on-device pixel confirmation of the row pitch.
+- **Arrow cursor over the popup.** The borderless popup could show the text
+  I-beam when opened under a stationary pointer (the arrow was only enforced via
+  key-window cursor rects + `mouseMoved:`). Added a `cursorUpdate:` handler +
+  `NSTrackingAreaOptions::CursorUpdate`, which fires independent of key state and
+  movement.
+
+### Added
+
+- **Real Linux Wayland styled menu (`wayland-styled`, experimental).** The
+  scaffold is now a working `wlr-layer-shell` overlay presenter (full flyout
+  stack, hover/keyboard/dismiss, `wl_shm` ARGB8888 blit) for wlroots + KDE; X11
+  tray activation is delivered to muri's own popup (const-generic
+  `MENU_ON_ACTIVATE` split); and the custom X11/Wayland popups expose their
+  AccessKit tree over AT-SPI via `accesskit_unix` (behind `a11y`). GNOME-Wayland
+  stays native dbusmenu. New deps are target-gated to non-macOS. Live-compositor
+  behavior is `DEVICE-VERIFY` (verify on a real Wayland/X11 session).
+
 ## [0.11.0] - 2026-09-11
 
 The API-shape release: the compat facade is frozen to a pure muda/tray-icon
