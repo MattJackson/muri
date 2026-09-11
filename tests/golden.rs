@@ -57,7 +57,7 @@ fn flush_right_menu() -> Menu {
 /// disabled row rather than dropping them).
 fn item_kinds_menu() -> Menu {
     Menu::new()
-        .section_header(Row::info().label("Accounts"))
+        .section_header(Row::label_only("Accounts"))
         .row(
             Row::new("acct:me")
                 .leading(Icon::Checkmark)
@@ -76,7 +76,7 @@ fn item_kinds_menu() -> Menu {
 /// [`account_submenu`].
 fn flyout_parent_menu() -> Menu {
     Menu::new()
-        .section_header(Row::info().label("Claude"))
+        .section_header(Row::label_only("Claude"))
         .submenu(
             Row::new("acct:claude:me").label("me@example.com"),
             account_submenu(),
@@ -92,7 +92,7 @@ fn flyout_parent_menu() -> Menu {
 /// The child flyout panel: a couple of info rows plus an action row.
 fn account_submenu() -> Menu {
     Menu::new()
-        .row(Row::info().segments(vec![
+        .row(Row::default().segments(vec![
             Segment::new("Session resets in").flex(Flex::Grow),
             Segment::new("3h 12m")
                 .align(Align::Right)
@@ -128,7 +128,7 @@ fn golden_flush_right() {
 /// rather than asserted op-by-op. Light theme, scale 2.0.
 fn edge_paths_menu() -> Menu {
     Menu::new()
-        .section_header(Row::info().label("Edge paths"))
+        .section_header(Row::label_only("Edge paths"))
         .row(
             Row::new("tinted")
                 .label("Tinted row")

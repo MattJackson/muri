@@ -93,14 +93,37 @@ pub enum Icon {
 }
 
 impl Icon {
-    /// Build an [`Icon::Png`] from raw image bytes.
-    pub fn from_png_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
+    /// **The one obvious way** to build a raster icon: from encoded PNG (or any
+    /// auto-detected raster format) bytes. The 90% path for a logo/avatar.
+    pub fn from_png(bytes: impl Into<Arc<[u8]>>) -> Self {
         Icon::Png(bytes.into())
     }
 
-    /// Build an [`Icon::Svg`] from raw SVG bytes (rasterized via muri's restricted
-    /// SVG subset; see the [`Icon`] note).
-    pub fn from_svg_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
+    /// **The one obvious way** to build an icon from raw straight-alpha RGBA8
+    /// pixels: `width * height * 4` bytes, row-major. muri keeps a single
+    /// encoded-bytes representation internally (the pixels are encoded to PNG),
+    /// so a consumer never has to choose a representation — hence this returns a
+    /// plain [`Icon`], indistinguishable at the type level from one built with
+    /// [`Icon::from_png`]. Returns [`Error::BadIcon`](crate::Error::BadIcon) when
+    /// the buffer length doesn't equal `width * height * 4` (or either dimension
+    /// is zero).
+    pub fn from_rgba(rgba: &[u8], width: u32, height: u32) -> crate::Result<Self> {
+        crate::render::encode_rgba_png(rgba, width, height)
+            .map(|png| Icon::Png(png.into()))
+            .ok_or_else(|| {
+                crate::Error::BadIcon(format!(
+                    "RGBA buffer is {} bytes but {width}x{height} needs {}",
+                    rgba.len(),
+                    (width as usize)
+                        .saturating_mul(height as usize)
+                        .saturating_mul(4),
+                ))
+            })
+    }
+
+    /// **The one obvious way** to build an icon from raw SVG bytes (rasterized
+    /// per target size via muri's restricted SVG subset; see the [`Icon`] note).
+    pub fn from_svg(bytes: impl Into<Arc<[u8]>>) -> Self {
         Icon::Svg(bytes.into())
     }
 }
@@ -329,8 +352,15 @@ impl Row {
         }
     }
 
-    /// A non-interactive row (id = [`MenuId::none`]); handy for section headers
-    /// and pure info lines.
+    /// A non-interactive row (id = [`MenuId::none`]).
+    ///
+    /// Deprecated (issue #62): redundant with [`Row::label_only`] (the canonical
+    /// non-interactive constructor, which also adds the label in one call) and
+    /// with [`Row::default`] (an empty non-interactive row to chain onto).
+    #[deprecated(
+        since = "0.11.0",
+        note = "use Row::label_only(text) for header/label/info rows, or Row::default() for an empty non-interactive row to chain segments onto"
+    )]
     pub fn info() -> Self {
         Row::default()
     }
@@ -340,14 +370,44 @@ impl Row {
     /// the label [`Row`] of an [`Item::Submenu`] or [`Item::SectionHeader`],
     /// where the [`MenuId`] and `checked` state are discarded anyway (see the
     /// note on [`Menu::submenu`]/[`Menu::section_header`]) — using this
-    /// constructor makes that discard explicit at the call site.
+    /// constructor makes that discard explicit at the call site. **The one
+    /// obvious way** to build a non-interactive header/label/info row.
     pub fn label_only(text: impl Into<String>) -> Self {
-        Row::info().label(text)
+        Row::default().label(text)
     }
 
-    /// Append a plain-text left-aligned segment (convenience).
+    /// **The one obvious way** to add text to a row: append a plain-text
+    /// left-aligned segment.
     pub fn label(mut self, text: impl Into<String>) -> Self {
         self.segments.push(Segment::new(text));
+        self
+    }
+
+    /// **Convenience (issue #62):** bold the row's label — its first segment —
+    /// without changing its size or family. This is the native styling home for
+    /// the common "make this row bold" case; it renders identically to
+    /// hand-building the equivalent whole-label [`StyleRun`] with
+    /// [`Weight::Bold`]. A no-op on a row with no segments. It **replaces** the
+    /// first segment's runs; for partial or mixed-weight styling, build
+    /// [`StyleRun`]s directly (the full-control escape hatch).
+    pub fn bold(mut self) -> Self {
+        if let Some(seg) = self.segments.first_mut() {
+            let len = seg.text.encode_utf16().count();
+            seg.runs = vec![StyleRun::new(0, len, Color::Label).weight(Weight::Bold)];
+        }
+        self
+    }
+
+    /// **Convenience (issue #62):** color the row's value — its last segment,
+    /// i.e. the trailing value of a [`label_value`](Row::label_value) row — with
+    /// a whole-segment color. This is the native styling home for the common
+    /// "tint this row's value" case. A no-op on a row with no segments. For a
+    /// per-substring tint (e.g. only an over-limit percentage), build
+    /// [`StyleRun`]s directly (the full-control escape hatch).
+    pub fn value_color(mut self, color: Color) -> Self {
+        if let Some(seg) = self.segments.last_mut() {
+            seg.color = Some(color);
+        }
         self
     }
 
@@ -669,7 +729,11 @@ impl Menu {
         Menu::default()
     }
 
-    /// Append any [`Item`].
+    /// Append any [`Item`] (the escape hatch). Prefer the labeled builder
+    /// methods — [`row`](Menu::row), [`separator`](Menu::separator),
+    /// [`section_header`](Menu::section_header), [`submenu`](Menu::submenu),
+    /// [`content`](Menu::content) — which are the canonical, one-obvious-way path
+    /// (issue #62); reach for `item` only to append a hand-built [`Item`].
     pub fn item(mut self, item: Item) -> Self {
         self.items.push(item);
         self
@@ -755,7 +819,7 @@ mod tests {
     #[test]
     fn builder_produces_expected_item_sequence() {
         let menu = Menu::new()
-            .section_header(Row::info().label("Claude"))
+            .section_header(Row::label_only("Claude"))
             .row(Row::new("a").label("Account A"))
             .separator()
             .submenu(
@@ -772,9 +836,9 @@ mod tests {
 
     #[test]
     fn interactivity_rules() {
-        let header = Item::SectionHeader(Row::info().label("H"));
+        let header = Item::SectionHeader(Row::label_only("H"));
         let sep = Item::Separator;
-        let info = Item::Row(Row::info().label("info"));
+        let info = Item::Row(Row::label_only("info"));
         let disabled = Item::Row(Row::new("x").label("X").enabled(false));
         let live = Item::Row(Row::new("x").label("X"));
 
@@ -788,9 +852,9 @@ mod tests {
     #[test]
     fn interactive_count_skips_headers_and_separators() {
         let menu = Menu::new()
-            .section_header(Row::info().label("H"))
+            .section_header(Row::label_only("H"))
             .row(Row::new("a").label("A"))
-            .row(Row::info().label("info only"))
+            .row(Row::label_only("info only"))
             .separator()
             .row(Row::new("b").label("B"));
         assert_eq!(menu.interactive_count(), 2);
@@ -850,8 +914,8 @@ mod tests {
         let tail = Segment::new("usagio v1").color(Color::SecondaryLabel);
         assert_eq!(tail.color, Some(Color::SecondaryLabel));
 
-        // `disabled_but_white` info rows → Row::info() (id none), Color::Label.
-        let info = Row::info();
+        // `disabled_but_white` info rows → Row::default() (id none), Color::Label.
+        let info = Row::default();
         assert!(info.id.is_none());
         assert!(info.enabled);
     }
@@ -880,7 +944,7 @@ mod tests {
 
     #[test]
     fn row_label_value_produces_grow_and_right_segments() {
-        let row = Row::info().label_value("me@example.com", "Active");
+        let row = Row::default().label_value("me@example.com", "Active");
         assert_eq!(row.segments.len(), 2);
         assert_eq!(row.segments[0].text, "me@example.com");
         assert_eq!(row.segments[0].flex, Flex::Grow);
@@ -941,5 +1005,82 @@ mod tests {
         assert_eq!(row.checked, None);
         assert_eq!(row.accessible_name(), "Section");
         assert!(row.enabled);
+    }
+
+    // Issue #62 — Row-level styling conveniences. `Row::bold()` must produce the
+    // same whole-label bold StyleRun a consumer would hand-build, so it renders
+    // identically (the compat set_bold path lands on this same shape).
+    #[test]
+    fn row_bold_bolds_the_label_segment() {
+        let row = Row::new("x").label("Hi").bold();
+        let runs = &row.segments[0].runs;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[0].len, "Hi".encode_utf16().count());
+        assert_eq!(runs[0].weight, Some(Weight::Bold));
+        assert_eq!(runs[0].color, Color::Label);
+    }
+
+    #[test]
+    fn row_bold_is_identical_to_hand_built_style_run() {
+        let convenient = Row::new("x").label("Account").bold();
+        let hand_built = Row::new("x").segment(Segment::new("Account").run(
+            StyleRun::new(0, "Account".encode_utf16().count(), Color::Label).weight(Weight::Bold),
+        ));
+        assert_eq!(convenient.segments[0].runs, hand_built.segments[0].runs);
+        assert_eq!(convenient.segments[0].text, hand_built.segments[0].text);
+    }
+
+    #[test]
+    fn row_bold_on_empty_row_is_a_noop() {
+        let row = Row::new("x").bold();
+        assert!(row.segments.is_empty());
+    }
+
+    #[test]
+    fn row_value_color_colors_the_value_segment() {
+        let row = Row::new("acct")
+            .label_value("me@example.com", "Active")
+            .value_color(Color::SystemRed);
+        assert_eq!(row.segments.len(), 2);
+        // Colors the *last* segment (the value), not the label.
+        assert_eq!(row.segments[1].color, Some(Color::SystemRed));
+        assert_eq!(row.segments[0].color, None);
+    }
+
+    #[test]
+    fn row_value_color_on_empty_row_is_a_noop() {
+        let row = Row::new("x").value_color(Color::SystemRed);
+        assert!(row.segments.is_empty());
+    }
+
+    // Issue #62 — unified Icon constructors.
+    #[test]
+    fn icon_from_svg_builds_an_svg_icon() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#f00"/></svg>"##;
+        let icon = Icon::from_svg(svg.to_vec());
+        assert!(matches!(icon, Icon::Svg(_)));
+    }
+
+    #[test]
+    fn icon_from_png_builds_a_png_icon() {
+        let icon = Icon::from_png(vec![1u8, 2, 3]);
+        assert!(matches!(icon, Icon::Png(_)));
+    }
+
+    #[test]
+    fn icon_from_rgba_encodes_to_a_single_representation() {
+        // A 2x2 opaque-white RGBA buffer becomes an (encoded-PNG) Icon — the
+        // consumer never sees a separate raw-RGBA representation.
+        let rgba = vec![255u8; 2 * 2 * 4];
+        let icon = Icon::from_rgba(&rgba, 2, 2).expect("valid rgba");
+        assert!(matches!(icon, Icon::Png(_)));
+    }
+
+    #[test]
+    fn icon_from_rgba_rejects_mismatched_buffer() {
+        // Wrong length for the stated dimensions → BadIcon rather than a panic.
+        let err = Icon::from_rgba(&[0u8; 3], 2, 2).unwrap_err();
+        assert!(matches!(err, crate::Error::BadIcon(_)));
     }
 }

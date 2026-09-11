@@ -371,7 +371,7 @@ mod tests {
     // Focusable: 1, 2, 4, 5.
     fn menu() -> Menu {
         Menu::new()
-            .section_header(Row::info().label("Claude"))
+            .section_header(Row::label_only("Claude"))
             .row(Row::new("a").label("Apple"))
             .row(Row::new("b").label("Banana"))
             .separator()

@@ -32,7 +32,7 @@ use muri::{
 /// trailing value.
 fn sample_menu() -> Menu {
     Menu::new()
-        .section_header(Row::info().label("Account"))
+        .section_header(Row::label_only("Account"))
         .row(Row::new("acct:me").segments(vec![
             Segment::new("me@example.com").flex(Flex::Grow),
             Segment::new("47%")

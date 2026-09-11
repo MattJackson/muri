@@ -22,7 +22,7 @@
 //!     .separator()
 //!     .row(Row::new("quit").label("Quit"));
 //!
-//! let _tray = Tray::new(Icon::from_png_bytes(icon_png))
+//! let _tray = Tray::new(Icon::from_png(icon_png))
 //!     .tooltip("My App")
 //!     .menu(menu)
 //!     .on_click(|id| println!("clicked {}", id.as_str()));
@@ -30,6 +30,32 @@
 //! // _tray.run(_m); // installs the tray icon and enters the platform event loop
 //! # }
 //! ```
+//!
+//! ## Native API: the one obvious way
+//!
+//! The native surface deliberately has **one canonical call per task**, with
+//! alternatives kept only as clearly-labeled thin sugar or full-control escape
+//! hatches (issue #62). When in doubt, reach for the canonical path:
+//!
+//! | Task | Canonical native call | Escape hatch |
+//! |------|-----------------------|--------------|
+//! | Build a menu | [`Menu::new`] + [`Menu::row`] / [`separator`](Menu::separator) / [`section_header`](Menu::section_header) / [`submenu`](Menu::submenu) / [`content`](Menu::content) | [`Menu::item`] with a hand-built [`Item`] |
+//! | An interactive row | [`Row::new(id)`](Row::new) | — |
+//! | A header / label / info row | [`Row::label_only(text)`](Row::label_only) | [`Row::default`] + segments |
+//! | Row text | [`Row::label`] / [`Row::label_value`] | [`Row::segments`] (hand-built [`Segment`]s) |
+//! | Bold a row's label | [`Row::bold`] | a whole-label [`StyleRun`] with [`Weight::Bold`] |
+//! | Color a row's value | [`Row::value_color`] | per-substring [`StyleRun`]s |
+//! | An icon | [`Icon::from_png`] / [`Icon::from_rgba`] / [`Icon::from_svg`] | — |
+//! | Choose the look | [`MenuOptions`] (carrying a [`ThemeSource`]) | [`Tray::theme`] / [`TrayHandle::set_theme`] (derived conveniences that set the `MenuOptions` theme) |
+//!
+//! Per-run [`StyleRun`] styling (attached via [`Segment::run`]/[`Segment::runs`],
+//! with a per-run color and optional [`StyleRun::weight`]) is the **one** styling
+//! system;
+//! [`Row::bold`]/[`Row::value_color`] are just the ergonomic front door onto it
+//! for the two most common cases, and render identically to the equivalent
+//! hand-built runs. [`MenuOptions`] is the single source of truth for "which
+//! look" — [`Tray::theme`] and [`TrayHandle::set_theme`] ultimately set its
+//! [`theme`](MenuOptions::theme) field.
 //!
 //! ## Status
 //!
@@ -590,13 +616,17 @@ impl Tray {
         self
     }
 
-    /// Set popup options (width bounds, theme source).
+    /// Set popup options (width bounds, theme source). [`MenuOptions`] is the
+    /// canonical, single source of truth for a tray's look and layout (issue
+    /// #62); [`theme`](Tray::theme) below is a derived convenience over it.
     pub fn options(mut self, options: MenuOptions) -> Self {
         self.options = options;
         self
     }
 
-    /// Convenience: set just the theme source.
+    /// Convenience: set just the theme source. A thin wrapper over
+    /// [`options`](Tray::options) — it sets the [`MenuOptions::theme`] field,
+    /// which is the canonical "which look" source of truth (issue #62).
     pub fn theme(mut self, theme: ThemeSource) -> Self {
         self.options.theme = theme;
         self

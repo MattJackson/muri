@@ -38,19 +38,19 @@ fn swatch_png(r: u8, g: u8, b: u8) -> Vec<u8> {
 /// windows (flush-right values), an "updated" line, then the account actions.
 fn account_submenu(slug: &str) -> Menu {
     Menu::new()
-        .row(Row::info().segments(vec![
+        .row(Row::default().segments(vec![
             Segment::new("Session resets in").flex(Flex::Grow),
             Segment::new("3h 12m")
                 .align(Align::Right)
                 .color(Color::SecondaryLabel),
         ]))
-        .row(Row::info().segments(vec![
+        .row(Row::default().segments(vec![
             Segment::new("Weekly resets in").flex(Flex::Grow),
             Segment::new("2d 4h")
                 .align(Align::Right)
                 .color(Color::SecondaryLabel),
         ]))
-        .row(Row::info().segment(Segment::new("updated 1m ago").color(Color::SecondaryLabel)))
+        .row(Row::default().segment(Segment::new("updated 1m ago").color(Color::SecondaryLabel)))
         .separator()
         .row(Row::new(format!("switch:{slug}")).label("Switch to this account"))
         .row(Row::new(format!("launch:{slug}")).label("Launch client"))
@@ -63,8 +63,8 @@ fn demo_menu() -> Menu {
 
     Menu::new()
         .section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(claude_logo))
+            Row::default()
+                .leading(Icon::from_png(claude_logo))
                 .segment(Segment::new("Claude").font(Font::system(13.0, Weight::Bold))),
         )
         .submenu(
@@ -92,8 +92,8 @@ fn demo_menu() -> Menu {
         )
         .separator()
         .section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(codex_logo))
+            Row::default()
+                .leading(Icon::from_png(codex_logo))
                 .segment(Segment::new("Codex").font(Font::system(13.0, Weight::Bold))),
         )
         .row(Row::new("switch:codex:me").segments(vec![
@@ -120,7 +120,7 @@ fn demo_menu() -> Menu {
 }
 
 fn main() {
-    let icon = Icon::from_png_bytes(swatch_png(120, 170, 255));
+    let icon = Icon::from_png(swatch_png(120, 170, 255));
     let tray = Tray::new(icon)
         .tooltip("muri demo")
         .menu(demo_menu())

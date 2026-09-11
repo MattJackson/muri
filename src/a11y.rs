@@ -454,7 +454,7 @@ mod tests {
     // disabled row(4), submenu(5 -> child One/Two), quit(6).
     fn menu() -> Menu {
         Menu::new()
-            .section_header(Row::info().label("Claude"))
+            .section_header(Row::label_only("Claude"))
             .row(
                 Row::new("switch:me")
                     .label("me@example.com")

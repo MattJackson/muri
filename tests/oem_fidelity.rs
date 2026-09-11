@@ -72,7 +72,7 @@ fn mixed_menu(bold_first: bool) -> Menu {
 /// gutter), a separator, and a secondary-colored trailing value.
 fn metrics_menu() -> Menu {
     Menu::new()
-        .section_header(Row::info().label("Metrics & Tracking"))
+        .section_header(Row::label_only("Metrics & Tracking"))
         .row(Row::new("acct").segments(vec![
             Segment::new("tracking-sensitive-label@example.com").flex(Flex::Grow),
             Segment::new("47%")

@@ -43,8 +43,8 @@ fn demo_menu() -> Menu {
     Menu::new()
         // Provider group: Claude
         .section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(claude_logo))
+            Row::default()
+                .leading(Icon::from_png(claude_logo))
                 .segment(Segment::new("Claude").font(Font::system(13.0, Weight::Bold))),
         )
         .row(
@@ -70,8 +70,8 @@ fn demo_menu() -> Menu {
         .separator()
         // Provider group: Codex
         .section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(codex_logo))
+            Row::default()
+                .leading(Icon::from_png(codex_logo))
                 .segment(Segment::new("Codex").font(Font::system(13.0, Weight::Bold))),
         )
         .row(Row::new("switch:codex:me").segments(vec![
@@ -164,19 +164,19 @@ fn snapshot_dark_and_light_are_nonblank_and_saved() {
 /// separator, then the switch/launch/remove actions.
 fn account_submenu() -> Menu {
     Menu::new()
-        .row(Row::info().segments(vec![
+        .row(Row::default().segments(vec![
             Segment::new("Session resets in").flex(Flex::Grow),
             Segment::new("3h 12m")
                 .align(Align::Right)
                 .color(Color::SecondaryLabel),
         ]))
-        .row(Row::info().segments(vec![
+        .row(Row::default().segments(vec![
             Segment::new("Weekly resets in").flex(Flex::Grow),
             Segment::new("2d 4h")
                 .align(Align::Right)
                 .color(Color::SecondaryLabel),
         ]))
-        .row(Row::info().segment(Segment::new("updated 1m ago").color(Color::SecondaryLabel)))
+        .row(Row::default().segment(Segment::new("updated 1m ago").color(Color::SecondaryLabel)))
         .separator()
         .row(Row::new("switch:claude:me").label("Switch to this account"))
         .row(Row::new("launch:claude:me").label("Launch client"))
@@ -189,8 +189,8 @@ fn flyout_parent_menu(child: Menu) -> Menu {
     let claude_logo = swatch_png(217, 119, 87);
     Menu::new()
         .section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(claude_logo))
+            Row::default()
+                .leading(Icon::from_png(claude_logo))
                 .segment(Segment::new("Claude").font(Font::system(13.0, Weight::Bold))),
         )
         .submenu(

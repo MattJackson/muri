@@ -56,9 +56,9 @@ fn severity_runs(spans: &[(usize, usize, Color)]) -> Vec<StyleRun> {
 fn account_submenu(acct: &Account) -> Menu {
     let mut menu = Menu::new()
         // Info rows read as normal text but are non-interactive (id = none).
-        .row(Row::info().label("Session resets in 2h 41m"))
-        .row(Row::info().label("Weekly resets in 3d 4h"))
-        .row(Row::info().segment(Segment::new("updated 12s ago").color(Color::SecondaryLabel)))
+        .row(Row::label_only("Session resets in 2h 41m"))
+        .row(Row::label_only("Weekly resets in 3d 4h"))
+        .row(Row::default().segment(Segment::new("updated 12s ago").color(Color::SecondaryLabel)))
         .separator();
 
     if acct.active {
@@ -96,7 +96,7 @@ fn capture_submenu(groups: &[Group]) -> Menu {
     for group in groups {
         menu = menu.row(
             Row::new(format!("capture:{}", group.display_name.to_lowercase()))
-                .leading(Icon::from_png_bytes(group.icon_png))
+                .leading(Icon::from_png(group.icon_png))
                 .label(format!("Capture {} login", group.display_name)),
         );
     }
@@ -127,7 +127,7 @@ fn settings_submenu() -> Menu {
         .submenu(
             Row::new("backup")
                 // An SVG leading icon, rasterized per-DPI at draw time.
-                .leading(Icon::from_svg_bytes(
+                .leading(Icon::from_svg(
                     br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.as_slice(),
                 ))
                 .label("Backup"),
@@ -143,8 +143,8 @@ fn build(groups: &[Group]) -> Menu {
     for group in groups {
         // Bold, logo'd, non-interactive group header (Claude, then Codex).
         menu = menu.section_header(
-            Row::info()
-                .leading(Icon::from_png_bytes(group.icon_png))
+            Row::default()
+                .leading(Icon::from_png(group.icon_png))
                 .segment(Segment::new(group.display_name).font(Font::system(13.0, Weight::Bold))),
         );
 

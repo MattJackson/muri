@@ -1087,7 +1087,7 @@ mod tests {
 
     fn demo_menu() -> Menu {
         Menu::new()
-            .section_header(Row::info().label("Claude"))
+            .section_header(Row::label_only("Claude"))
             .row(
                 Row::new("switch:claude:me")
                     .leading(Icon::Checkmark)
@@ -1884,7 +1884,7 @@ mod tests {
     #[test]
     fn header_ignores_checked_but_submenu_parent_honors_it() {
         let menu = Menu::new()
-            .section_header(Row::info().label("Header").checked(true))
+            .section_header(Row::label_only("Header").checked(true))
             .submenu(Row::new("more").label("More").checked(true), Menu::new());
         let mut d = RecordingDrawer::default();
         render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
@@ -2063,7 +2063,7 @@ mod tests {
     /// popup `background` at `corner_radius`, inset by `padding`, at `row_height`.
     fn field_probe_menu() -> Menu {
         Menu::new()
-            .section_header(Row::info().label("Header"))
+            .section_header(Row::label_only("Header"))
             .row(Row::new("checked").checked(true).label("Checked"))
             .row(Row::new("plain").label("Plain"))
             .row(Row::new("disabled").label("Disabled").enabled(false))
@@ -2235,7 +2235,7 @@ mod tests {
             (
                 "headers_seps_submenu_checks",
                 Menu::new()
-                    .section_header(Row::info().label("Header"))
+                    .section_header(Row::label_only("Header"))
                     .row(Row::new("c").checked(true).label("Checked").enabled(false))
                     .separator()
                     .submenu(Row::new("more").label("More"), Menu::new())
@@ -2499,7 +2499,7 @@ mod tests {
     fn kitchen_sink_menu_paints_all_item_kinds() {
         let logo: Arc<[u8]> = Arc::from(vec![6u8; 8]);
         let menu = Menu::new()
-            .section_header(Row::info().label("Section"))
+            .section_header(Row::label_only("Section"))
             .row(Row::new("plain").label("Plain"))
             .row(
                 Row::new("cd")
