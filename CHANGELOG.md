@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-09-11
+
+Audit-hardening release before wider testing. A 10-lens code audit of the
+0.10.6→0.11.1 change set (19 confirmed findings) — all non-breaking.
+
+### Fixed
+
+- **Unbounded font caches.** The process-lived, thread-local `FontStore`'s
+  glyph-coverage, fallback-face, embolden, and primary-face caches had no cap and
+  grew forever over a long-running tray session with varied menu text; each now
+  has a documented cap with clear-on-overflow, matching the glyph/shaped caches.
+- **Variable-font bold over-clamp.** For a variable face whose `wght` axis maxes
+  out below the bold floor, the instanced weight could be pushed *above* the
+  font's own axis max; the axis-max clamp is now applied last.
+- **Compat checkbox identity.** An *unchecked* `CheckMenuItem` on the muda-compat
+  facade produced a muri `Row` with `checked == None` (indistinguishable from a
+  plain item — losing the checkmark-gutter reservation and the AccessKit
+  `MenuItemCheckBox` role); it is now `Some(false)`.
+- **Linux SNI leading SVG icons.** The native `com.canonical.dbusmenu` path (the
+  GNOME default) silently dropped `Icon::Svg` leading menu-item icons; they are
+  now rasterized to PNG, and the match is exhaustive.
+- **Linux SNI shutdown ordering.** The tray drain loop discarded commands queued
+  after a `Shutdown` in the same batch; it now applies the whole batch before
+  tearing down.
+- **Tray-install handshake ordering.** The Windows/Linux tray thread now installs
+  its command-waker *before* signalling install success, closing a window where a
+  command posted by a pre-obtained handle could go undelivered.
+
+### Performance
+
+- The text-measurement cache no longer allocates an owned key on a cache hit
+  (hash-then-verify, matching the shaping cache), and the variable-font bold
+  `ShaperInstance` is now memoized per (face, weight) instead of rebuilt per
+  shape miss. Behavior unchanged.
+
+### Internal / tests / docs
+
+- Added regression tests for the checkbox identity, cache-cap eviction, wght
+  clamp, struct-literal `min_width > max_width` (no panic), and a `compile_fail`
+  guard pinning the frozen-compat surface (native-only styling must not resolve
+  on the facade). Documented deliberate error swallows on the void ksni
+  activation callback; assorted doc/comment corrections.
+
 ## [0.11.1] - 2026-09-11
 
 Live-macOS OEM parity + the real Linux Wayland styled menu. Non-breaking.
