@@ -766,11 +766,15 @@ impl PopupSession<'_> {
             if let Some(font) = read_system_menu_font() {
                 font.apply_size_to(&mut theme);
             }
-            // Native SF tracking (#42): CoreText applies a small size-dependent
+            // Native SF tracking (#42/#57): CoreText applies a small size-dependent
             // tracking to San Francisco that a bare shaper does not, so muri's menu
-            // text otherwise reads slightly *looser* than a real NSMenu. Tighten the
-            // injected System-theme fonts to match. Only System themes get this —
-            // forced/preset/custom faces aren't SF.
+            // text otherwise reads slightly *looser* than a real NSMenu. The macOS
+            // preset already bakes tracking in for its 13pt base; here we OVERWRITE
+            // (assign, not `+=`) with the value recomputed for the *live* menu size
+            // just applied by `apply_size_to` above — so the System theme tracks for
+            // the live size with no double application on top of the preset. Only
+            // System themes get this — forced/preset/custom faces aren't SF, but a
+            // forced macOS preset still carries its baked-in tracking on any host.
             theme.row_font.letter_spacing = sf_ui_tracking(theme.row_font.size);
             theme.header_font.letter_spacing = sf_ui_tracking(theme.header_font.size);
             if !transparency_enabled() {
@@ -1937,16 +1941,18 @@ fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 /// a slight **tightening** (negative). Applied only to `System` themes (real SF) —
 /// never to forced/preset/custom themes, whose faces aren't SF.
 ///
-/// DEVICE-VERIFY(0.10.7): the exact factor needs a side-by-side capture against a
+/// DEVICE-VERIFY(0.10.8): the exact factor needs a side-by-side capture against a
 /// real `NSMenu`. It is deliberately a single, conservative, easily-tuned constant
-/// over the narrow menu-size range (11–14pt) rather than a full optical-size table
-/// — tune [`SF_TRACKING_FRACTION`] once measured on device.
+/// over the narrow menu-size range (11–14pt) rather than a full optical-size table.
+///
+/// This delegates to [`crate::theme::macos_sf_tracking`] — the single source of
+/// truth (#57) shared with the forced `Theme::macos` preset, so the live-system
+/// read path and a forced macOS theme compute *identical* tracking for the same
+/// size. The forced preset already bakes tracking in for its 13pt base; this path
+/// recomputes it for the live menu size and OVERWRITES (assign, not `+=`) so the
+/// System theme tracks for the live size without ever double-applying.
 fn sf_ui_tracking(size_pt: f32) -> f32 {
-    /// Tracking as a fraction of the point size. At the 13pt native menu size this
-    /// is ~-0.16pt of tightening. Direction is from the reported "reads looser"
-    /// symptom; magnitude is conservative and device-verify.
-    const SF_TRACKING_FRACTION: f32 = -0.012;
-    size_pt * SF_TRACKING_FRACTION
+    crate::theme::macos_sf_tracking(size_pt)
 }
 
 /// Resolve the bold companion of the system menu `font` and, when it is a

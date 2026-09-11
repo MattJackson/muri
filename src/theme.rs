@@ -308,6 +308,69 @@ impl Default for Theme {
 /// neutral system blue.
 const ACCENT_FALLBACK: Rgba = Rgba::opaque(0, 122, 255);
 
+// -- macOS `NSMenu` (Big Sur+) geometry references (#57) ----------------------
+//
+// muri's macOS rows previously read too tall / loose versus a native `NSMenu`.
+// These name the Big Sur+ menu metrics the [`Theme::macos`] preset targets, each
+// commented with its native reference. Values that still need a pixel-accurate
+// side-by-side capture to confirm are flagged `DEVICE-VERIFY(0.10.8)`. All are
+// public [`Theme`] fields at the end, so a consumer can still override them.
+
+/// Standard `NSMenu` item height in logical points. The core "rows too tall" fix
+/// (#57). Native reference: AppKit's standard menu item height (~22pt on Big Sur+).
+const MACOS_ROW_HEIGHT: f32 = 22.0;
+
+/// The macOS menu font size in logical points. Native reference:
+/// `+[NSFont menuFontOfSize:0]` (~13pt). The live System menu size still
+/// overrides this at draw time; this is the headless / forced-theme base.
+const MACOS_MENU_FONT_SIZE: f32 = 13.0;
+
+/// Vertical content inset (top and bottom) of the popup, in logical points.
+/// Native reference: the `NSMenu`'s ~4pt top/bottom content padding.
+const MACOS_VERTICAL_INSET: f32 = 4.0;
+
+/// Leading text inset (no checkmark gutter) in logical points — where a plain
+/// row's text starts. Native reference: `NSMenu` text begins ~14pt in.
+/// DEVICE-VERIFY(0.10.8).
+const MACOS_LEADING_INSET: f32 = 14.0;
+
+/// Horizontal gap between the leading icon, text segments, and the trailing
+/// column, in logical points. Native reference: the `NSMenu` inter-column rhythm
+/// (~8pt). DEVICE-VERIFY(0.10.8).
+const MACOS_COLUMN_GAP: f32 = 8.0;
+
+/// Popup corner radius in logical points. Native reference: the Big Sur+ `NSMenu`
+/// rounded-corner radius (~6pt). DEVICE-VERIFY(0.10.8).
+const MACOS_CORNER_RADIUS: f32 = 6.0;
+
+/// Tracking (letter-spacing) as a fraction of the point size applied to macOS
+/// San Francisco UI text, mirroring the small size-dependent tracking CoreText
+/// adds to SF that a bare shaper does not (#42/#57): muri's menu text otherwise
+/// reads slightly *looser* than a native `NSMenu`, so this is a slight tightening
+/// (negative). This is the single source of truth: the forced [`Theme::macos`]
+/// preset bakes it in (so a forced macOS theme carries tracking on **any** host),
+/// and the live-system read path in `platform::mac` recomputes the same value for
+/// the live menu size via [`macos_sf_tracking`] (both must stay identical).
+///
+/// DEVICE-VERIFY(0.10.8): the exact factor needs a side-by-side capture against a
+/// real `NSMenu`; a single conservative constant over the 11–14pt menu range.
+pub(crate) const MACOS_SF_TRACKING_FRACTION: f32 = -0.012;
+
+/// Extra tracking in logical points for macOS SF UI text at `size` points.
+/// See [`MACOS_SF_TRACKING_FRACTION`]. At the 13pt native menu size this is
+/// ~-0.16pt of tightening.
+pub(crate) fn macos_sf_tracking(size: f32) -> f32 {
+    size * MACOS_SF_TRACKING_FRACTION
+}
+
+/// Tracking for the Windows 11 menu font (Segoe UI), in logical points. Segoe UI
+/// menu text uses metrics-only spacing — no extra tracking — so this is `0.0`.
+const SEGOE_UI_TRACKING: f32 = 0.0;
+
+/// Tracking for the GNOME/Adwaita menu font (Cantarell/Ubuntu), in logical
+/// points. Like Segoe UI, these use metrics-only spacing — no tracking — `0.0`.
+const CANTARELL_TRACKING: f32 = 0.0;
+
 impl Theme {
     /// The default light theme.
     pub fn light() -> Self {
@@ -374,7 +437,9 @@ impl Theme {
     /// backend injects the live accent, label/separator colors (`NSColor`), and
     /// the SF face + point size on top; these are the native-accurate defaults.
     ///
-    /// DEVICE-VERIFY: metrics are matched to the macOS menu by eye; nudge here.
+    /// Metrics are the named `MACOS_*` reference constants (each documents its
+    /// native `NSMenu` source); values still needing a pixel-accurate capture are
+    /// flagged `DEVICE-VERIFY(0.10.8)` at their definition.
     pub fn macos(dark: bool) -> Theme {
         let base = if dark { Theme::dark() } else { Theme::light() };
         Theme {
@@ -384,16 +449,24 @@ impl Theme {
             } else {
                 Color::Rgba(246, 246, 246, 209)
             },
-            corner_radius: 6.0,
-            // Matched to the macOS menu's rhythm: item height ~22, ~14pt of
-            // horizontal inset, 13pt SF. #41: earlier builds read looser (rows
-            // too tall / gaps wide); these are tighter. All metrics are public
-            // `Theme` fields — override for exact pixel matching. DEVICE-VERIFY.
-            row_height: 22.0,
-            padding: Insets::symmetric(14.0, 4.0),
-            column_gap: 8.0,
-            row_font: Font::system(13.0, Weight::Regular),
-            header_font: Font::system(13.0, Weight::Bold),
+            corner_radius: MACOS_CORNER_RADIUS,
+            // Matched to the Big Sur+ `NSMenu` rhythm via the named
+            // `MACOS_*` reference constants above (each documents its native
+            // source): ~22pt item height, ~14pt leading inset, ~4pt vertical
+            // inset, ~8pt inter-column gap, 13pt SF. #57: earlier builds read
+            // looser (rows too tall / gaps wide); these are tighter. All are
+            // public `Theme` fields — override for exact pixel matching.
+            row_height: MACOS_ROW_HEIGHT,
+            padding: Insets::symmetric(MACOS_LEADING_INSET, MACOS_VERTICAL_INSET),
+            column_gap: MACOS_COLUMN_GAP,
+            // Bake SF tracking into the preset so a FORCED macOS theme carries it
+            // on any host (not only when the live-system font is read). The
+            // System path in `platform::mac` recomputes the same value for the
+            // live menu size (assign, not add) — no double application (#57).
+            row_font: Font::system(MACOS_MENU_FONT_SIZE, Weight::Regular)
+                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE)),
+            header_font: Font::system(MACOS_MENU_FONT_SIZE, Weight::Bold)
+                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE)),
             ..base
         }
     }
@@ -420,8 +493,10 @@ impl Theme {
             column_gap: 12.0,
             // Segoe UI at 9pt is the Win11 menu default; the live OS point size
             // overrides this, but a sensible base for the headless/fallback path.
-            row_font: Font::system(14.0, Weight::Regular),
-            header_font: Font::system(14.0, Weight::Bold),
+            // Segoe UI uses metrics-only spacing (no tracking), set explicitly so
+            // a forced Windows theme never inherits macOS SF tracking.
+            row_font: Font::system(14.0, Weight::Regular).with_letter_spacing(SEGOE_UI_TRACKING),
+            header_font: Font::system(14.0, Weight::Bold).with_letter_spacing(SEGOE_UI_TRACKING),
             ..base
         }
     }
@@ -442,8 +517,12 @@ impl Theme {
                 separator: Color::rgb(61, 61, 61),
                 accent: Color::Accent,
                 row_highlight: Color::Accent,
-                row_font: Font::system(11.0, Weight::Regular),
-                header_font: Font::system(11.0, Weight::Bold),
+                // Cantarell/Ubuntu use metrics-only spacing (no tracking); set
+                // explicitly so a forced GNOME theme never inherits SF tracking.
+                row_font: Font::system(11.0, Weight::Regular)
+                    .with_letter_spacing(CANTARELL_TRACKING),
+                header_font: Font::system(11.0, Weight::Bold)
+                    .with_letter_spacing(CANTARELL_TRACKING),
                 row_height: 30.0,
                 corner_radius: 12.0,
                 padding: Insets::symmetric(6.0, 6.0),
@@ -457,8 +536,10 @@ impl Theme {
                 separator: Color::rgb(226, 226, 226),
                 accent: Color::Accent,
                 row_highlight: Color::Accent,
-                row_font: Font::system(11.0, Weight::Regular),
-                header_font: Font::system(11.0, Weight::Bold),
+                row_font: Font::system(11.0, Weight::Regular)
+                    .with_letter_spacing(CANTARELL_TRACKING),
+                header_font: Font::system(11.0, Weight::Bold)
+                    .with_letter_spacing(CANTARELL_TRACKING),
                 row_height: 30.0,
                 corner_radius: 12.0,
                 padding: Insets::symmetric(6.0, 6.0),
@@ -894,6 +975,101 @@ mod tests {
         assert_eq!(ThemeSource::System(ThemeMode::Auto).forced_family(), None);
         assert_eq!(ThemeSource::Preset(Preset::Nord).forced_family(), None);
         assert_eq!(ThemeSource::Custom(Box::default()).forced_family(), None);
+    }
+
+    /// #57: the macOS preset's geometry is pinned to the named Big Sur+ `NSMenu`
+    /// reference constants, and light/dark share identical geometry (only colors
+    /// differ between the two appearances).
+    #[test]
+    fn macos_metrics_match_nsmenu_reference() {
+        // The reference constants themselves (guards against accidental drift).
+        assert_eq!(MACOS_ROW_HEIGHT, 22.0); // NSMenu standard item height
+        assert_eq!(MACOS_MENU_FONT_SIZE, 13.0); // +[NSFont menuFontOfSize:0]
+        assert_eq!(MACOS_VERTICAL_INSET, 4.0); // ~4pt top/bottom content inset
+        assert_eq!(MACOS_LEADING_INSET, 14.0); // ~14pt leading text inset
+        assert_eq!(MACOS_COLUMN_GAP, 8.0); // ~8pt inter-column gap
+        assert_eq!(MACOS_CORNER_RADIUS, 6.0); // Big Sur ~6pt radius
+
+        // The preset wires each constant into the right `Theme` field.
+        let mac = Theme::macos(false);
+        assert_eq!(mac.row_height, MACOS_ROW_HEIGHT);
+        assert_eq!(mac.corner_radius, MACOS_CORNER_RADIUS);
+        assert_eq!(mac.column_gap, MACOS_COLUMN_GAP);
+        assert_eq!(mac.padding.left, MACOS_LEADING_INSET);
+        assert_eq!(mac.padding.right, MACOS_LEADING_INSET);
+        assert_eq!(mac.padding.top, MACOS_VERTICAL_INSET);
+        assert_eq!(mac.padding.bottom, MACOS_VERTICAL_INSET);
+        assert_eq!(mac.row_font.size, MACOS_MENU_FONT_SIZE);
+        assert_eq!(mac.header_font.size, MACOS_MENU_FONT_SIZE);
+
+        // Light/dark geometry parity: same metrics, only the palette differs.
+        let dark = Theme::macos(true);
+        assert_eq!(mac.row_height, dark.row_height);
+        assert_eq!(mac.corner_radius, dark.corner_radius);
+        assert_eq!(mac.column_gap, dark.column_gap);
+        assert_eq!(mac.padding.left, dark.padding.left);
+        assert_eq!(mac.padding.top, dark.padding.top);
+        assert_eq!(mac.row_font, dark.row_font);
+        assert_eq!(mac.header_font, dark.header_font);
+    }
+
+    /// #57: forced-theme tracking travels with the theme. A FORCED macOS preset
+    /// carries non-zero SF tracking on any host (not only when the live system
+    /// font is read), while forced Windows / GNOME presets carry their documented
+    /// zero tracking (their faces aren't SF).
+    #[test]
+    fn forced_theme_tracking_travels_with_the_preset() {
+        let mac = Theme::macos(false);
+        // macOS SF tracking is a slight tightening (negative), baked into both fonts.
+        assert!(mac.row_font.letter_spacing < 0.0);
+        assert!(mac.header_font.letter_spacing < 0.0);
+        assert_eq!(
+            mac.row_font.letter_spacing,
+            macos_sf_tracking(MACOS_MENU_FONT_SIZE)
+        );
+        assert_eq!(
+            mac.header_font.letter_spacing,
+            macos_sf_tracking(MACOS_MENU_FONT_SIZE)
+        );
+        // Same for the dark variant — forced on any host.
+        assert!(Theme::macos(true).row_font.letter_spacing < 0.0);
+
+        // Windows / GNOME use metrics-only spacing (Segoe UI / Cantarell ≈ 0).
+        for win in [Theme::windows(false), Theme::windows(true)] {
+            assert_eq!(win.row_font.letter_spacing, SEGOE_UI_TRACKING);
+            assert_eq!(win.header_font.letter_spacing, SEGOE_UI_TRACKING);
+            assert_eq!(win.row_font.letter_spacing, 0.0);
+        }
+        for gnome in [Theme::gnome(false), Theme::gnome(true)] {
+            assert_eq!(gnome.row_font.letter_spacing, CANTARELL_TRACKING);
+            assert_eq!(gnome.header_font.letter_spacing, CANTARELL_TRACKING);
+            assert_eq!(gnome.row_font.letter_spacing, 0.0);
+        }
+    }
+
+    /// #57: the live-system read path and the forced-preset path yield a single,
+    /// consistent tracking value — no double application. The preset bakes in
+    /// `macos_sf_tracking(13pt)`; the System path OVERWRITES (assign, not add) with
+    /// `macos_sf_tracking(live_size)`. At the same size the two must match exactly,
+    /// and re-applying (overwriting) must be idempotent (never compound).
+    #[test]
+    fn macos_tracking_reconciles_system_and_forced_paths() {
+        // Forced preset value (baked in at the 13pt base).
+        let preset = Theme::macos(false).row_font.letter_spacing;
+        // System path recomputes for the live size; at the same 13pt size it is
+        // numerically identical (single source of truth).
+        assert_eq!(preset, macos_sf_tracking(MACOS_MENU_FONT_SIZE));
+
+        // Overwrite (assign) is idempotent — no compounding on top of the preset.
+        let mut font = Theme::macos(false).row_font;
+        let once = font.letter_spacing;
+        font.letter_spacing = macos_sf_tracking(font.size);
+        assert_eq!(font.letter_spacing, once);
+        // The fraction sign encodes a tightening; guard the direction + magnitude.
+        assert_eq!(MACOS_SF_TRACKING_FRACTION, -0.012);
+        assert!((macos_sf_tracking(13.0) - (-0.012 * 13.0)).abs() < f32::EPSILON);
+        // Different live size => different tracking (recomputed, not fixed).
+        assert_ne!(macos_sf_tracking(13.0), macos_sf_tracking(15.0));
     }
 
     #[test]
