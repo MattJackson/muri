@@ -394,9 +394,9 @@ mod handshake_tests {
         // The backend seam (EH-1): a `run` that reports an install failure through
         // the handshake (as run_event_loop / run_sni_loop do when
         // Shell_NotifyIcon / SNI registration fails) makes spawn_tray_thread return
-        // that error — the mechanism build_result relies on.
+        // that error — the mechanism `Tray::spawn`'s `Result` relies on.
         // DEVICE-VERIFY(0.10.8): a true Shell_NotifyIcon(NIM_ADD)/SNI failure on a
-        // real Windows/Linux session flowing through this same seam to build_result.
+        // real Windows/Linux session flowing through this same seam to `Tray::spawn`.
         fn failing(_tray: Tray, report: &InstallReport) -> Result<()> {
             let _ = report.send(Err(Error::TrayInstall("forced install failure".into())));
             Ok(())

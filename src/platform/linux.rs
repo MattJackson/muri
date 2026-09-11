@@ -442,7 +442,7 @@ fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
 
     // Install handshake (EH-1): report the real SNI/`StatusNotifierItem`
     // registration result synchronously — *before* entering the blocking drain
-    // loop — so a spawn-path caller (the compat facade's `build_result`) learns
+    // loop — so a spawn-path caller (the native `Tray::spawn`) learns
     // the item never registered instead of seeing a false `Ok`. The blocking
     // `run_tray` path also propagates it via the return value.
     let handle = match (MuriSni {

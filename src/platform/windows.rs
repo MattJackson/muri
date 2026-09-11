@@ -2364,7 +2364,7 @@ fn run_event_loop(mut tray: Tray, report: &super::InstallReport) -> Result<()> {
     let mut anchor = WindowsAnchor::new();
     // Install handshake (EH-1): report the real `Shell_NotifyIcon(NIM_ADD)` result
     // synchronously — *before* entering the blocking pump — so a spawn-path caller
-    // (the compat facade's `build_result`) learns the icon never installed instead
+    // (the native `Tray::spawn`) learns the icon never installed instead
     // of seeing a false `Ok`. The blocking `run_tray` path also propagates it via
     // the return value.
     if let Err(e) = anchor.install(&tray.icon, tray.tooltip.as_deref()) {

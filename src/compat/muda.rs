@@ -1,6 +1,33 @@
 //! The `muri::compat::muda` facade — muda's public API surface mapped onto
 //! muri's native model (spec `02`).
 //!
+//! # Frozen contract: a pure, bidirectional muda drop-in (#61)
+//!
+//! This facade is a **pure, bidirectional `muda` drop-in** — conceptually two
+//! `sed` scripts, `s/muda/muri/` **and** `s/muri/muda/`. It mirrors muda's public
+//! API **exactly — no more, no less**: every symbol here also exists on upstream
+//! `muda`, so an app can move *onto* muri by redirecting its imports and back
+//! *off* muri the same way, both with zero code changes. **The facade carries no
+//! muri-only customization.** Bold rows, per-run / value colors, active markers,
+//! leading-icon submenus, forced themes, `MenuOptions`, offscreen render, and
+//! liveness/spawn-error introspection are **not** on this surface; the moment a
+//! consumer wants any of them they have left compat and must use the **native**
+//! muri API ([`crate::menu`], [`crate::Tray`], [`crate::ContextMenu`],
+//! [`crate::MenuOptions`]). Compat is the on-ramp; native is where customization
+//! lives.
+//!
+//! ## Compat symbol ↔ upstream muda symbol (the freeze, both ways)
+//!
+//! | compat (`muri::compat::muda`) | upstream `muda` | native muri home for what compat does *not* carry |
+//! | --- | --- | --- |
+//! | [`Menu`], [`Submenu`] + `append`/`prepend`/`insert`/`remove`/`items` | `Menu`, `Submenu` | — |
+//! | [`MenuItem`], [`CheckMenuItem`], [`IconMenuItem`], [`PredefinedMenuItem`] | same | — |
+//! | [`Icon::from_rgba`], [`Icon::from_path`] | `Icon::from_rgba`, `Icon::from_path` | raw bytes → [`crate::menu::Icon`] (`from_png`/`from_rgba`/`from_svg`) |
+//! | [`NativeIcon`], [`ContextMenu`], [`MenuId`], [`MenuEvent`] | same | — |
+//! | *(row styling: bold / active / value color / value runs)* | *(none — not muda's API)* | native [`Row::bold`](crate::menu::Row::bold) / [`Row::value_color`](crate::menu::Row::value_color) / [`Segment::runs`](crate::menu::Segment::runs) with [`StyleRun`](crate::menu::StyleRun) |
+//! | *(submenu leading icon)* | *(none)* | native [`Item::Submenu`](crate::menu::Item::Submenu) with a `Row::leading(Icon::…)` label |
+//! | *(as-native / options-threaded popup)* | *(none)* | native [`ContextMenu`](crate::ContextMenu) / [`Popup`](crate::Popup) with [`MenuOptions`](crate::MenuOptions) |
+//!
 //! Type names, module layout, and builder shapes mirror muda so an unchanged app
 //! compiles after only redirecting its imports (spec `60` §3). Each item type
 //! translates to a muri [`Item`](crate::menu::Item)/[`Row`](crate::menu::Row);
@@ -19,12 +46,10 @@
 //!   `None` (current-cursor) form is exercised by the worked migration (spec
 //!   `02` §6). This is best-effort until muri pins muda's `dpi` version.
 //! - `IconMenuItem` built from raw RGBA renders its leading icon in the muri
-//!   custom surface: the RGBA is encoded to PNG
-//!   ([`render::encode_rgba_png`](crate::render)) and carried as an
+//!   custom surface: the RGBA is encoded to PNG and carried as an
 //!   [`Icon::Png`](crate::menu::Icon::Png) — the same bridge the tray icon uses
-//!   (issue #9). A PNG-backed icon ([`Icon::from_png`]) keeps its encoded bytes
-//!   and uses the native `Icon::Png` path directly (no decode/re-encode; #24). A
-//!   `NativeIcon` maps to
+//!   (issue #9). An [`Icon::from_path`] icon decodes the PNG file to RGBA and
+//!   travels the same path. A `NativeIcon` maps to
 //!   [`Icon::Symbol`](crate::menu::Icon::Symbol).
 //! - `Accelerator` is displayed only (spec `02` §5, divergence D5); the facade
 //!   parses a useful subset of muda's `Code`/`Modifiers`.
@@ -42,18 +67,14 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 use crate::menu::{
-    Align, Flex, Item as MuriItem, Menu as MuriMenu, Row as MuriRow, Segment as MuriSegment,
+    Align, Flex, Icon as MuriIcon, Item as MuriItem, Menu as MuriMenu, Row as MuriRow,
+    Segment as MuriSegment,
 };
 
 pub use crate::event::MenuEventReceiver;
-pub use crate::menu::{Icon as MuriIcon, MenuEvent, MenuId};
-// Re-exported so callers can style rows without reaching outside the compat
-// module: a value color (#19), per-span value runs (#25), and their weight.
-pub use crate::menu::StyleRun;
-pub use crate::style::{Color, Weight};
+pub use crate::menu::{MenuEvent, MenuId};
 
 pub mod about_metadata;
 pub mod accelerator;
@@ -84,9 +105,11 @@ pub enum Error {
     /// A capability unavailable on the current platform.
     Unsupported(crate::Unsupported),
     /// A platform API call failed (tray install, main-thread requirement, thread
-    /// spawn, or a residual per-OS API error — the message names which). The
-    /// tray-install handshake surfaces a Windows/Linux install failure here via
-    /// [`TrayIconBuilder::build_result`](super::tray_icon::TrayIconBuilder::build_result).
+    /// spawn, or a residual per-OS API error — the message names which). To
+    /// surface a Windows/Linux tray-install failure, drive the native
+    /// [`Tray::spawn`](crate::Tray::spawn) directly (whose `Result` carries it);
+    /// the compat `TrayIconBuilder::build()` degrades such a failure to a passive
+    /// facade for tray-icon parity.
     Platform(String),
 }
 
@@ -170,58 +193,21 @@ fn resolve_id(id: Option<MenuId>) -> MenuId {
 // Icons (spec 02 §4.5, §4.7)
 // =============================================================================
 
-/// A menu/tray icon built from **raw RGBA** ([`from_rgba`](Icon::from_rgba)) or
-/// **encoded PNG** ([`from_png`](Icon::from_png)) bytes, mirroring muda/`tray-icon`'s
-/// `Icon`. Raw RGBA is encoded to PNG
-/// ([`render::encode_rgba_png`](crate::render)) and carried as an
-/// [`Icon::Png`](crate::menu::Icon::Png) (issue #9); PNG bytes keep their encoded
-/// representation and use the native `Icon::Png` path directly, with no
-/// decode/re-encode cycle (#24). Both feed the tray icon and menu-item leading
-/// icons.
+/// A menu/tray icon built from **raw RGBA** ([`from_rgba`](Icon::from_rgba)) or a
+/// **PNG file** ([`from_path`](Icon::from_path)), mirroring muda/`tray-icon`'s
+/// `Icon` and carrying **only** the constructors upstream `muda` exposes (#61).
+/// The pixels are encoded to PNG and carried as an
+/// [`Icon::Png`](crate::menu::Icon::Png) (issue #9), feeding the tray icon and
+/// menu-item leading icons. A native muri consumer holding encoded PNG bytes
+/// builds [`crate::menu::Icon::from_png`] directly instead.
 #[derive(Clone, Debug)]
 pub struct Icon {
-    /// Straight-alpha RGBA pixels, row-major, 4 bytes per pixel. Empty (and
-    /// meaningless) for a PNG-backed icon ([`Icon::from_png`]) — use
-    /// [`Icon::data`] to introspect which representation this icon actually
-    /// holds rather than reading this field directly (issue #53).
-    ///
-    /// `pub(crate)` rather than fully `pub`: the sibling `tray_icon` compat
-    /// module still reads it directly (and the field-level shape is not part
-    /// of the facade's *external* contract), but an external caller must go
-    /// through [`Icon::data`], which is honest about the PNG case.
-    pub(crate) rgba: Vec<u8>,
-    /// Pixel width. `0` (and meaningless) for a PNG-backed icon; see the note
-    /// on [`rgba`](Icon::rgba) above.
-    pub(crate) width: u32,
-    /// Pixel height. `0` (and meaningless) for a PNG-backed icon; see the note
-    /// on [`rgba`](Icon::rgba) above.
-    pub(crate) height: u32,
-    /// Encoded PNG bytes, when this icon was built with [`Icon::from_png`].
-    ///
-    /// This is kept private so callers continue to use the compatibility
-    /// constructors rather than depending on the storage representation.
-    png: Option<Arc<[u8]>>,
-}
-
-/// The icon's actual underlying representation (issue #53), returned by
-/// [`Icon::data`]. `Icon`'s `rgba`/`width`/`height` fields read as
-/// empty/zero for a PNG-backed icon ([`Icon::from_png`]) — this is the honest
-/// accessor a caller should use to tell the two representations apart rather
-/// than trusting those fields unconditionally.
-#[derive(Clone, Copy, Debug)]
-#[non_exhaustive]
-pub enum IconData<'a> {
     /// Straight-alpha RGBA pixels, row-major, 4 bytes per pixel.
-    Rgba {
-        /// Pixel width.
-        width: u32,
-        /// Pixel height.
-        height: u32,
-        /// The raw pixel bytes (`width * height * 4` long).
-        pixels: &'a [u8],
-    },
-    /// Encoded PNG bytes, as given to [`Icon::from_png`].
-    Png(&'a [u8]),
+    pub(crate) rgba: Vec<u8>,
+    /// Pixel width.
+    pub(crate) width: u32,
+    /// Pixel height.
+    pub(crate) height: u32,
 }
 
 impl Icon {
@@ -250,7 +236,6 @@ impl Icon {
                 rgba,
                 width,
                 height,
-                png: None,
             }),
             Some(expected) => Err(BadIcon(format!(
                 "expected {expected} bytes for {width}x{height} RGBA, got {}",
@@ -262,39 +247,25 @@ impl Icon {
         }
     }
 
-    /// Build an icon from encoded PNG bytes (issue #24).
+    /// Build an icon from an image file on disk, mirroring muda/`tray-icon`'s
+    /// `Icon::from_path`.
     ///
-    /// The bytes are retained **without decoding** and used for muri's native
-    /// [`Icon::Png`](crate::menu::Icon::Png) path — no decode-into-RGBA then
-    /// re-encode cycle. This is the muda/`tray-icon` `Icon::from_path`-style
-    /// convenience for callers that already hold PNG asset bytes.
-    pub fn from_png(bytes: &[u8]) -> std::result::Result<Self, BadIcon> {
-        if bytes.is_empty() {
-            return Err(BadIcon("PNG icon bytes are empty".to_owned()));
-        }
-        Ok(Icon {
-            rgba: Vec::new(),
-            width: 0,
-            height: 0,
-            png: Some(Arc::from(bytes)),
-        })
-    }
-
-    /// The icon's actual underlying representation (issue #53): `Png` for an
-    /// icon built with [`Icon::from_png`], `Rgba` for one built with
-    /// [`Icon::from_rgba`]. The honest introspection accessor — the `rgba`/
-    /// `width`/`height` fields read as empty/zero for a PNG-backed icon, so a
-    /// caller that wants to know which representation it is holding (rather
-    /// than assuming raw RGBA) should match on this instead.
-    pub fn data(&self) -> IconData<'_> {
-        match &self.png {
-            Some(png) => IconData::Png(png),
-            None => IconData::Rgba {
-                width: self.width,
-                height: self.height,
-                pixels: &self.rgba,
-            },
-        }
+    /// The file is decoded to straight-alpha RGBA and stored like
+    /// [`from_rgba`](Icon::from_rgba). **Documented divergence:** muri decodes
+    /// **PNG** files only (its native decoder), and the optional `size`
+    /// (muda resizes to it) is accepted for signature parity but not applied —
+    /// the icon keeps its decoded dimensions. Both are best-effort, consistent
+    /// with the rest of this facade's icon story.
+    pub fn from_path(
+        path: impl AsRef<std::path::Path>,
+        _size: Option<(u32, u32)>,
+    ) -> std::result::Result<Self, BadIcon> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)
+            .map_err(|e| BadIcon(format!("failed to read icon {}: {e}", path.display())))?;
+        let (rgba, width, height) = crate::render::decode_png(&bytes)
+            .ok_or_else(|| BadIcon(format!("failed to decode icon {} as PNG", path.display())))?;
+        Icon::from_rgba(rgba, width, height)
     }
 }
 
@@ -383,51 +354,40 @@ impl MenuItemKind {
         match self {
             MenuItemKind::MenuItem(i) => {
                 let s = i.inner.borrow();
-                MuriItem::Row(apply_styled_label(
+                MuriItem::Row(apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
-                    &s.style,
+                    false,
                 ))
             }
             MenuItemKind::Check(i) => {
                 let s = i.inner.borrow();
-                // The checkbox state drives the leading checkmark (#12); the muri
-                // style adds bold + value coloring on top (#28) without forcing a
-                // second checkmark.
-                let mut style = s.style.clone();
-                style.checkmark = style.checkmark || s.checked;
-                MuriItem::Row(apply_styled_label(
+                // The checkbox state drives the leading checkmark (#12).
+                MuriItem::Row(apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
-                    &style,
+                    s.checked,
                 ))
             }
             MenuItemKind::Icon(i) => {
                 let s = i.inner.borrow();
-                let mut row = apply_styled_label(
+                let mut row = apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
-                    &s.style,
+                    false,
                 );
                 match &s.icon {
-                    // A PNG-backed icon uses its encoded bytes directly (#24); a
-                    // raw-RGBA icon is encoded to PNG and rendered as the row's
+                    // A raw-RGBA icon is encoded to PNG and rendered as the row's
                     // leading image — the same bridge the tray icon uses
-                    // (`render::encode_rgba_png` → `Icon::Png`), so a provider logo
-                    // on a header row draws (issue #9).
+                    // (`encode_rgba_png` → `Icon::Png`), so a provider logo on a
+                    // header row draws (issue #9).
                     Some(IconSource::Rgba(icon)) => {
-                        if let Some(png) = &icon.png {
-                            row = row.leading(MuriIcon::Png(png.clone()));
-                        } else if let Some(png) =
-                            // Cached encode: `to_muri` re-runs on every `set_menu`,
-                            // so encoding an unchanged logo each tick would waste
-                            // CPU and defeat the render decode cache. The cache
-                            // returns a stable Arc for identical RGBA.
-                            super::encode_rgba_cached(
-                                &icon.rgba,
-                                icon.width,
-                                icon.height,
-                            )
+                        // Cached encode: `to_muri` re-runs on every `set_menu`, so
+                        // encoding an unchanged logo each tick would waste CPU and
+                        // defeat the render decode cache. The cache returns a stable
+                        // Arc for identical RGBA.
+                        if let Some(png) =
+                            super::encode_rgba_cached(&icon.rgba, icon.width, icon.height)
                         {
                             row = row.leading(MuriIcon::Png(png));
                         }
@@ -442,10 +402,10 @@ impl MenuItemKind {
             }
             MenuItemKind::Submenu(i) => {
                 let s = i.inner.borrow();
-                let label = apply_styled_label(
+                let label = apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
-                    &s.style,
+                    false,
                 );
                 MuriItem::Submenu {
                     label,
@@ -483,181 +443,26 @@ fn kinds_to_muri_menu(items: &[MenuItemKind]) -> MuriMenu {
 /// native `label\tvalue` two-column layout is preserved (#12): the text before
 /// the first TAB grows to fill the row and the trailing text is flush-right,
 /// matching muda's NSMenu tab-stop column. Text without a TAB is a single label.
-/// The muri-compat row styling extensions, applied by [`apply_styled_label`].
-/// All fields are additive muri-only extensions (not muda's API); defaults are
-/// inert so an unstyled row renders exactly as before.
-#[derive(Clone, Default)]
-struct RowStyle {
-    /// A leading checkmark (`set_active`, #18; or a `CheckMenuItem`'s checkbox, #28).
-    checkmark: bool,
-    /// Bold text (`set_active` bundles it with the checkmark; `set_bold` sets it
-    /// alone, #26).
-    bold: bool,
-    /// #19: a single color for the trailing `\t` value segment.
-    value_color: Option<Color>,
-    /// #25: per-span colors/weights on the value segment (UTF-16 ranges into the
-    /// post-`\t` text). Takes precedence over `value_color` when non-empty.
-    value_runs: Vec<StyleRun>,
-    /// #27: a leading image icon (used by `Submenu`, whose muda type has no icon
-    /// slot); encoded/routed like an `IconMenuItem`.
-    icon: Option<Icon>,
-}
-
-/// [`apply_label`] plus [`RowStyle`]: checkmark + bold ([`active`](RowStyle::active)),
-/// bold-only ([`bold`](RowStyle::bold), #26), a single ([`value_color`](RowStyle::value_color),
-/// #19) or per-span ([`value_runs`](RowStyle::value_runs), #25) value color, and an
-/// optional leading [`icon`](RowStyle::icon) (#27). Bold is a whole-segment
-/// [`StyleRun`] weight, preserving the OS point size.
-fn apply_styled_label(row: MuriRow, text: &str, style: &RowStyle) -> MuriRow {
-    let checkmark = style.checkmark;
-    let bold = style.bold;
+///
+/// `checked` drives a leading native checkmark and the row's checked state — the
+/// only presentation muda itself carries (a `CheckMenuItem`'s checkbox). All
+/// other styling (bold, per-run / value colors, icons) is muri-only and lives on
+/// the native API, not on this frozen compat surface (#61).
+fn apply_label(row: MuriRow, text: &str, checked: bool) -> MuriRow {
     let mut row = row;
-    // Leading slot: an explicit image icon wins; else the active checkmark.
-    if let Some(icon) = &style.icon {
-        if let Some(png) = &icon.png {
-            row = row.leading(MuriIcon::Png(png.clone()));
-        } else if let Some(png) = super::encode_rgba_cached(&icon.rgba, icon.width, icon.height) {
-            row = row.leading(MuriIcon::Png(png));
-        }
-    } else if checkmark {
-        row = row.leading(MuriIcon::Checkmark);
+    if checked {
+        row = row.leading(MuriIcon::Checkmark).checked(true);
     }
-    if checkmark {
-        row = row.checked(true);
-    }
-    // Bold a segment across its whole text without changing size/family.
-    let bold_seg = |seg: MuriSegment, s: &str, color: Color| {
-        let len = s.encode_utf16().count();
-        seg.runs(vec![StyleRun::new(0, len, color).weight(Weight::Bold)])
-    };
-    // Apply value styling to the trailing segment: per-span runs (#25) win; else
-    // a single color; bold is layered onto whichever applies.
-    let style_value = |seg: MuriSegment, s: &str| -> MuriSegment {
-        if !style.value_runs.is_empty() {
-            let mut runs = style.value_runs.clone();
-            if bold {
-                for r in &mut runs {
-                    if r.weight.is_none() {
-                        r.weight = Some(Weight::Bold);
-                    }
-                }
-            }
-            seg.runs(runs)
-        } else if bold {
-            bold_seg(seg, s, style.value_color.unwrap_or(Color::Label))
-        } else if let Some(c) = style.value_color {
-            seg.color(c)
-        } else {
-            seg
-        }
-    };
     match text.split_once('\t') {
         Some((lead, tail)) => {
             let lead = lead.trim_end();
             let tail = tail.trim_start();
-            let mut lead_seg = MuriSegment::new(lead).flex(Flex::Grow);
-            if bold {
-                lead_seg = bold_seg(lead_seg, lead, Color::Label);
-            }
-            let tail_seg = style_value(MuriSegment::new(tail).align(Align::Right), tail);
+            let lead_seg = MuriSegment::new(lead).flex(Flex::Grow);
+            let tail_seg = MuriSegment::new(tail).align(Align::Right);
             row.segments(vec![lead_seg, tail_seg])
         }
-        None => {
-            let mut seg = MuriSegment::new(text.to_owned());
-            if bold {
-                seg = bold_seg(seg, text, Color::Label);
-            }
-            row.segments(vec![seg])
-        }
+        None => row.segments(vec![MuriSegment::new(text.to_owned())]),
     }
-}
-
-/// Generates the muri-compat row-styling setters for an item type whose interior
-/// `inner: Rc<RefCell<_>>` state carries a `style: RowStyle` field (#18/#19/#25/#26).
-macro_rules! row_style_setters {
-    () => {
-        /// **muri extension (#18):** mark this row *active* — bold text with a
-        /// leading checkmark (the 0.5.x active-account look). Not muda's API.
-        pub fn set_active(&self, active: bool) {
-            let mut st = self.inner.borrow_mut();
-            st.style.checkmark = active;
-            st.style.bold = active;
-        }
-        /// **muri extension (#26):** render this row **bold** without a checkmark
-        /// (e.g. a bold header row). Not muda's API.
-        pub fn set_bold(&self, bold: bool) {
-            self.inner.borrow_mut().style.bold = bold;
-        }
-        /// **muri extension (#19):** color the trailing `\t` value segment (e.g.
-        /// [`Color::SystemRed`]); pass `None` to clear. Not muda's API.
-        pub fn set_value_color(&self, color: Option<Color>) {
-            self.inner.borrow_mut().style.value_color = color;
-        }
-        /// **muri extension (#25):** per-span colors/weights on the trailing `\t`
-        /// value ([`StyleRun`] ranges are UTF-16 offsets into the value text);
-        /// takes precedence over [`set_value_color`](Self::set_value_color).
-        pub fn set_value_runs(&self, runs: Vec<StyleRun>) {
-            self.inner.borrow_mut().style.value_runs = runs;
-        }
-    };
-}
-
-// =============================================================================
-// MuriRowExt (issue #53) — the muri-only row-styling extensions, grouped
-// =============================================================================
-
-/// **muri extensions**, grouped behind one trait for discoverability (issue
-/// #53): `set_active`/`set_bold`/`set_value_color`/`set_value_runs` (generated
-/// inline on each item type by `row_style_setters!`) plus [`Submenu`]'s
-/// `set_icon` (which has no equivalent on the other item types — they either
-/// have their own icon API, e.g. [`IconMenuItem::set_icon`], or none). None of
-/// this is muda's API; it exists so a consumer can `use
-/// muri::compat::muda::MuriRowExt` and find every muri-only row knob in one
-/// place, and so generic code can be written against `&dyn MuriRowExt` /
-/// `impl MuriRowExt` bounds.
-///
-/// The inherent methods of the same name (from `row_style_setters!`) remain
-/// available on each concrete type and are what method-call syntax resolves to
-/// (inherent methods take priority over trait methods at the same name); this
-/// trait's methods delegate to them, so behavior is identical either way.
-///
-/// [`set_icon`](MuriRowExt::set_icon) has a no-op default: only [`Submenu`]
-/// overrides it. The other item types don't grow a `MuriRowExt::set_icon`
-/// override because they already have their own, differently-shaped icon
-/// setter (e.g. [`IconMenuItem::set_icon`]) that this trait does not shadow.
-pub trait MuriRowExt {
-    /// Mark this row *active*: bold text with a leading checkmark (#18).
-    fn set_active(&self, active: bool);
-    /// Render this row bold, without a checkmark (#26).
-    fn set_bold(&self, bold: bool);
-    /// Color the trailing `\t` value segment; `None` clears it (#19).
-    fn set_value_color(&self, color: Option<Color>);
-    /// Per-span colors/weights on the trailing `\t` value (#25).
-    fn set_value_runs(&self, runs: Vec<StyleRun>);
-    /// Give this row a leading image icon. Only [`Submenu`] overrides this
-    /// (#27); every other implementer keeps the default no-op.
-    fn set_icon(&self, _icon: Option<Icon>) {}
-}
-
-/// Implement [`MuriRowExt`] for a type carrying the `row_style_setters!`
-/// inherent methods, by delegating to them.
-macro_rules! impl_muri_row_ext {
-    ($ty:ty) => {
-        impl MuriRowExt for $ty {
-            fn set_active(&self, active: bool) {
-                <$ty>::set_active(self, active);
-            }
-            fn set_bold(&self, bold: bool) {
-                <$ty>::set_bold(self, bold);
-            }
-            fn set_value_color(&self, color: Option<Color>) {
-                <$ty>::set_value_color(self, color);
-            }
-            fn set_value_runs(&self, runs: Vec<StyleRun>) {
-                <$ty>::set_value_runs(self, runs);
-            }
-        }
-    };
 }
 
 // =============================================================================
@@ -670,8 +475,6 @@ struct MenuItemState {
     enabled: bool,
     #[allow(dead_code)] // displayed by the backend (D5); stored for parity.
     accelerator: Option<Accelerator>,
-    /// muri styling extensions (#18/#19/#25/#26/#27); see [`RowStyle`].
-    style: RowStyle,
 }
 
 /// A plain text menu item (muda's `MenuItem`). Cloning shares the same item (like
@@ -710,12 +513,9 @@ impl MenuItem {
                 text: text.as_ref().to_owned(),
                 enabled,
                 accelerator,
-                style: RowStyle::default(),
             })),
         }
     }
-
-    row_style_setters!();
 
     /// This item's id.
     pub fn id(&self) -> MenuId {
@@ -757,8 +557,6 @@ impl IsMenuItem for MenuItem {
     }
 }
 
-impl_muri_row_ext!(MenuItem);
-
 // =============================================================================
 // CheckMenuItem (spec 02 §4.4)
 // =============================================================================
@@ -770,9 +568,6 @@ struct CheckMenuItemState {
     checked: bool,
     #[allow(dead_code)]
     accelerator: Option<Accelerator>,
-    /// muri styling extensions (#28: the same set_bold/value coloring the other
-    /// item types have); the leading checkmark itself comes from `checked`.
-    style: RowStyle,
 }
 
 /// A checkable menu item (muda's `CheckMenuItem`). Maps exactly to a muri
@@ -818,12 +613,9 @@ impl CheckMenuItem {
                 enabled,
                 checked,
                 accelerator,
-                style: RowStyle::default(),
             })),
         }
     }
-
-    row_style_setters!();
 
     /// This item's id.
     pub fn id(&self) -> MenuId {
@@ -875,16 +667,14 @@ impl IsMenuItem for CheckMenuItem {
     }
 }
 
-impl_muri_row_ext!(CheckMenuItem);
-
 // =============================================================================
 // IconMenuItem (spec 02 §4.5)
 // =============================================================================
 
 enum IconSource {
-    /// An image icon — raw RGBA ([`Icon::from_rgba`], encoded to PNG) or already
-    /// PNG-encoded ([`Icon::from_png`]) — rendered as the row's leading image in
-    /// the custom surface (issue #9 / #24).
+    /// An image icon (raw RGBA via [`Icon::from_rgba`] / a PNG file via
+    /// [`Icon::from_path`], encoded to PNG) rendered as the row's leading image in
+    /// the custom surface (issue #9).
     Rgba(Icon),
     /// A stock icon mapped to a named muri [`Symbol`](MuriIcon::Symbol).
     Native(NativeIcon),
@@ -897,8 +687,6 @@ struct IconMenuItemState {
     icon: Option<IconSource>,
     #[allow(dead_code)]
     accelerator: Option<Accelerator>,
-    /// muri styling extensions (#18/#19/#25/#26/#27); see [`RowStyle`].
-    style: RowStyle,
 }
 
 /// A menu item with a leading icon (muda's `IconMenuItem`). Maps to a muri
@@ -968,12 +756,9 @@ impl IconMenuItem {
                 enabled,
                 icon,
                 accelerator,
-                style: RowStyle::default(),
             })),
         }
     }
-
-    row_style_setters!();
 
     /// This item's id.
     pub fn id(&self) -> MenuId {
@@ -1024,8 +809,6 @@ impl IsMenuItem for IconMenuItem {
         IconMenuItem::id(self)
     }
 }
-
-impl_muri_row_ext!(IconMenuItem);
 
 // =============================================================================
 // PredefinedMenuItem (spec 02 §4.6)
@@ -1343,18 +1126,6 @@ impl Menu {
         kinds_to_muri_menu(&self.inner.borrow().items)
     }
 
-    /// **muri escape hatch (issue #45):** the muri [`Menu`](crate::menu::Menu)
-    /// tree this facade menu maps onto, exposed publicly so a caller can drop
-    /// down to muri's own API (e.g. to build a [`crate::ContextMenu`] or
-    /// [`crate::Popup`] directly with muri-only options this facade doesn't
-    /// otherwise expose) without abandoning the muda-shaped item-building API.
-    /// Not muda's API. A snapshot: later mutation of `self` through
-    /// [`Menu::append`] etc. is not reflected in a tree already returned by an
-    /// earlier call.
-    pub fn as_native(&self) -> MuriMenu {
-        self.to_muri_menu()
-    }
-
     /// This menu's routed surface mode (facade-test accessor).
     #[allow(dead_code)] // read by the facade routing tests.
     pub(crate) fn mode(&self) -> SurfaceMode {
@@ -1382,18 +1153,6 @@ impl Menu {
     pub(crate) fn build_custom_surface(&self) -> crate::ContextMenu {
         self.set_mode(SurfaceMode::Custom);
         crate::ContextMenu::new(self.to_muri_menu())
-    }
-
-    /// The custom surface with a caller-supplied [`MenuOptions`] applied (#45).
-    /// Factored out of [`open_custom_with_options`](Self::open_custom_with_options)
-    /// so a test can observe that the options actually reach the surface (via
-    /// [`crate::ContextMenu::menu_options`]) rather than only after the popup
-    /// opens and consumes it.
-    pub(crate) fn custom_surface_with_options(
-        &self,
-        options: crate::MenuOptions,
-    ) -> crate::ContextMenu {
-        self.build_custom_surface().options(options)
     }
 }
 
@@ -1483,32 +1242,6 @@ fn cursor_or_origin(position: Option<Position>) -> crate::LogicalPoint {
         .unwrap_or_default()
 }
 
-impl Menu {
-    /// **muri escape hatch (issue #45):** like [`show_context_menu_for_nsview`]
-    /// / the other `ContextMenu::show_context_menu_for_*` methods, but threads
-    /// an explicit [`MenuOptions`](crate::MenuOptions) (theme, width bounds,
-    /// gutter policy) through to the opened popup instead of leaving it on
-    /// [`crate::MenuOptions`]`::default`. Not muda's API — this is how a consumer opens
-    /// a muri-styled custom menu with muri-only tuning (e.g. an in-menu
-    /// "Preview theme" switcher that reopens the same menu under a different
-    /// [`ThemeSource`](crate::ThemeSource)) through the facade rather than
-    /// dropping to [`Menu::as_native`] and building a
-    /// [`crate::ContextMenu`] by hand.
-    ///
-    /// [`show_context_menu_for_nsview`]: ContextMenu::show_context_menu_for_nsview
-    pub fn open_custom_with_options(
-        &self,
-        position: Option<Position>,
-        options: crate::MenuOptions,
-    ) -> Result<()> {
-        let surface = self.custom_surface_with_options(options);
-        let point = cursor_or_origin(position);
-        surface
-            .open_at(point, crate::Edge::Bottom)
-            .map_err(Error::from)
-    }
-}
-
 impl ContextMenu for Menu {
     fn init_for_nsapp(&self) -> Result<()> {
         self.route_menu_bar()
@@ -1551,8 +1284,6 @@ struct SubmenuState {
     text: String,
     enabled: bool,
     items: Vec<MenuItemKind>,
-    /// muri styling extensions (#18/#19/#25/#26/#27); see [`RowStyle`].
-    style: RowStyle,
 }
 
 /// A nested submenu (muda's `Submenu`). Maps to
@@ -1581,18 +1312,8 @@ impl Submenu {
                 text: text.as_ref().to_owned(),
                 enabled,
                 items: Vec::new(),
-                style: RowStyle::default(),
             })),
         }
-    }
-
-    row_style_setters!();
-
-    /// **muri extension (#27):** give this submenu row a leading image icon
-    /// (muda's `Submenu` has no icon slot); the icon draws in the row's leading
-    /// slot exactly like an [`IconMenuItem`]. Pass `None` to clear. Not muda's API.
-    pub fn set_icon(&self, icon: Option<Icon>) {
-        self.inner.borrow_mut().style.icon = icon;
     }
 
     /// This submenu's id.
@@ -1683,28 +1404,6 @@ impl IsMenuItem for Submenu {
     }
     fn id(&self) -> MenuId {
         Submenu::id(self)
-    }
-}
-
-// Hand-written rather than `impl_muri_row_ext!`: `Submenu` is the one item
-// type that also overrides `set_icon` (#27) — its muri-only leading-icon
-// setter, since it has no icon slot in muda's own API (unlike `IconMenuItem`,
-// which already has its own, differently-shaped `set_icon`).
-impl MuriRowExt for Submenu {
-    fn set_active(&self, active: bool) {
-        Submenu::set_active(self, active);
-    }
-    fn set_bold(&self, bold: bool) {
-        Submenu::set_bold(self, bold);
-    }
-    fn set_value_color(&self, color: Option<Color>) {
-        Submenu::set_value_color(self, color);
-    }
-    fn set_value_runs(&self, runs: Vec<StyleRun>) {
-        Submenu::set_value_runs(self, runs);
-    }
-    fn set_icon(&self, icon: Option<Icon>) {
-        Submenu::set_icon(self, icon);
     }
 }
 
@@ -1844,152 +1543,6 @@ mod tests {
             Align::Right,
             "value segment is right-aligned"
         );
-    }
-
-    /// #18 + #19: an active submenu row converts to a bold, checkmarked muri row
-    /// whose trailing `\t` value carries the severity color.
-    #[test]
-    fn active_submenu_is_bold_checked_and_value_colored() {
-        use crate::menu::{Icon as MuriIcon, Item};
-        use crate::style::{Color, Weight};
-
-        let menu = Menu::new();
-        let acct = Submenu::with_id("acct:me", "me@example.com\t47% / 52%", true);
-        acct.set_active(true);
-        acct.set_value_color(Some(Color::SystemRed));
-        menu.append(&acct).unwrap();
-
-        let muri = menu.to_muri_menu();
-        let Item::Submenu { label, .. } = &muri.items[0] else {
-            panic!("expected a submenu");
-        };
-
-        // Active → checked + leading checkmark.
-        assert_eq!(label.checked, Some(true));
-        assert!(matches!(label.leading, Some(MuriIcon::Checkmark)));
-
-        // Bold lead, and a bold + red trailing value.
-        assert_eq!(label.segments.len(), 2);
-        assert!(
-            label.segments[0]
-                .runs
-                .iter()
-                .any(|r| r.weight == Some(Weight::Bold)),
-            "active lead segment is bold"
-        );
-        assert!(
-            label.segments[1]
-                .runs
-                .iter()
-                .any(|r| r.color == Color::SystemRed && r.weight == Some(Weight::Bold)),
-            "active value segment is bold + severity-colored"
-        );
-    }
-
-    /// #19: a value color without `active` colors the trailing segment (no bold).
-    #[test]
-    fn value_color_without_active_colors_trailing_segment() {
-        use crate::menu::Item;
-        use crate::style::Color;
-
-        let menu = Menu::new();
-        let item = MenuItem::with_id("x", "Label\t99%", true, None);
-        item.set_value_color(Some(Color::SystemOrange));
-        menu.append(&item).unwrap();
-
-        let muri = menu.to_muri_menu();
-        let Item::Row(row) = &muri.items[0] else {
-            panic!("expected a row");
-        };
-        assert_eq!(row.segments.len(), 2);
-        assert_eq!(row.segments[1].color, Some(Color::SystemOrange));
-        assert!(
-            row.segments[1].runs.is_empty(),
-            "no bold runs when not active"
-        );
-    }
-
-    /// #24: a PNG-backed compat icon passes its encoded bytes straight through to
-    /// muri's native `Icon::Png` — no decode/re-encode round-trip.
-    #[test]
-    fn png_icon_translates_to_native_png_without_reencoding() {
-        use crate::menu::{Icon as MuriIcon, Item};
-        let png = crate::render::encode_rgba_png(&[10, 20, 30, 255], 1, 1).unwrap();
-        let icon = Icon::from_png(&png).expect("PNG icon constructor succeeds");
-        let item = IconMenuItem::with_id("png", "PNG", true, Some(icon), None);
-        let menu = Menu::new();
-        menu.append(&item).unwrap();
-
-        let muri = menu.to_muri_menu();
-        let Item::Row(row) = &muri.items[0] else {
-            panic!("expected an icon row");
-        };
-        match &row.leading {
-            Some(MuriIcon::Png(bytes)) => assert_eq!(bytes.as_ref(), png.as_slice()),
-            other => panic!("expected a native PNG icon, got {other:?}"),
-        }
-    }
-
-    /// #25/#26/#27/#28: the styling extensions across item types.
-    #[test]
-    fn styling_extensions_bold_icon_value_runs_and_checkmenuitem() {
-        use crate::menu::{Icon as MuriIcon, Item};
-        use crate::style::{Color, Weight};
-
-        // #26: bold without a checkmark.
-        let hdr = MenuItem::with_id("h", "Header", false, None);
-        hdr.set_bold(true);
-        // #27: a leading icon on a Submenu.
-        let png = crate::render::encode_rgba_png(&[1, 2, 3, 255], 1, 1).unwrap();
-        let sub = Submenu::with_id("s", "Account", true);
-        sub.set_icon(Some(Icon::from_png(&png).unwrap()));
-        // #25: per-span value colors.
-        let item = MenuItem::with_id("v", "Lbl\t47% / 52%", true, None);
-        item.set_value_runs(vec![
-            StyleRun::new(0, 3, Color::SystemGreen),
-            StyleRun::new(6, 3, Color::SystemRed),
-        ]);
-        // #28: CheckMenuItem gains bold + value color; checkbox drives the check.
-        let chk = CheckMenuItem::with_id("c", "Opt\t9%", true, true, None);
-        chk.set_bold(true);
-        chk.set_value_color(Some(Color::SystemOrange));
-
-        let menu = Menu::new();
-        menu.append(&hdr).unwrap();
-        menu.append(&sub).unwrap();
-        menu.append(&item).unwrap();
-        menu.append(&chk).unwrap();
-        let m = menu.to_muri_menu();
-
-        // #26: bold header, no checkmark.
-        let Item::Row(h) = &m.items[0] else { panic!() };
-        assert!(h.leading.is_none(), "bold-only row has no checkmark");
-        assert!(h.segments[0]
-            .runs
-            .iter()
-            .any(|r| r.weight == Some(Weight::Bold)));
-
-        // #27: submenu has a leading PNG icon.
-        let Item::Submenu { label, .. } = &m.items[1] else {
-            panic!()
-        };
-        assert!(matches!(label.leading, Some(MuriIcon::Png(_))));
-
-        // #25: value segment carries the two colored runs.
-        let Item::Row(v) = &m.items[2] else { panic!() };
-        let runs = &v.segments[1].runs;
-        assert!(runs.iter().any(|r| r.color == Color::SystemGreen));
-        assert!(runs.iter().any(|r| r.color == Color::SystemRed));
-
-        // #28: CheckMenuItem — checked → checkmark; bold + value color applied
-        // (bold makes the value color a bold run rather than a plain color).
-        let Item::Row(c) = &m.items[3] else { panic!() };
-        assert_eq!(c.checked, Some(true));
-        assert!(matches!(c.leading, Some(MuriIcon::Checkmark)));
-        assert!(c.segments[1]
-            .runs
-            .iter()
-            .any(|r| r.color == Color::SystemOrange && r.weight == Some(Weight::Bold)));
     }
 
     #[test]
@@ -2171,111 +1724,22 @@ mod tests {
         assert!(menu.remove(&a).is_ok());
     }
 
-    /// #53 (item 2): `Icon::data()` must report `Png` for a `from_png` icon and
-    /// `Rgba` for a `from_rgba` icon — the honest accessor, since the raw
-    /// `rgba`/`width`/`height` fields read as empty/zero for the PNG case.
+    /// #61: `Icon::from_path` (muda's own constructor) decodes a PNG file to RGBA
+    /// and renders as a leading icon, and a missing/undecodable file is a
+    /// `BadIcon` error rather than a panic.
     #[test]
-    fn icon_data_reports_png_for_from_png_and_rgba_for_from_rgba() {
-        let png_bytes = crate::render::encode_rgba_png(&[1, 2, 3, 255], 1, 1).unwrap();
-        let png_icon = Icon::from_png(&png_bytes).expect("valid PNG icon");
-        match png_icon.data() {
-            IconData::Png(bytes) => assert_eq!(bytes, png_bytes.as_slice()),
-            other => panic!("expected IconData::Png, got {other:?}"),
-        }
+    fn from_path_decodes_a_png_file_and_rejects_a_bad_one() {
+        let png = crate::render::encode_rgba_png(&[9, 8, 7, 255], 1, 1).unwrap();
+        let mut path = std::env::temp_dir();
+        path.push(format!("muri_compat_from_path_{}.png", std::process::id()));
+        std::fs::write(&path, &png).unwrap();
 
-        let rgba = vec![9, 8, 7, 255];
-        let rgba_icon = Icon::from_rgba(rgba.clone(), 1, 1).expect("valid RGBA icon");
-        match rgba_icon.data() {
-            IconData::Rgba {
-                width,
-                height,
-                pixels,
-            } => {
-                assert_eq!((width, height), (1, 1));
-                assert_eq!(pixels, rgba.as_slice());
-            }
-            other => panic!("expected IconData::Rgba, got {other:?}"),
-        }
-    }
+        let icon = Icon::from_path(&path, None).expect("PNG file decodes");
+        assert_eq!((icon.width, icon.height), (1, 1));
+        assert_eq!(icon.rgba, vec![9, 8, 7, 255]);
 
-    /// #53 (item 3): `MuriRowExt` is callable on every item type (dispatched
-    /// through a trait bound, not just inherent method-call syntax), and
-    /// `Submenu`'s `set_icon` override actually reaches the row's leading icon.
-    #[test]
-    fn muri_row_ext_is_callable_on_every_item_type() {
-        fn mark_active<T: MuriRowExt>(row: &T) {
-            row.set_active(true);
-            row.set_bold(true);
-            row.set_value_color(Some(Color::SystemRed));
-            row.set_value_runs(vec![StyleRun::new(0, 1, Color::SystemGreen)]);
-        }
-
-        let item = MenuItem::with_id("i", "Lbl\tv", true, None);
-        let chk = CheckMenuItem::with_id("c", "Lbl\tv", true, false, None);
-        let icon_item = IconMenuItem::with_id("ic", "Lbl\tv", true, None, None);
-        let sub = Submenu::with_id("s", "Lbl\tv", true);
-
-        mark_active(&item);
-        mark_active(&chk);
-        mark_active(&icon_item);
-        mark_active(&sub);
-
-        // The trait's default no-op `set_icon` is a no-op for a non-`Submenu`
-        // type; `Submenu`'s override actually sets the leading icon (#27).
-        let png = crate::render::encode_rgba_png(&[4, 5, 6, 255], 1, 1).unwrap();
-        MuriRowExt::set_icon(&sub, Some(Icon::from_png(&png).unwrap()));
-
-        let menu = Menu::new();
-        menu.append(&sub).unwrap();
-        let muri = menu.to_muri_menu();
-        let Item::Submenu { label, .. } = &muri.items[0] else {
-            panic!("expected a submenu");
-        };
-        assert!(
-            matches!(label.leading, Some(MuriIcon::Png(_))),
-            "MuriRowExt::set_icon on Submenu reaches the row's leading icon"
-        );
-        // The bold+active styling from `mark_active` landed too.
-        assert_eq!(label.checked, Some(true));
-    }
-
-    /// #45: `Menu::as_native` exposes the same muri tree `to_muri_menu` builds,
-    /// so an external caller can drop to muri's own API without losing the
-    /// menu it built through the facade.
-    #[test]
-    fn as_native_exposes_the_same_muri_tree() {
-        let menu = Menu::new();
-        menu.append(&MenuItem::with_id("open", "Open", true, None))
-            .unwrap();
-        let native = menu.as_native();
-        assert_eq!(native.items.len(), 1);
-        match &native.items[0] {
-            Item::Row(r) => assert_eq!(r.id, MenuId::from("open")),
-            other => panic!("expected a Row, got {other:?}"),
-        }
-    }
-
-    /// #45: `open_custom_with_options` must thread the given `MenuOptions`
-    /// through to the opened surface. Observe the surface's `menu_options()`
-    /// directly (via the same `custom_surface_with_options` seam `build()` uses)
-    /// — this fails if the options are dropped, unlike asserting only
-    /// `mode() == Custom`, which `build_custom_surface` sets regardless of options.
-    #[test]
-    fn open_custom_with_options_threads_the_options_into_the_surface() {
-        let menu = Menu::new();
-        menu.append(&MenuItem::with_id("open", "Open", true, None))
-            .unwrap();
-        let options = crate::MenuOptions::default().min_width(123.0);
-        let surface = menu.custom_surface_with_options(options.clone());
-        assert_eq!(
-            surface.menu_options().min_width,
-            Some(123.0),
-            "with_options width must reach the custom surface"
-        );
-        assert_eq!(menu.mode(), SurfaceMode::Custom);
-
-        // And the public entry point still executes the options-aware path (it
-        // returns a platform Error headlessly rather than panicking).
-        let _ = menu.open_custom_with_options(Some(Position { x: 10.0, y: 20.0 }), options);
+        // A non-existent path is a BadIcon, not a panic.
+        assert!(Icon::from_path("/no/such/muri/icon.png", None).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }

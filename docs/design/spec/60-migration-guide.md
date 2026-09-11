@@ -370,3 +370,32 @@ existing `custom-popup` feature flag, governed by the pre-1.0 stability contract
 When the facade ships (M3), a *new* muda-based adopter takes the §2–§3 path; usagio,
 already on the native API, simply gains the facade as an option it doesn't need —
 it is already past the unlock (§5) that the facade exists to lead others to.
+
+### 7.1 Compat frozen to a pure muda/tray-icon drop-in (#61 — semver-minor break)
+
+As of the 0.11.0 BREAKING train, `muri::compat::*` is **frozen to the exact
+`muda`/`tray-icon` public surface** — a pure, bidirectional drop-in that holds
+both `s/muda/muri/` **and** `s/muri/muda/`. The muri-only extensions that had
+leaked onto the facade are **removed**: this is a **semver-minor** break under
+muri's pre-1.0 versioning. Any consumer using them (usagio's `set_bold` /
+`set_active`, the tray `with_theme` / `with_options`, `Menu::as_native`, etc.)
+moves to the **native** API per this table:
+
+| Removed compat symbol | Native replacement |
+| --- | --- |
+| `MenuItem/CheckMenuItem/…::set_bold(true)` | `Row::bold()` (or a bold `StyleRun` on a `Segment`) |
+| `…::set_active(true)` | native `Row` with `.checked(true)` + `.leading(Icon::Checkmark)` + a bold `StyleRun` |
+| `…::set_value_color(Some(c))` | `Segment::value_color(c)` / `Segment::color(c)` on the trailing segment |
+| `…::set_value_runs(runs)` | `Segment::runs(runs)` with `StyleRun` (UTF-16 ranges) |
+| `Submenu::set_icon(icon)` | native `Item::Submenu { label, .. }` whose `label` is a `Row::leading(Icon::…)` |
+| `MuriRowExt`, `RowStyle`, `StyleRun`/`Color`/`Weight` re-exports | build rows with the native `muri::menu` builder; import `StyleRun`/`Color`/`Weight` from `muri` |
+| `Icon::from_png(bytes)` | native `muri::menu::Icon::from_png(bytes)` |
+| `Icon::data` / `IconData` | introspect the native `muri::menu::Icon` enum directly |
+| `Menu::as_native()` | build a `muri::Menu` natively (no bridge) |
+| `Menu::open_custom_with_options(pos, opts)` | `ContextMenu::new(menu).options(opts).open_at(point, edge)` |
+| `TrayIconBuilder::with_options/with_theme` | `Tray::new(icon).options(opts)` / `.theme(theme)` |
+| `TrayIcon::set_theme/set_options` | `TrayHandle::set_theme(..)` / `set_options(..)` |
+| `TrayIcon::is_live` / `TrayIconBuilder::build_result` | `Tray::spawn(marker) -> Result<TrayHandle, Error>` — the `Result` *is* the liveness/error signal |
+
+The compat `Icon` keeps only muda's own constructors — `Icon::from_rgba` and
+`Icon::from_path` (PNG files, best-effort); it no longer carries `from_png`.
