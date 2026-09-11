@@ -158,7 +158,10 @@ pub use menu::{
 pub use platform::{Appearance, Platform, PlatformEvent};
 pub use render::{render_menu_to_png, render_menu_to_rgba};
 pub use style::{Color, Font, FontFamily, Rgba, Weight};
-pub use theme::{GutterPolicy, MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource};
+pub use theme::{
+    GutterPolicy, MenuOptions, OsFamily, Preset, Theme, ThemeMode, ThemeSource,
+    TrailingGutterPolicy,
+};
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
