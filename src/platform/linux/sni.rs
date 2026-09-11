@@ -106,11 +106,27 @@ fn icon_to_argb32(bytes: &[u8]) -> Option<ksni::Icon> {
 
 /// The PNG bytes of a leading [`Icon`], if any — dbusmenu item icons take raw PNG
 /// bytes directly (unlike the SNI item icon, which wants ARGB32).
+///
+/// An [`Icon::Svg`] is rasterized to PNG (the DEFAULT GNOME dbusmenu path, which
+/// otherwise silently dropped SVG leading icons — #F7); a [`Icon::Checkmark`] /
+/// [`Icon::Symbol`] carries no raster bytes, so the host draws its own glyph. The
+/// match is exhaustive (no `_`) so a future [`Icon`] variant is a compile error
+/// here rather than another silently-dropped icon.
 fn leading_png(icon: &Option<Icon>) -> Vec<u8> {
     match icon {
         Some(Icon::Png(bytes)) => bytes.to_vec(),
-        _ => Vec::new(),
+        Some(Icon::Svg(bytes)) => svg_to_png(bytes).unwrap_or_default(),
+        Some(Icon::Checkmark) | Some(Icon::Symbol(_)) | None => Vec::new(),
     }
+}
+
+/// Rasterize muri's restricted `Icon::Svg` subset and re-encode it as PNG, so a
+/// dbusmenu item icon (which consumes PNG bytes, not the SVG subset) can carry an
+/// SVG leading icon — the Linux twin of the macOS `NSImage` SVG→PNG bridge.
+/// `None` for non-SVG / unparseable bytes.
+fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (rgba, w, h) = crate::render::rasterize_svg(bytes)?;
+    crate::render::encode_rgba_png(&rgba, w, h)
 }
 
 /// Build the `ksni` menu items for one [`Menu`] level. Recurses through
@@ -251,14 +267,24 @@ impl<const MENU_ACTIVATE: bool> ksni::Tray for MuriSni<MENU_ACTIVATE> {
     /// impl or an upstream ksni capability — the one remaining device-side caveat for
     /// a fully host-agnostic right-click (ADR-0003 §3).
     fn activate(&mut self, x: i32, y: i32) {
+        // Only the wayland presenter consumes the coordinate; keep the params live
+        // for every other (feature/variant) configuration.
+        let _ = (x, y);
         match self.presenter {
             #[cfg(feature = "x11-popup")]
             LinuxMenuPresenter::X11Popup => super::open_x11_popup_at_cursor(&self.tray),
             #[cfg(feature = "wayland-styled")]
             LinuxMenuPresenter::WaylandLayerShell => super::open_wayland_popup_at(&self.tray, x, y),
-            _ => {
-                let _ = (x, y);
-            }
+            // The host draws the exported dbusmenu (`ItemIsMenu = true`), so its
+            // `activate` is a genuine no-op — spelled out (like the sibling
+            // `menu()`) rather than swept into `_`, narrowing the silent-variant
+            // blind spot to only the feature-gated presenters below.
+            LinuxMenuPresenter::NativeDbusMenu => {}
+            // Reached only when a styled presenter's feature is compiled out
+            // (X11Popup without `x11-popup`, WaylandLayerShell without
+            // `wayland-styled`); unreachable once both features are on.
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 

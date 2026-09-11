@@ -25,9 +25,15 @@ use crate::Menu;
 /// (`draw_row_content`'s `SegmentMetrics` + per-styled-piece widths); without
 /// this cache the same `(text, font)` gets re-shaped through the drawer's text
 /// engine up to 3× per frame for no behavioral difference.
-type MeasureCache = HashMap<MeasureKey, f32>;
+///
+/// Keyed by a **hash** of the borrowed `(text, font)` components (mirroring
+/// [`FontStore::shape`](crate::render)'s `shaped` design, #4): the hot lookup path
+/// hashes the borrowed `&str`/`&Font` and, on a hash hit, verifies the retained
+/// owned [`MeasureKey`] field-by-field — so a cache HIT never builds an owned key
+/// (no `String` clone). The owned key is materialized only on a genuine miss (#F12).
+type MeasureCache = HashMap<u64, (MeasureKey, f32)>;
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq)]
 struct MeasureKey {
     text: String,
     family_tag: u8,
@@ -39,39 +45,83 @@ struct MeasureKey {
     spacing_bits: u32,
 }
 
+/// The `(tag, name)` family discriminant of a [`Font`], borrowed (no allocation):
+/// `System`/`SystemMono` carry an empty name, a `Named` family borrows its own.
+/// Shared by the measure-cache hash and its field-by-field verify so both agree.
+fn font_family_parts(font: &Font) -> (u8, &str) {
+    match &font.family {
+        FontFamily::System => (0u8, ""),
+        FontFamily::SystemMono => (1u8, ""),
+        FontFamily::Named(name) => (2u8, name.as_str()),
+    }
+}
+
 impl MeasureKey {
     fn new(text: &str, font: &Font) -> Self {
-        let (family_tag, family_name) = match &font.family {
-            FontFamily::System => (0u8, String::new()),
-            FontFamily::SystemMono => (1u8, String::new()),
-            FontFamily::Named(name) => (2u8, name.clone()),
-        };
+        let (family_tag, family_name) = font_family_parts(font);
         MeasureKey {
             text: text.to_string(),
             family_tag,
-            family_name,
+            family_name: family_name.to_string(),
             size_bits: font.size.to_bits(),
             weight: font.weight.ot_weight(),
             spacing_bits: font.letter_spacing.to_bits(),
         }
     }
+
+    /// Whether this owned key equals the borrowed `(text, font)`, checked
+    /// field-by-field so a hash hit is verified without allocating an owned key
+    /// (guards against a hash collision returning the wrong width, #F12).
+    fn matches(&self, text: &str, font: &Font) -> bool {
+        let (family_tag, family_name) = font_family_parts(font);
+        self.text == text
+            && self.family_tag == family_tag
+            && self.family_name == family_name
+            && self.size_bits == font.size.to_bits()
+            && self.weight == font.weight.ot_weight()
+            && self.spacing_bits == font.letter_spacing.to_bits()
+    }
+}
+
+/// Hash the borrowed `(text, font)` measure-cache components, so the lookup path
+/// allocates no owned [`MeasureKey`] on a hit (#F12). Mirrors `shape_key_hash`.
+fn measure_key_hash(text: &str, font: &Font) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let (family_tag, family_name) = font_family_parts(font);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    family_tag.hash(&mut h);
+    family_name.hash(&mut h);
+    font.size.to_bits().hash(&mut h);
+    font.weight.ot_weight().hash(&mut h);
+    font.letter_spacing.to_bits().hash(&mut h);
+    h.finish()
 }
 
 /// Measure `text` in `font` through `drawer`, memoizing in `cache` so an
 /// identical `(text, font)` pair within the same frame is only shaped once.
 /// Output is identical to calling `drawer.measure_text` directly every time.
+///
+/// A cache HIT hashes the borrowed key, verifies the stored owned key
+/// field-by-field, and returns the stored width — allocating nothing. Only a
+/// genuine miss builds and inserts the owned [`MeasureKey`] (#F12).
 fn measure_cached<D: SceneDrawer>(
     drawer: &D,
     cache: &mut MeasureCache,
     text: &str,
     font: &Font,
 ) -> f32 {
-    let key = MeasureKey::new(text, font);
-    if let Some(&w) = cache.get(&key) {
-        return w;
+    let hash = measure_key_hash(text, font);
+    if let Some((key, w)) = cache.get(&hash) {
+        // Verify the retained owned key really matches (a hash collision must not
+        // return another `(text, font)`'s width).
+        if key.matches(text, font) {
+            return *w;
+        }
     }
     let w = drawer.measure_text(text, font);
-    cache.insert(key, w);
+    // Build the owned key only now, on a genuine miss (never on a hit).
+    cache.insert(hash, (MeasureKey::new(text, font), w));
     w
 }
 
@@ -1385,6 +1435,32 @@ mod tests {
             .find(|(t, ..)| t == needle)
             .unwrap_or_else(|| panic!("no draw_text for {needle:?}; got {:?}", d.texts));
         x + t.chars().count() as f32 * 7.0
+    }
+
+    /// #F19: the `min_width > max_width` guard (the `.max(min_w)` on `max_w`) is
+    /// correct but was only exercised through the builder path, which itself
+    /// normalizes the two. A consumer can also set the **public struct fields**
+    /// directly with `min > max`; `f32::clamp` panics when `min > max`, so render
+    /// must not panic and must produce a sane, finite width (the floor wins).
+    #[test]
+    fn struct_literal_min_greater_than_max_does_not_panic() {
+        let menu = Menu::new().row(Row::new("q").label("Quit"));
+        let opts = MenuOptions {
+            min_width: Some(100.0),
+            max_width: Some(50.0),
+            ..Default::default()
+        };
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &opts, None);
+        assert!(
+            laid.size.width.is_finite(),
+            "width must be finite, not NaN, with min > max"
+        );
+        // The floor wins (max is clamped up to min), so the width settles at 100.
+        assert_eq!(
+            laid.size.width, 100.0,
+            "min>max must normalize to the floor (100), not panic or go degenerate"
+        );
     }
 
     /// Regression for #16: no global leading gutter. A menu mixing an icon row

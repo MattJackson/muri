@@ -588,6 +588,36 @@ const GLYPH_CACHE_CAP: usize = 512;
 /// runs; the cap only bounds a long-lived drawer whose text changes every tick.
 const SHAPED_CACHE_CAP: usize = 1024;
 
+/// Cap on [`FontStore::coverage`]'s entry count (`(FaceId, char)` → covered).
+/// Like the other resolution caches this is process-wide + thread-local, so a
+/// long session touching many distinct codepoints across many candidate faces
+/// would otherwise grow it without bound; on overflow the whole map is cleared
+/// (a menu's live glyph set is far under the cap, so this never evicts mid-render).
+const COVERAGE_CACHE_CAP: usize = 4096;
+
+/// Cap on [`FontStore::fallback_cache`]'s entry count (`(char, ot_weight)` →
+/// fallback face). Bounded so a long-lived store that fields many distinct
+/// symbol/emoji codepoints over its lifetime can't grow it forever; cleared
+/// wholesale on overflow.
+const FALLBACK_CACHE_CAP: usize = 1024;
+
+/// Cap on [`FontStore::embolden_cache`]'s entry count (`(FaceId, ot_weight)` →
+/// [`Embolden`]). A menu uses a handful of faces at a handful of weights, so the
+/// cap only bounds pathological long-session growth; cleared on overflow.
+const EMBOLDEN_CACHE_CAP: usize = 256;
+
+/// Cap on [`FontStore::face_cache`]'s entry count (`(FontFamily, ot_weight)` →
+/// resolved face). Bounded like the others; a real menu resolves only a few
+/// family/weight pairs, so overflow (and the wholesale clear) never fires in
+/// practice.
+const FACE_CACHE_CAP: usize = 256;
+
+/// Cap on [`FontStore::shaper_instances`]'s entry count (`(FaceId, Embolden)` →
+/// [`ShaperInstance`]). A variable-font bold run's `from_variations` instance
+/// depends only on the face and its emboldening, so it is memoized here rather
+/// than rebuilt on every `shape` cache miss; bounded and cleared on overflow.
+const SHAPER_INSTANCE_CACHE_CAP: usize = 256;
+
 struct FontStore {
     db: Database,
     /// The concrete family name the generic "system" font resolves to, pinned
@@ -606,6 +636,13 @@ struct FontStore {
     /// hover-highlight felt laggy. Cached here, only the cheap per-call `Shaper`
     /// is rebuilt. Bounded by the handful of distinct faces a menu uses.
     shaper_data: RefCell<HashMap<FaceId, Rc<ShaperData>>>,
+    /// Memoized variable-font shaper instances per `(face, emboldening)` (#13).
+    /// `ShaperInstance::from_variations` reparses the font's variation tables and
+    /// so is rebuilt on *every* `shape` cache miss for a variable-bold run even
+    /// though it depends only on the face + its [`Embolden`]; memoized here
+    /// (mirroring how `shaper_data` is memoized per face), bounded by
+    /// [`SHAPER_INSTANCE_CACHE_CAP`] and cleared wholesale on overflow.
+    shaper_instances: RefCell<HashMap<(FaceId, Embolden), Rc<ShaperInstance>>>,
     /// Memoized codepoint coverage per `(face, char)`. `face_has_glyph` otherwise
     /// re-parses the font and its cmap table on every call — and it is called per
     /// char, per candidate face, per render. Caching it (with the fallback cache
@@ -678,6 +715,7 @@ impl FontStore {
             face_data: RefCell::new(HashMap::new()),
             glyphs: RefCell::new(HashMap::new()),
             shaper_data: RefCell::new(HashMap::new()),
+            shaper_instances: RefCell::new(HashMap::new()),
             coverage: RefCell::new(HashMap::new()),
             fallback_cache: RefCell::new(HashMap::new()),
             embolden_cache: RefCell::new(HashMap::new()),
@@ -739,7 +777,11 @@ impl FontStore {
         if let Some(id) = result {
             self.record_weight_downgrade(ot_weight, id);
         }
-        self.face_cache.borrow_mut().insert(key, result);
+        let mut cache = self.face_cache.borrow_mut();
+        if cache.len() >= FACE_CACHE_CAP && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, result);
         result
     }
 
@@ -780,15 +822,31 @@ impl FontStore {
             Embolden::None
         } else {
             match self.face_wght_axis_max(id) {
-                Some(max) => {
-                    let w = ot_weight.min(Self::VARIABLE_BOLD_WEIGHT).min(max as u16);
-                    Embolden::Variable(w.max(Self::HEAVY_WEIGHT))
-                }
+                Some(max) => Embolden::Variable(Self::variable_bold_wght(ot_weight, max as u16)),
                 None => Embolden::Synthetic,
             }
         };
-        self.embolden_cache.borrow_mut().insert(key, emb);
+        let mut cache = self.embolden_cache.borrow_mut();
+        if cache.len() >= EMBOLDEN_CACHE_CAP && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, emb);
         emb
+    }
+
+    /// The `wght` axis value a variable-bold instance is created at, given the
+    /// requested `ot_weight` and the face's own `wght` axis maximum (#F18). The
+    /// bold floor is raised FIRST and the axis-max clamp applied LAST, so a face
+    /// whose axis tops out below [`HEAVY_WEIGHT`](Self::HEAVY_WEIGHT) is instanced
+    /// at its own max rather than pushed above it (the earlier
+    /// `.min(max).max(HEAVY_WEIGHT)` order could exceed the axis max).
+    fn variable_bold_wght(ot_weight: u16, axis_max: u16) -> u16 {
+        // Raise to the bold floor / cap at the bold target first
+        // (`HEAVY_WEIGHT <= VARIABLE_BOLD_WEIGHT`, a valid clamp), THEN clamp to the
+        // axis max LAST so a low axis max is never exceeded.
+        ot_weight
+            .clamp(Self::HEAVY_WEIGHT, Self::VARIABLE_BOLD_WEIGHT)
+            .min(axis_max)
     }
 
     /// The maximum value of the face's `wght` variation axis, or `None` when the
@@ -840,7 +898,11 @@ impl FontStore {
                 FontRef::from_index(&b.data, b.index as usize).map(|f| f.charmap().map(ch) != 0)
             })
             .unwrap_or(false);
-        self.coverage.borrow_mut().insert((id, ch), hit);
+        let mut cache = self.coverage.borrow_mut();
+        if cache.len() >= COVERAGE_CACHE_CAP && !cache.contains_key(&(id, ch)) {
+            cache.clear();
+        }
+        cache.insert((id, ch), hit);
         hit
     }
 
@@ -863,9 +925,11 @@ impl FontStore {
                 .copied()
                 .find(|&id| self.face_has_glyph(id, ch))
         };
-        self.fallback_cache
-            .borrow_mut()
-            .insert((ch, ot_weight), result);
+        let mut cache = self.fallback_cache.borrow_mut();
+        if cache.len() >= FALLBACK_CACHE_CAP && !cache.contains_key(&(ch, ot_weight)) {
+            cache.clear();
+        }
+        cache.insert((ch, ot_weight), result);
         result
     }
 
@@ -996,15 +1060,31 @@ impl FontStore {
             // is instanced at the bold `wght` axis value so the shaper positions
             // the *bold* glyphs (advances included), not the regular ones (#63).
             let emb = self.face_embolden(face_id, ot_weight);
-            let instance = match emb {
+            // Memoize the variable-font instance per `(face, emb)` (#13): it depends
+            // only on those two, so building it fresh on every shape cache miss (as
+            // the code used to) needlessly reparsed the font's variation tables.
+            let instance: Option<Rc<ShaperInstance>> = match emb {
                 Embolden::Variable(w) => {
-                    Some(ShaperInstance::from_variations(&font, [("wght", w as f32)]))
+                    let key = (face_id, emb);
+                    let mut cache = self.shaper_instances.borrow_mut();
+                    let inst = if let Some(inst) = cache.get(&key) {
+                        Rc::clone(inst)
+                    } else {
+                        let inst =
+                            Rc::new(ShaperInstance::from_variations(&font, [("wght", w as f32)]));
+                        if cache.len() >= SHAPER_INSTANCE_CACHE_CAP {
+                            cache.clear();
+                        }
+                        cache.insert(key, Rc::clone(&inst));
+                        inst
+                    };
+                    Some(inst)
                 }
                 Embolden::None | Embolden::Synthetic => None,
             };
             let shaper = shaper_data
                 .shaper(&font)
-                .instance(instance.as_ref())
+                .instance(instance.as_deref())
                 .build();
             let upem = shaper.units_per_em() as f32;
             let s = if upem > 0.0 { px / upem } else { 0.0 };
@@ -1850,6 +1930,43 @@ mod tests {
             tight < w0,
             "negative tracking must tighten: {tight} !< {w0}"
         );
+    }
+
+    /// #F18: a variable face whose `wght` axis max is below the bold floor (600)
+    /// must be instanced at its own axis max, never *above* it. The old
+    /// `.min(max).max(HEAVY_WEIGHT)` order raised the value back above the axis
+    /// max; the fixed order clamps the axis max last.
+    #[test]
+    fn variable_bold_wght_never_exceeds_a_low_axis_max() {
+        // Axis tops out below the 600 floor: instance at the axis max, not 600.
+        assert_eq!(FontStore::variable_bold_wght(700, 500), 500);
+        assert_eq!(FontStore::variable_bold_wght(700, 400), 400);
+        // Axis between the floor and the 700 target: the axis max still wins.
+        assert_eq!(FontStore::variable_bold_wght(700, 650), 650);
+        // A normal wide axis lands at the 700 bold target.
+        assert_eq!(FontStore::variable_bold_wght(700, 900), 700);
+        assert_eq!(FontStore::variable_bold_wght(800, 1000), 700);
+    }
+
+    /// #F14/F15/F16: the resolution caches are bounded — they clear wholesale on
+    /// overflow rather than growing forever over a long session. Exercised on the
+    /// `embolden_cache` (the smallest cap): inserting one past the cap must leave
+    /// the map at or below the cap, not `cap + 1`.
+    #[test]
+    fn embolden_cache_clears_when_it_exceeds_its_cap() {
+        let d = RasterDrawer::new_headless(1.0);
+        let id = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        // Distinct heavy weights are distinct `(face, ot_weight)` keys; drive one
+        // past the cap so the clear-on-overflow guard fires.
+        for w in 0..=(EMBOLDEN_CACHE_CAP as u16) {
+            let _ = d.fonts.face_embolden(id, FontStore::HEAVY_WEIGHT + w);
+        }
+        let len = d.fonts.embolden_cache.borrow().len();
+        assert!(
+            len <= EMBOLDEN_CACHE_CAP,
+            "embolden cache must clear on overflow, got {len} > {EMBOLDEN_CACHE_CAP}"
+        );
+        assert!(len >= 1, "it keeps caching after the clear");
     }
 
     /// #1: the expensive [`FontStore`] (font DB + shaping/glyph caches) is built

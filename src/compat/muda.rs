@@ -362,12 +362,19 @@ impl MenuItemKind {
             }
             MenuItemKind::Check(i) => {
                 let s = i.inner.borrow();
-                // The checkbox state drives the leading checkmark (#12).
-                MuriItem::Row(apply_label(
+                // The checkbox state drives the leading checkmark (#12). Set the
+                // row's `checked` state explicitly so an UNchecked check-item is
+                // `Some(false)` — not `None` — keeping the shared check-gutter
+                // reservation and the AccessKit `MenuItemCheckBox` role that a
+                // plain `MenuItem` (`checked == None`) must not get. `apply_label`
+                // only sets `Some(true)` for a checked item, hence the override (#F6).
+                let row = apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
                     s.checked,
-                ))
+                )
+                .checked(s.checked);
+                MuriItem::Row(row)
             }
             MenuItemKind::Icon(i) => {
                 let s = i.inner.borrow();
@@ -480,6 +487,20 @@ struct MenuItemState {
 /// A plain text menu item (muda's `MenuItem`). Cloning shares the same item (like
 /// muda, which wraps interior state), so post-construction `set_*` mutations are
 /// observed through every clone.
+///
+/// # Freeze guard (#61)
+///
+/// The compat surface is a pure muda drop-in: muri-only row styling (`bold`,
+/// `value_color`, …) lives on the **native** [`Row`](crate::menu::Row), never
+/// here. This is pinned by a `compile_fail` doctest so a future re-added leak
+/// breaks the build — a native-only method must NOT resolve on a compat item:
+///
+/// ```compile_fail
+/// // `bold()` is a native `muri::menu::Row` builder; it does not exist on the
+/// // frozen compat `MenuItem`, so this must fail to compile.
+/// let item = muri::compat::muda::MenuItem::new("x", true, None);
+/// let _leaked = item.bold();
+/// ```
 #[derive(Clone)]
 pub struct MenuItem {
     inner: Rc<RefCell<MenuItemState>>,
@@ -566,7 +587,7 @@ struct CheckMenuItemState {
     text: String,
     enabled: bool,
     checked: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // displayed by the backend (D5); stored for parity.
     accelerator: Option<Accelerator>,
 }
 
@@ -685,7 +706,7 @@ struct IconMenuItemState {
     text: String,
     enabled: bool,
     icon: Option<IconSource>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // displayed by the backend (D5); stored for parity.
     accelerator: Option<Accelerator>,
 }
 
@@ -1659,6 +1680,38 @@ mod tests {
                 );
             }
             _ => panic!("expected a checked Row"),
+        }
+    }
+
+    #[test]
+    fn unchecked_check_item_is_some_false_while_plain_item_is_none() {
+        // #F6: an UNchecked CheckMenuItem must be distinguishable from a plain
+        // MenuItem — `checked == Some(false)` (checkable, reserves the gutter and
+        // gets the checkbox a11y role) vs `None` (a plain, non-checkable item).
+        let menu = Menu::new();
+        menu.append(&CheckMenuItem::with_id("off", "Notify", true, false, None))
+            .unwrap();
+        menu.append(&CheckMenuItem::with_id("on", "Sound", true, true, None))
+            .unwrap();
+        menu.append(&MenuItem::with_id("plain", "Open", true, None))
+            .unwrap();
+        let muri = menu.to_muri_menu();
+
+        match &muri.items[0] {
+            Item::Row(r) => assert_eq!(
+                r.checked,
+                Some(false),
+                "an unchecked check-item stays checkable (Some(false)), not None"
+            ),
+            _ => panic!("expected a Row"),
+        }
+        match &muri.items[1] {
+            Item::Row(r) => assert_eq!(r.checked, Some(true)),
+            _ => panic!("expected a Row"),
+        }
+        match &muri.items[2] {
+            Item::Row(r) => assert_eq!(r.checked, None, "a plain MenuItem must not look checkable"),
+            _ => panic!("expected a Row"),
         }
     }
 

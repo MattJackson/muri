@@ -427,6 +427,13 @@ pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
     let dispatch = |id: &MenuId| tray.dispatch(id);
     // Reuse the exact styled-popup backend `ContextMenu::open_at` funnels into (it
     // attaches the AT-SPI adapter itself — deliverable #5).
+    //
+    // The `Result` is deliberately discarded (#F10/F11): ksni's `activate(&mut
+    // self, x, y)` callback returns nothing, so there is no channel back to the SNI
+    // host or the app for a popup-open failure; the crate also has a no-`log` rule,
+    // so there is no honest place to surface it. A failed open on this background
+    // SNI service thread has no consumer-visible consequence beyond "no popup
+    // appeared" — the swallow is intended, not an oversight.
     let _ = x11::open_popup_session(
         tray.menu.clone(),
         tray.options.clone(),
@@ -461,6 +468,10 @@ pub(super) fn open_wayland_popup_at(tray: &Tray, x: i32, y: i32) {
     );
     let dark = system_appearance().is_dark();
     let dispatch = |id: &MenuId| tray.dispatch(id);
+    // Deliberately discard the `Result` (#F10/F11): as with the X11 path above,
+    // ksni's `activate` callback is void — no return channel to the host or the app
+    // — and the crate does not log, so a failed layer-shell open on this SNI service
+    // thread has nowhere honest to be reported. The swallow is intentional.
     let _ = wayland::open_popup_session(
         tray.menu.clone(),
         tray.options.clone(),
@@ -518,11 +529,11 @@ fn run_sni_loop_impl<const M: bool>(
     let commands = Arc::clone(&tray.commands);
     let waker_slot = Arc::clone(&tray.waker);
 
-    // Install handshake (EH-1): report the real SNI/`StatusNotifierItem`
-    // registration result synchronously — *before* entering the blocking drain
-    // loop — so a spawn-path caller (the native `Tray::spawn`) learns
+    // Install handshake (EH-1): a spawn failure is reported synchronously — the
+    // success half of the handshake is deferred until *after* the waker is
+    // installed (below) so a spawn-path caller (the native `Tray::spawn`) learns
     // the item never registered instead of seeing a false `Ok`. The blocking
-    // `run_tray` path also propagates it via the return value.
+    // `run_tray` path also propagates the error via the return value.
     let handle = match (MuriSni::<M> {
         tray,
         visible: true,
@@ -530,10 +541,7 @@ fn run_sni_loop_impl<const M: bool>(
     }
     .spawn())
     {
-        Ok(handle) => {
-            let _ = report.send(Ok(()));
-            handle
-        }
+        Ok(handle) => handle,
         Err(e) => {
             let err =
                 Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"));
@@ -559,6 +567,12 @@ fn run_sni_loop_impl<const M: bool>(
         }
     }
 
+    // Report success only NOW — after the waker closure is stored — so a command
+    // posted by a TrayHandle obtained before this point still wakes the drain
+    // (otherwise a post landing between the send and the waker install would sit
+    // unserviced until the ~500ms backstop timeout) (#F2/F3).
+    let _ = report.send(Ok(()));
+
     loop {
         // Apply everything posted so far (posts made before the loop came up are
         // buffered here already).
@@ -566,18 +580,26 @@ fn run_sni_loop_impl<const M: bool>(
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
+        // Apply every non-Shutdown command in the batch FIRST, then tear down if a
+        // Shutdown was present — so a `[Shutdown, SetIcon]` interleaving still
+        // applies SetIcon before teardown instead of discarding it (#F1).
+        let mut shutdown = false;
         for command in pending {
             if matches!(command, TrayCommand::Shutdown) {
-                // ksni's `Handle` has no `Drop` that unregisters — simply
-                // dropping it leaves ksni's own service thread and the live SNI
-                // item running forever. Explicitly shut the service down (closes
-                // the D-Bus connection and ends that thread) and wait for it to
-                // complete, then end this drain thread. Removes the tray item,
-                // matching tray-icon's drop-removes contract.
-                handle.shutdown().wait();
-                return Ok(());
+                shutdown = true;
+                continue;
             }
             apply_command(&handle, command);
+        }
+        if shutdown {
+            // ksni's `Handle` has no `Drop` that unregisters — simply dropping it
+            // leaves ksni's own service thread and the live SNI item running
+            // forever. Explicitly shut the service down (closes the D-Bus
+            // connection and ends that thread) and wait for it to complete, then
+            // end this drain thread. Removes the tray item, matching tray-icon's
+            // drop-removes contract.
+            handle.shutdown().wait();
+            return Ok(());
         }
         if handle.is_closed() {
             break;

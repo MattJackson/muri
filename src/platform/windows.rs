@@ -2375,7 +2375,6 @@ fn run_event_loop(mut tray: Tray, report: &super::InstallReport) -> Result<()> {
         let _ = report.send(Err(Error::TrayInstall(msg)));
         return Err(e);
     }
-    let _ = report.send(Ok(()));
     let owner = anchor.hwnd as isize;
     OWNER_HWND.with(|h| h.set(owner));
     // Also publish the owner in the thread-safe static so a UIA action raised on a
@@ -2390,6 +2389,11 @@ fn run_event_loop(mut tray: Tray, report: &super::InstallReport) -> Result<()> {
             PostMessageW(owner as HWND, WM_MURI_DRAIN, 0, 0);
         }));
     }
+
+    // Report the install success only NOW — after the TrayHandle waker is stored
+    // — so a command posted by a handle obtained before this point still wakes the
+    // pump instead of sitting unserviced until the next unrelated message (#F2/F3).
+    let _ = report.send(Ok(()));
 
     // Move the tray's click handler into the session's dispatch sink (owned for the
     // whole run loop, hence `'static`). Preserve `Tray::dispatch`'s behavior:

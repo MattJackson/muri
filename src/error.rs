@@ -106,12 +106,27 @@ mod tests {
         );
     }
 
+    /// The real, regressable behavior (a `matches!(X, X)` tautology restates the
+    /// enum and can't fail): muri's structured `TrayInstall` / `MainThread` kinds
+    /// — and any future `#[non_exhaustive]` variant — collapse into the muda
+    /// facade's `Platform` catch-all via `From`, so the compat surface stays
+    /// byte-for-byte muda-shaped (#61), while a variant with a dedicated muda
+    /// counterpart (`BadIcon`) maps across unchanged.
+    #[cfg(feature = "muda-compat")]
     #[test]
-    fn variants_are_matchable_by_kind() {
+    fn structured_kinds_map_onto_the_compat_error_surface() {
+        use crate::compat::muda::Error as MudaError;
         assert!(matches!(
-            Error::TrayInstall("x".into()),
-            Error::TrayInstall(_)
+            MudaError::from(Error::TrayInstall("x".into())),
+            MudaError::Platform(_)
         ));
-        assert!(matches!(Error::MainThread, Error::MainThread));
+        assert!(matches!(
+            MudaError::from(Error::MainThread),
+            MudaError::Platform(_)
+        ));
+        assert!(matches!(
+            MudaError::from(Error::BadIcon("y".into())),
+            MudaError::BadIcon(_)
+        ));
     }
 }

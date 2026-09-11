@@ -27,7 +27,7 @@
 use crate::geometry::LogicalRect;
 use crate::style::Rgba;
 
-/// An owned CPU raster surface: premultiplied straight-alpha RGBA (`R, G, B, A`
+/// An owned CPU raster surface: premultiplied RGBA (`R, G, B, A`
 /// byte order), row-major, `width * height * 4` bytes. This is the buffer the
 /// popup window blits to its surface and the headless snapshot suite encodes to
 /// PNG.
