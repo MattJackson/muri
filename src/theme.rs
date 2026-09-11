@@ -289,7 +289,8 @@ pub struct Theme {
     pub header_font: Font,
     /// Default row height in logical points.
     pub row_height: f32,
-    /// Corner radius of the popup and highlight in logical points.
+    /// Corner radius of the popup panel in logical points. (The hover highlight
+    /// uses its own fixed selection radius, independent of this value.)
     pub corner_radius: f32,
     /// Inner padding of the popup.
     pub padding: Insets,
