@@ -93,6 +93,18 @@ define_class!(
             self.addCursorRect_cursor(bounds, &NSCursor::arrowCursor());
         }
 
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, _event: &objc2_app_kit::NSEvent) {
+            // `resetCursorRects` is honored only while the panel is KEY, and the
+            // NonactivatingPanel isn't key the instant it opens; `mouseMoved:`
+            // only fires on movement. So a popup opened under a *stationary*
+            // pointer kept whatever cursor the view underneath last set — the
+            // text I-beam (#63). `cursorUpdate:` fires from the tracking area's
+            // `CursorUpdate` option independent of key state and movement, so
+            // forcing the arrow here closes that gap. Keep the other handlers.
+            NSCursor::arrowCursor().set();
+        }
+
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
             let (x, y) = view_point(self, event);
@@ -250,8 +262,13 @@ pub(super) fn make_panel(
 
     // Deliver `mouseMoved:` to the view regardless of key/active state so hover
     // highlighting works on the non-activating panel.
+    // `CursorUpdate` makes the tracking area deliver `cursorUpdate:` so the view
+    // can force the arrow cursor even when the panel isn't key and the pointer
+    // isn't moving — the stationary-open I-beam gap `resetCursorRects` and
+    // `mouseMoved:` alone leave open (#63).
     let options = NSTrackingAreaOptions::MouseEnteredAndExited
         | NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::CursorUpdate
         | NSTrackingAreaOptions::ActiveAlways
         | NSTrackingAreaOptions::InVisibleRect;
     let tracking: Retained<NSTrackingArea> = unsafe {

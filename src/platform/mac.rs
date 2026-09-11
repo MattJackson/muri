@@ -777,6 +777,14 @@ impl PopupSession<'_> {
             read_system_palette().apply_to(&mut theme);
             if let Some(font) = read_system_menu_font() {
                 font.apply_size_to(&mut theme);
+                // Roomier native row pitch (#63): the forced `Theme::macos`
+                // preset (and the offscreen goldens) use the legacy 22pt
+                // `MACOS_ROW_HEIGHT`, which is ~10% tighter than a modern
+                // NSMenu's ~24–25pt pitch (measured ~48–50px @2x). On the LIVE
+                // System path we have the real OS menu point size, so derive the
+                // row height from it at the native ratio — leaving the forced
+                // preset's frozen metrics (and its goldens) untouched.
+                theme.row_height = crate::theme::macos_system_row_height(theme.row_font.size);
             }
             // Native SF tracking (#42/#57): CoreText applies a small size-dependent
             // tracking to San Francisco that a bare shaper does not, so muri's menu
