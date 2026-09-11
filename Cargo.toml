@@ -192,6 +192,16 @@ default = ["x11-popup"]
 # keep just the SNI tray (Path 1). Inert on non-Linux targets — `x11rb` is a
 # Linux-target dependency, so `dep:x11rb` is a no-op elsewhere (#21).
 x11-popup = ["dep:x11rb"]
+# Linux only (0.11.0): scaffolding for the self-drawn, styled tray/context menu on
+# Wayland via `zwlr_layer_shell_v1` (wlroots compositors + KWin/Plasma). OFF by
+# default. For now this feature ONLY gates the `cfg(unix, not macos)` Wayland
+# scaffold module (`src/platform/linux/wayland.rs`) and pulls **no** external
+# crates — the heavy Wayland client stack (`smithay-client-toolkit` +
+# `wayland-client`) is a device-side addition (see ADR-0003 and the research
+# doc's device-task list) so `cargo build --all-features` stays green on macOS,
+# where these Linux-only deps do not build. Inert on non-Linux targets (the
+# gated module is only compiled under `all(unix, not(target_os = "macos"))`).
+wayland-styled = []
 # Screen-reader integration via AccessKit on the raster backend (see README).
 # On macOS this activates the `accesskit_macos` platform adapter; the `dep:`
 # reference to a target-specific optional dependency is inert on other targets.

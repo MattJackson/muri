@@ -16,7 +16,7 @@ use crate::layout::{resolve_segments, SegmentMetrics};
 use crate::menu::{Align, Axis, Content, Icon, Item, MenuId, Row, Segment, Stack};
 use crate::render::{SceneDrawer, TextRun};
 use crate::style::{Font, FontFamily, Rgba, Weight};
-use crate::theme::{MenuOptions, Theme};
+use crate::theme::{MenuOptions, Theme, TrailingGutterPolicy};
 use crate::Menu;
 
 /// A scratch memo of `(text, font)` -> measured width, cleared at the start of
@@ -195,6 +195,18 @@ fn menu_reserves_gutter(menu: &Menu) -> bool {
         item_row(it)
             .is_some_and(|r| r.checked.is_some() || matches!(r.leading, Some(Icon::Checkmark)))
     })
+}
+
+/// Whether the menu reserves a shared trailing column under [`TrailingGutterPolicy::Auto`]:
+/// true when any item is a submenu (needs a `›` chevron column) or carries an
+/// explicit trailing icon/accessory (issue A). Reserving it menu-wide keeps every
+/// row's right edge aligned (native `NSMenu`); a menu with neither lets its
+/// right-aligned content reach the true right edge. Mirrors [`menu_reserves_gutter`]
+/// for the trailing side (#60).
+fn menu_reserves_trailing(menu: &Menu) -> bool {
+    menu.items
+        .iter()
+        .any(|it| is_submenu(it) || item_row(it).is_some_and(|r| row_trailing_width(r) > 0.0))
 }
 
 /// The leading advance a row consumes: the shared gutter width when the menu
@@ -575,14 +587,20 @@ pub fn render_menu<D: SceneDrawer>(
         crate::theme::GutterPolicy::Auto => menu_reserves_gutter(menu),
     };
 
-    // Reserve the trailing column when any item needs it: a submenu (its chevron)
-    // or a row carrying an explicit trailing icon/accessory (issue A). Reserving
-    // it menu-wide keeps every row's segment band ending at the same right edge.
-    let trailing_w = if menu
-        .items
-        .iter()
-        .any(|it| is_submenu(it) || item_row(it).is_some_and(|r| row_trailing_width(r) > 0.0))
-    {
+    // Reserve the trailing column per the caller's policy (#60), symmetric to the
+    // leading gutter above. `Auto` (the OEM default) reserves it menu-wide only
+    // when some item needs it — a submenu (its chevron) or a row carrying an
+    // explicit trailing icon/accessory (issue A) — so every row's segment band
+    // ends at the same right edge (native `NSMenu`); a menu with neither lets its
+    // right content reach the true edge. `Always`/`Never` force it. Under `Never`
+    // a submenu chevron/accessory still draws (see the draw pass) but overlays the
+    // content area rather than getting its own column, mirroring leading `Never`.
+    let reserve_trailing = match opts.trailing_gutter {
+        TrailingGutterPolicy::Always => true,
+        TrailingGutterPolicy::Never => false,
+        TrailingGutterPolicy::Auto => menu_reserves_trailing(menu),
+    };
+    let trailing_w = if reserve_trailing {
         TRAILING_COLUMN
     } else {
         0.0
@@ -708,6 +726,7 @@ pub fn render_menu<D: SceneDrawer>(
                     content_left,
                     band_right,
                     reserve_gutter,
+                    reserve_trailing,
                     ry,
                     rh,
                     false, // submenu
@@ -778,6 +797,7 @@ pub fn render_menu<D: SceneDrawer>(
                     content_left,
                     band_right,
                     reserve_gutter,
+                    reserve_trailing,
                     ry,
                     rh,
                     submenu,
@@ -808,6 +828,7 @@ fn draw_row_content<D: SceneDrawer>(
     content_left: f32,
     band_right: f32,
     reserve_gutter: bool,
+    reserve_trailing: bool,
     ry: f32,
     rh: f32,
     submenu: bool,
@@ -905,12 +926,24 @@ fn draw_row_content<D: SceneDrawer>(
         }
     }
 
+    // The left x of the trailing column. When the menu reserves the trailing
+    // gutter (#60), the column sits just past the segment band (`band_x + band_w`
+    // == the pre-column right edge). When it does not — `TrailingGutterPolicy::Never`,
+    // or `Auto` with no submenu/accessory — the band already reaches the inner
+    // right edge, so a chevron/accessory (if any) overlays the tail of the content
+    // area instead, its right edge flush to the inner edge (mirrors leading `Never`).
+    let trailing_col_x = if reserve_trailing {
+        band_x + band_w
+    } else {
+        band_x + band_w - TRAILING_COLUMN
+    };
+
     // Trailing icon/accessory (issue A): a row carrying `Row::trailing` draws it in
-    // the reserved trailing column, through the same funnel as every other icon.
+    // the trailing column, through the same funnel as every other icon.
     if let Some(icon) = &row.trailing {
         let trailing_rect = LogicalRect::new(
             LogicalPoint::new(
-                band_x + band_w + (TRAILING_COLUMN - ICON_SIZE) / 2.0,
+                trailing_col_x + (TRAILING_COLUMN - ICON_SIZE) / 2.0,
                 ry + (rh - ICON_SIZE) / 2.0,
             ),
             LogicalSize::new(ICON_SIZE, ICON_SIZE),
@@ -929,7 +962,7 @@ fn draw_row_content<D: SceneDrawer>(
     // Trailing submenu chevron.
     if submenu {
         let chev_rect = LogicalRect::new(
-            LogicalPoint::new(band_x + band_w, ry),
+            LogicalPoint::new(trailing_col_x, ry),
             LogicalSize::new(TRAILING_COLUMN, rh),
         );
         draw_glyph_centered(
@@ -1536,6 +1569,114 @@ mod tests {
         assert!(
             (r_short - r_long).abs() < 0.5,
             "tab-stop values must share a right column: short={r_short} long={r_long}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Trailing gutter policy (#60) — symmetric to the leading gutter above.
+    // -------------------------------------------------------------------------
+
+    /// A menu carrying a submenu row plus a plain row with right-aligned content.
+    /// The plain row's `pct` value right-aligns to the shared band right edge.
+    fn trailing_probe_menu() -> Menu {
+        Menu::new()
+            .row(Row::new("plain").segments(vec![
+                Segment::new("Battery").flex(Flex::Grow),
+                Segment::new("47%").align(Align::Right),
+            ]))
+            .submenu(
+                Row::new("more").label("More"),
+                Menu::new().row(Row::new("d").label("detail")),
+            )
+    }
+
+    /// The chevron glyph (`›`) drawn for a submenu row.
+    const CHEVRON: &str = "\u{203A}";
+
+    /// Auto (default) + a menu that has a submenu row → the trailing column is
+    /// reserved menu-wide, so even the *non-submenu* row's right content stops
+    /// short of the inner right edge by exactly one `TRAILING_COLUMN` (native
+    /// `NSMenu` alignment). The chevron is drawn.
+    #[test]
+    fn trailing_auto_with_submenu_reserves_column() {
+        let menu = trailing_probe_menu();
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        let inner_right = laid.size.width - Theme::dark().padding.right;
+        let pct_right = text_right_edge(&d, "47%");
+        assert!(
+            (inner_right - pct_right - TRAILING_COLUMN).abs() < 0.5,
+            "Auto + submenu must inset right content by the trailing column: \
+             inner_right={inner_right} pct_right={pct_right} col={TRAILING_COLUMN}"
+        );
+        assert!(
+            d.texts.iter().any(|(t, ..)| t == CHEVRON),
+            "the submenu chevron must still be drawn"
+        );
+    }
+
+    /// Auto (default) + a menu with NO submenu row (and no trailing accessory) →
+    /// nothing is reserved, so the right-aligned content reaches the inner right
+    /// edge.
+    #[test]
+    fn trailing_auto_without_submenu_reaches_edge() {
+        let menu = Menu::new().row(Row::new("plain").segments(vec![
+            Segment::new("Battery").flex(Flex::Grow),
+            Segment::new("47%").align(Align::Right),
+        ]));
+        let mut d = RecordingDrawer::default();
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &MenuOptions::default(), None);
+
+        let inner_right = laid.size.width - Theme::dark().padding.right;
+        let pct_right = text_right_edge(&d, "47%");
+        assert!(
+            (inner_right - pct_right).abs() < 0.5,
+            "Auto without a submenu must let right content reach the edge: \
+             inner_right={inner_right} pct_right={pct_right}"
+        );
+    }
+
+    /// Never → right content reaches the inner right edge even when a submenu is
+    /// present; the chevron is still drawn (it overlays the content-area tail).
+    #[test]
+    fn trailing_never_reaches_edge_with_submenu() {
+        let menu = trailing_probe_menu();
+        let mut d = RecordingDrawer::default();
+        let opts = MenuOptions::default().trailing_gutter(TrailingGutterPolicy::Never);
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &opts, None);
+
+        let inner_right = laid.size.width - Theme::dark().padding.right;
+        let pct_right = text_right_edge(&d, "47%");
+        assert!(
+            (inner_right - pct_right).abs() < 0.5,
+            "Never must let right content reach the edge despite a submenu: \
+             inner_right={inner_right} pct_right={pct_right}"
+        );
+        assert!(
+            d.texts.iter().any(|(t, ..)| t == CHEVRON),
+            "the submenu chevron must still be drawn under Never"
+        );
+    }
+
+    /// Always → the trailing column is reserved even when the menu has no submenu
+    /// and no trailing accessory, so right content is inset by one column.
+    #[test]
+    fn trailing_always_reserves_without_submenu() {
+        let menu = Menu::new().row(Row::new("plain").segments(vec![
+            Segment::new("Battery").flex(Flex::Grow),
+            Segment::new("47%").align(Align::Right),
+        ]));
+        let mut d = RecordingDrawer::default();
+        let opts = MenuOptions::default().trailing_gutter(TrailingGutterPolicy::Always);
+        let laid = render_menu(&mut d, &menu, &Theme::dark(), &opts, None);
+
+        let inner_right = laid.size.width - Theme::dark().padding.right;
+        let pct_right = text_right_edge(&d, "47%");
+        assert!(
+            (inner_right - pct_right - TRAILING_COLUMN).abs() < 0.5,
+            "Always must reserve the trailing column even with no submenu: \
+             inner_right={inner_right} pct_right={pct_right} col={TRAILING_COLUMN}"
         );
     }
 

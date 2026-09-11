@@ -32,6 +32,7 @@
 //! [`Tray`]'s handler ([`Tray::dispatch`]) — the same unified dispatch path every
 //! backend uses.
 
+use super::LinuxMenuPresenter;
 use crate::menu::{Icon, Item, Menu, MenuId};
 use crate::Tray;
 
@@ -45,6 +46,10 @@ pub(crate) struct MuriSni {
     pub(crate) tray: Tray,
     /// Best-effort show/hide, surfaced as the SNI `Status` (Active/Passive).
     pub(crate) visible: bool,
+    /// Which presenter draws the menu on this session (deliverable #1/#2). Picked
+    /// once by [`super::detect_linux_presenter`]. Governs whether a click opens
+    /// muri's own styled popup or defers to the host-drawn dbusmenu.
+    pub(crate) presenter: LinuxMenuPresenter,
 }
 
 impl MuriSni {
@@ -204,7 +209,42 @@ impl ksni::Tray for MuriSni {
         }
     }
 
+    /// A left-click (SNI `Activate`). For the custom
+    /// [`X11Popup`](LinuxMenuPresenter::X11Popup) presenter, open muri's OWN
+    /// styled popup: **ignore** the host-supplied `(x, y)` (an SNI hint that is
+    /// unreliable / often `0,0` off KDE/Waybar — research doc §5) and anchor at
+    /// the live pointer via `XQueryPointer` instead (deliverable #3). For every
+    /// other presenter this is a no-op: the host draws the exported `dbusmenu`.
+    ///
+    /// ksni-0.3.6 constraint (DEVICE-VERIFY, ADR-0003): ksni derives `ItemIsMenu`
+    /// from the type-level `MENU_ON_ACTIVATE` const and, when it is `true`, makes
+    /// `Activate` return `UnknownMethod` so the host shows the dbusmenu instead of
+    /// calling this method. So to actually *receive* this activate for the X11
+    /// presenter, the device-side task must select a `MENU_ON_ACTIVATE = false`
+    /// adapter for `X11Popup` (e.g. a const-generic split of `MuriSni`, threaded
+    /// through the non-fn-pointer `run_sni_loop` seam) or move to a raw-`zbus` SNI
+    /// impl. The routing itself is wired here and is correct the moment activate
+    /// fires; right-click `ContextMenu` is unreachable in ksni 0.3.6 (hard
+    /// `UnknownMethod`) and is the same upstream/raw-zbus task.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        #[cfg(feature = "x11-popup")]
+        if self.presenter == LinuxMenuPresenter::X11Popup {
+            super::open_x11_popup_at_cursor(&self.tray);
+        }
+    }
+
     fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
-        build_items(&self.tray.menu)
+        match self.presenter {
+            // When muri draws its own styled popup (the X11 custom presenter),
+            // don't *also* export a host-drawn dbusmenu tree — return an empty menu
+            // so the custom popup is the only surface (deliverable #3).
+            LinuxMenuPresenter::X11Popup => Vec::new(),
+            // The native dbusmenu baseline (GNOME + universal fallback), and — until
+            // the layer-shell path is wired device-side — the Wayland presenter too:
+            // export the full native menu (the accessible, host-drawn baseline).
+            LinuxMenuPresenter::NativeDbusMenu | LinuxMenuPresenter::WaylandLayerShell => {
+                build_items(&self.tray.menu)
+            }
+        }
     }
 }

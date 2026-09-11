@@ -614,6 +614,27 @@ pub enum GutterPolicy {
     Never,
 }
 
+/// How the popup reserves the trailing (submenu chevron / trailing accessory)
+/// gutter (#60). Symmetric to the leading [`GutterPolicy`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrailingGutterPolicy {
+    /// Reserve the shared trailing column only when the menu needs it — it holds
+    /// at least one submenu row (its `›` chevron) or a row carrying an explicit
+    /// trailing accessory — so every row's right edge aligns past it (native
+    /// `NSMenu`). A menu with neither reserves nothing and its right-aligned
+    /// content reaches the true right edge. The OEM default.
+    #[default]
+    Auto,
+    /// Always reserve the trailing column (every row's content ends short of the
+    /// right edge, even with no submenu or trailing accessory anywhere).
+    Always,
+    /// Never reserve a trailing column — right-aligned content always reaches the
+    /// edge. A submenu chevron (or trailing accessory), if present, still draws
+    /// but overlays the normal content area rather than getting its own column,
+    /// mirroring how the leading [`GutterPolicy::Never`] keeps icons inline.
+    Never,
+}
+
 /// Tunable popup options layered on top of the [`Theme`].
 #[derive(Clone, Debug, Default)]
 pub struct MenuOptions {
@@ -626,6 +647,10 @@ pub struct MenuOptions {
     /// Leading-gutter reservation policy (#43). Defaults to
     /// [`GutterPolicy::Auto`] — the OEM-native behavior.
     pub gutter: GutterPolicy,
+    /// Trailing-gutter (submenu chevron / accessory column) reservation policy
+    /// (#60). Defaults to [`TrailingGutterPolicy::Auto`] — the OEM-native
+    /// behavior.
+    pub trailing_gutter: TrailingGutterPolicy,
 }
 
 impl MenuOptions {
@@ -638,6 +663,13 @@ impl MenuOptions {
     /// Set the leading-gutter reservation policy.
     pub fn gutter(mut self, g: GutterPolicy) -> Self {
         self.gutter = g;
+        self
+    }
+
+    /// Set the trailing-gutter (submenu chevron / accessory column) reservation
+    /// policy.
+    pub fn trailing_gutter(mut self, g: TrailingGutterPolicy) -> Self {
+        self.trailing_gutter = g;
         self
     }
 
@@ -894,6 +926,18 @@ mod tests {
     }
 
     #[test]
+    fn menu_options_trailing_gutter_defaults_to_auto() {
+        let opts = MenuOptions::default();
+        assert!(matches!(opts.trailing_gutter, TrailingGutterPolicy::Auto));
+    }
+
+    #[test]
+    fn menu_options_builder_sets_trailing_gutter() {
+        let opts = MenuOptions::default().trailing_gutter(TrailingGutterPolicy::Never);
+        assert!(matches!(opts.trailing_gutter, TrailingGutterPolicy::Never));
+    }
+
+    #[test]
     fn menu_options_width_clamps_negative() {
         let opts = MenuOptions::default().min_width(-5.0).max_width(-1.0);
         assert_eq!(opts.min_width, Some(0.0));
@@ -1081,6 +1125,7 @@ mod tests {
             max_width: Some(20.0),
             theme: ThemeSource::default(),
             gutter: GutterPolicy::Never,
+            trailing_gutter: TrailingGutterPolicy::Never,
         };
         assert_eq!(opts.min_width, Some(10.0));
     }
