@@ -32,18 +32,23 @@ muri = "0.10"
 ```
 
 > **Status: all three backends implemented; on-device verification ongoing.**
-> muri draws its own styled popup on **macOS** and **Windows**, and installs a
-> native menu on **Linux**. `Tray::run` installs the OS status item, opens the
-> menu, opens flyout submenu panels, follows dark/light, and supports **keyboard
-> navigation** (arrows / Home-End / Right-Left / Enter-Space / Esc / type-ahead)
-> over the same hover-stack the mouse drives. muri also publishes a **parallel
-> accessibility tree** (`Tray::accessibility_tree`) that maps the menu onto
-> menu/menuitem roles with name, checked, enabled, submenu-expanded, and
-> set-position, and (behind the `a11y` feature) attaches an AccessKit platform
-> adapter to the popup window so that tree is exposed to NSAccessibility /
-> VoiceOver (macOS) and UIA / NVDA / Narrator (Windows). The **Linux** tray is a
-> native `com.canonical.dbusmenu` menu (host-rendered — see below), with a
-> pointer-anchored styled `ContextMenu` available on X11.
+> muri draws its own styled popup on **macOS** and **Windows**. On **Linux** a
+> runtime *presenter* seam picks the best surface for the session: muri's own
+> styled popup on **X11**, an **experimental** `wlr-layer-shell` styled popup on
+> wlroots + KDE/Plasma (a scaffold behind the off-by-default `wayland-styled`
+> feature — device-verify pending), and the **native `com.canonical.dbusmenu`**
+> tree on GNOME-Wayland (where a client styled menu is impossible by policy).
+> `Tray::run` installs the OS status item, opens the menu, opens flyout submenu
+> panels, follows dark/light, and supports **keyboard navigation** (arrows /
+> Home-End / Right-Left / Enter-Space / Esc / type-ahead) over the same
+> hover-stack the mouse drives. muri also publishes a **parallel accessibility
+> tree** (`Tray::accessibility_tree`) that maps the menu onto menu/menuitem roles
+> with name, checked, enabled, submenu-expanded, and set-position, and (behind the
+> `a11y` feature) attaches an AccessKit platform adapter to the popup window so
+> that tree is exposed to NSAccessibility / VoiceOver (macOS) and UIA / NVDA /
+> Narrator (Windows). A pointer-anchored styled `ContextMenu` is also available on
+> X11, and a **headless renderer** (`render_menu_to_png` / `render_menu_to_rgba`)
+> rasterizes any menu to pixels on every OS with no display or window.
 >
 > Every backend compiles + is clippy-clean on its target in CI, and the pure
 > cross-platform core is unit-tested green on every OS; what remains is exercising
@@ -95,13 +100,15 @@ platform. That single owned surface is what makes these possible:
 ## Feature flags
 
 muri's default surface is `default = ["x11-popup"]`; the other integrations sit
-behind opt-in flags. All ship today.
+behind opt-in flags. All ship today (the `wayland-styled` renderer is an
+experimental scaffold — see its row).
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `x11-popup` | **on** | Linux only: the styled, pointer-anchored `ContextMenu::open_at` popup, via the pure-Rust `x11rb` X11 client. On by default for back-compat and `muda-compat` parity; a tray-only consumer can `default-features = false` to drop `x11rb` + `x11rb-protocol` + `gethostname` and keep just the SNI tray. Inert on non-Linux targets. |
+| `x11-popup` | **on** | Linux only: the styled, pointer-anchored `ContextMenu::open_at` popup (and the X11 tray presenter), via the pure-Rust `x11rb` X11 client. On by default for back-compat and `muda-compat` parity; a tray-only consumer can `default-features = false` to drop `x11rb` + `x11rb-protocol` + `gethostname` and keep just the SNI tray. Inert on non-Linux targets. |
+| `wayland-styled` | off | **Experimental (Linux only).** Scaffolding for the self-drawn, styled tray/context menu on Wayland via `zwlr_layer_shell_v1` (wlroots compositors + KWin/Plasma; GNOME/Mutter refuses layer-shell by policy, so it stays native there). Today this only gates the Wayland scaffold module and pulls **no** external crates — the live layer-shell renderer + registry bind are device-side tasks (`todo!("DEVICE-VERIFY")`), so `cargo build --all-features` stays green on macOS. Inert on non-Linux targets. See [`docs/adr/0003-linux-styled-tray-menu.md`](docs/adr/0003-linux-styled-tray-menu.md). |
 | `a11y` | off | AccessKit screen-reader bridge over the raster backend (`accesskit_macos` → NSAccessibility, `accesskit_windows` → UIA; Linux via the native menu / AT-SPI). Ships today; **planned to be on by default at 1.0**. |
-| `muda-compat` | off | A `muda` / `tray-icon` drop-in compatibility facade (`compat::muda` / `compat::tray_icon`) so existing callers can migrate with minimal churn. Maps entirely onto muri's native model — it does **not** pull in the real `muda` / `tray-icon` crates (see [Migrating from muda](#migrating-from-muda)). |
+| `muda-compat` | off | The **frozen**, pure bidirectional `muda` / `tray-icon` drop-in facade (`compat::muda` / `compat::tray_icon`) so existing callers can migrate with `s/muda/muri/` (and back). It mirrors upstream's API **exactly — no more, no less** — carrying **no** muri-only customization; maps entirely onto muri's native model and does **not** pull in the real `muda` / `tray-icon` crates (see [Migrating from muda](#migrating-from-muda)). |
 | `bundled-fonts` | off | Embeds freely-redistributable OSS UI-font substitutes (OFL **Inter** for SF Pro, Microsoft's own OFL **Selawik** for Segoe UI, genuine **Cantarell** for GNOME) so a *forced* cross-platform theme (`ThemeSource::MacOs`/`Windows`/`Gnome`) can render in a metric-compatible face when the real OEM font isn't installed on the host — never silently drawing the wrong-OS host font. OFF by default to keep the crate small; the TTFs are `include_bytes!`-embedded only when on. See [`assets/fonts/README.md`](assets/fonts/README.md). |
 
 ## Quick example
@@ -110,7 +117,7 @@ behind opt-in flags. All ship today.
 use muri::{Tray, Menu, Row, Segment, Align, Flex, Color, Icon, Font, Weight};
 
 let menu = Menu::new()
-    .section_header(Row::info().label("Claude"))
+    .section_header(Row::label_only("Claude"))
     .row(
         Row::new("switch:claude:me@x.com")
             .checked(true)
@@ -124,18 +131,56 @@ let menu = Menu::new()
     .separator()
     .row(Row::new("quit").label("Quit"));
 
-let tray = Tray::new(Icon::from_png_bytes(include_bytes!("icon.png").as_slice()))
+let tray = Tray::new(Icon::from_png(include_bytes!("icon.png").as_slice()))
     .tooltip("My App")
     .menu(menu)
     .on_click(|id| handle_click(id.as_str()));
 
 // let m = muri::MainThreadMarker::new().unwrap(); // call on the real main thread
-// tray.run(m)?; // installs the tray icon + runs the event loop (styled popup on macOS/Windows; native menu on Linux)
+// tray.run(m)?; // installs the tray icon + runs the event loop (styled popup on macOS/Windows; presenter-selected on Linux)
 ```
 
 See [`examples/usagio_menu.rs`](examples/usagio_menu.rs) for usagio's full real
 menu — provider groups, flush-right colored percentages, and account submenus —
 rebuilt through the API.
+
+## Native API: the one obvious way
+
+The native surface deliberately has **one canonical call per task** (issue #62),
+with alternatives kept only as clearly-labeled sugar or full-control escape
+hatches. When in doubt, reach for the canonical path:
+
+| Task | Canonical native call | Escape hatch |
+|------|-----------------------|--------------|
+| Build a menu | `Menu::new()` + `.row(..)` / `.separator()` / `.section_header(..)` / `.submenu(label, menu)` / `.content(..)` | `Menu::item(..)` with a hand-built `Item` |
+| An interactive row | `Row::new(id)` | — |
+| A header / label / info row | `Row::label_only(text)` | `Row::default()` + segments |
+| Row text | `Row::label(text)` / `Row::label_value(label, value)` | `Row::segments(vec![Segment…])` |
+| Bold a row's label | `Row::bold()` | a whole-label `StyleRun` with `Weight::Bold` |
+| Color a row's value | `Row::value_color(color)` | per-substring `StyleRun`s via `Segment::run` / `Segment::runs` |
+| An icon | `Icon::from_png(bytes)` / `Icon::from_rgba(rgba, w, h)` / `Icon::from_svg(bytes)` | — |
+| Choose the look | `MenuOptions` (carrying a `ThemeSource`) | `Tray::theme(..)` / `TrayHandle::set_theme(..)` (derived conveniences that set the `MenuOptions` theme) |
+
+Per-run `StyleRun` styling (attached with `Segment::run` / `Segment::runs`, each
+run carrying a `color` and an optional `weight`) is the **one** styling system;
+`Row::bold()` / `Row::value_color()` are the ergonomic front door onto it for the
+two most common cases and render identically to the equivalent hand-built runs.
+`MenuOptions` is the single source of truth for "which look" — `Tray::theme` and
+`TrayHandle::set_theme` ultimately set its `theme` field.
+
+```rust
+use muri::{Menu, Row, Icon, Color, MenuOptions, ThemeSource, ThemeMode};
+
+let menu = Menu::new()
+    .section_header(Row::label_only("Account"))
+    .row(Row::new("me").label_value("me@example.com", "47% / 89%").value_color(Color::SystemRed))
+    .row(Row::new("prefs").label("Preferences…").bold())
+    .separator()
+    .row(Row::new("quit").label("Quit"));
+
+let icon = Icon::from_svg(include_bytes!("logo.svg").as_slice());
+let options = MenuOptions::default().theme(ThemeSource::MacOs(ThemeMode::Dark));
+```
 
 ## Migrating from muda
 
@@ -151,7 +196,12 @@ get full styling (flush-right values, colors, fonts, embedded logos, nested
 flyouts) while still following the OS dark/light + accent by default.
 
 The migration is designed so `s/muda/muri/` **compiles, runs, and looks native
-immediately** — then lets you restyle at your own pace, with no cliff.
+immediately**. The compat facade is a **frozen, pure bidirectional drop-in** — it
+mirrors upstream `muda` / `tray-icon` *exactly*, so `s/muri/muda/` reverses the
+move with equal ease. It carries **no** muri-only customization: to restyle (bold
+rows, colored values, forced themes, logos, `MenuOptions`), you adopt the
+**native** muri API (`Menu` / `Row` / `Tray` / `ContextMenu` / `MenuOptions`) —
+that is where all customization lives.
 
 ### How
 
@@ -178,12 +228,15 @@ immediately** — then lets you restyle at your own pace, with no cliff.
    and call `set_menu` / `set_icon` / `set_tooltip` from any thread.
 5. **Routing** — `Menu::init_for_nsapp/hwnd/gtk_window` passes through to the
    **native** menu bar; `TrayIconBuilder…with_menu` and
-   `show_context_menu_for_*` render as muri's **custom** surface with
-   `Theme::native()`.
-6. **Then restyle progressively** — Step 1: swap the theme. Step 2: make a row a
-   `Flex::Grow` label + `Align::Right` colored value (flush-right, no chevron
-   column) with a `StyleRun` span. Step 3: add section headers, logos, and
-   submenus. Ids never change, so your handlers keep matching.
+   `show_context_menu_for_*` render as muri's **custom** surface with muri's
+   native-look theme.
+6. **To customize, cross to the native API.** Because the facade is frozen, you
+   restyle by building the same menu through native muri instead: a `Flex::Grow`
+   label + `Align::Right` colored value (flush-right, no chevron column) with a
+   `StyleRun` span, `Row::bold()` / `Row::value_color()`, section headers, logos,
+   submenus, and a `MenuOptions` / `ThemeSource` for the look. Ids never change,
+   so your handlers keep matching. See [Native API: the one obvious
+   way](#native-api-the-one-obvious-way).
 
 ### Honest caveats
 
@@ -191,7 +244,7 @@ In *custom* surfaces (tray/context menus), `PredefinedMenuItem` OS actions are
 best-effort and inemulable ones render as **visible disabled rows** (never
 silently dropped); accelerators are displayed and handled **only while the menu
 is open** (no system-wide hotkey — use `global-hotkey` for that); **Linux** has no
-styled *tray-anchored* popup (native-menu fallback + pointer-anchored
+styled *tray-anchored* popup (native dbusmenu / presenter fallback + pointer-anchored
 `ContextMenu`); and the facade maps entirely onto muri — it does **not** pull in
 the real `muda` / `tray-icon` crates. See the migration guide in
 [`docs/design/spec/60-migration-guide.md`](docs/design/spec/60-migration-guide.md)
@@ -200,19 +253,24 @@ for the full divergence register.
 ## Platform support (honest matrix)
 
 Legend: ✅ working (automated-tested / live) · 🔬 implemented, on-device
-verification pending · ❌ not offered (by design).
+verification pending · 🧪 experimental scaffold (feature-gated, off by default) ·
+❌ not offered (by design).
 
-Note the key nuance: **muri draws its own styled menu on macOS and Windows**; the
-**Linux tray menu is a native `com.canonical.dbusmenu`** — the SNI/AppIndicator
-*host* renders it, so it does **not** follow muri's theme or fonts. muri's own
-styled popup on Linux is the pointer-anchored `ContextMenu` (X11 only today;
-Wayland styled positioning returns `Unsupported`).
+Note the key nuance: **muri draws its own styled menu on macOS and Windows**; on
+**Linux** a runtime *presenter* seam picks the surface per session — muri's own
+styled popup on **X11**, an **experimental** `wlr-layer-shell` styled popup on
+wlroots + KDE/Plasma (the off-by-default `wayland-styled` scaffold), and the
+**native `com.canonical.dbusmenu`** tree on **GNOME-Wayland** (host-rendered, so
+not muri-themed — a client styled menu is refused there by policy). A
+tray-*anchored* popup stays impossible on Linux regardless (no icon geometry
+reaches the app); the pointer-anchored `ContextMenu` is muri's portable styled
+primitive there. A **headless renderer** draws any menu to pixels on every OS.
 
 | OS      | Tray icon | Styled anchored popup | Context menu (`open_at`) | Screen reader |
 |---------|-----------|-----------------------|--------------------------|---------------|
 | macOS   | 🔬 `NSStatusItem` | 🔬 non-activating `NSPanel` + vibrancy, N-level flyouts, mouse + keyboard nav | 🔬 `open_at` + `Popup` (shared `PopupSession`) | 🔬 VoiceOver (per-window AccessKit adapters wired) |
 | Windows | 🔬 `Shell_NotifyIcon` | 🔬 `WS_EX_NOACTIVATE` layered popup, DWM acrylic, `WH_MOUSE_LL` dismiss | 🔬 `open_at` + `Popup` (reuses the layered popup) | 🔬 NVDA + Narrator (UIA via `accesskit_windows`) |
-| Linux   | 🔬 SNI/AppIndicator **native `dbusmenu`** (host-rendered; not muri-themed) | ❌ tray-anchored (by design — see below); use pointer `ContextMenu` | 🔬 X11 override-redirect `open_at` (`x11-popup` feature; Wayland: `Unsupported::ClientPositioning`) | 🔬 Orca (AT-SPI via the native menu) |
+| Linux   | 🔬 SNI/AppIndicator (presenter picks the menu surface) | ❌ tray-anchored (by design — see below). Presenter: 🔬 X11 styled popup on activate · 🧪 wlroots/KDE `wlr-layer-shell` (`wayland-styled` scaffold) · 🔬 native `dbusmenu` on GNOME | 🔬 X11 override-redirect `open_at` (`x11-popup`; Wayland: `Unsupported::ClientPositioning`) | 🔬 Orca (AT-SPI via the native menu) |
 
 **All-green yet? No — by design.** The pure cross-platform core (menu model,
 `Flex`/`Align` layout, flyout/anchor math, keyboard-nav state machine, theme
@@ -237,18 +295,28 @@ Linux/Wayland, and muri will not pretend otherwise:
 - **Wayland forbids a client from positioning its own toplevel** by protocol —
   `set_outer_position` is a documented no-op.
 
-So on Linux muri offers a **fallback** instead of a broken promise:
+So on Linux muri never fabricates a tray anchor. `Tray::run` **does** work — it
+installs the SNI/AppIndicator status item and runs its loop — but the tray
+*anchor rect* is unavailable, so `Tray::anchor_rect` (and the cross-thread
+`TrayHandle::anchor_rect`) reports `Error::Unsupported(Unsupported::TrayAnchor)`.
+What the tray shows is chosen by a runtime **presenter** seam
+([ADR-0003](docs/adr/0003-linux-styled-tray-menu.md)):
 
-1. **Native-menu fallback** — render the same `Menu` spec through a native
-   `com.canonical.dbusmenu` tree (via `ksni`, the SNI/AppIndicator host renders
-   it, so it loses custom styling but works everywhere a Linux tray works). This
-   is the recommended default.
-2. **Pointer-anchored `ContextMenu`** — the styled surface *is* available where a
-   pointer coordinate exists (a right-click menu), just not anchored to the tray
-   icon.
+1. **`NativeDbusMenu`** — render the same `Menu` spec through a native
+   `com.canonical.dbusmenu` tree (via `ksni`; the SNI/AppIndicator host draws it,
+   so it loses custom styling but works everywhere a Linux tray works, and is
+   accessible over AT-SPI for free). The universal baseline and the surface on
+   **GNOME-Wayland** (which refuses a client styled menu).
+2. **`X11Popup`** — on a real X11 session, activating the tray opens **muri's own
+   styled popup** at the pointer (override-redirect window; `x11-popup` feature).
+3. **`WaylandLayerShell`** — **experimental** styled popup via `wlr-layer-shell`
+   on wlroots + KDE/Plasma, behind the off-by-default `wayland-styled` scaffold
+   (the live renderer is a device-side task — see the ADR).
 
-`Tray::run` returns `Err(Error::Unsupported(Unsupported::TrayAnchor))` on Linux
-so callers fall back deliberately.
+Independently, the **pointer-anchored `ContextMenu`** styled surface is available
+wherever a pointer coordinate exists (a right-click menu) — X11 today; on Wayland
+`open_at` returns `Unsupported::ClientPositioning` (a client cannot self-position
+a bare toplevel).
 
 ## Theming
 
@@ -286,23 +354,61 @@ Cantarell); (3) a free, broadly-available fallback (DejaVu Sans, Liberation Sans
 …). Pixel-perfect parity therefore requires the real target face to be installed —
 muri's contract is to never lie about it.
 
+## Headless rendering
+
+muri can rasterize a built `Menu` straight to pixels with **no tray, no window,
+and no display** — the same layout + paint pass a live popup runs, driven into an
+in-memory framebuffer and read back out:
+
+```rust
+use muri::{Menu, Row, MenuOptions, ThemeSource, ThemeMode};
+
+let menu = Menu::new().row(Row::new("quit").label("Quit"));
+
+// PNG bytes (scale = device pixels per logical pixel; 2.0 ≈ Retina):
+let png = muri::render_menu_to_png(&menu, &MenuOptions::default(), 2.0);
+
+// or raw straight-alpha RGBA8 + dimensions, for diffing / custom encoding:
+let (rgba, w, h) = muri::render_menu_to_rgba(&menu, &MenuOptions::default(), 2.0);
+assert_eq!(rgba.len(), (w * h * 4) as usize);
+```
+
+Both entry points are available on **every** OS (no platform/tray feature, no
+`cfg(target_os)`). The concrete `Theme` is resolved internally from
+`MenuOptions::theme`, so forcing a cross-OS look
+(`ThemeSource::MacOs`/`Windows`/`Gnome`, ideally with `bundled-fonts` on) renders
+any OS's OEM menu from a single host — the basis for **CI screenshots** and a
+**cross-OS golden-image** suite on one runner. The render is deterministic and
+headless: an `Auto` appearance resolves to the *light* look (pass an explicit dark
+mode for dark), and no row is highlighted.
+
 ## Error handling
 
 muri's fallible operations return a typed `Result<T, Error>` — it **returns
 errors, it does not log** (there is no `log`/`tracing` dependency; a consumer
-decides what to surface):
+decides what to surface). `Error` is **structured** and `#[non_exhaustive]`, so
+the failure sites that carry actionable meaning are their own variants (a consumer
+can `match` on the *kind* rather than string-match a message) and a `match` must
+include a `_` arm:
 
 - `Error::Unsupported(Unsupported)` — a genuine per-platform impossibility,
   surfaced deliberately: `Unsupported::TrayAnchor` (a styled tray-anchored popup
   on Linux) and `Unsupported::ClientPositioning` (client-side toplevel
   positioning, which Wayland forbids).
 - `Error::BadIcon(String)` — the supplied icon bytes could not be decoded.
-- `Error::Platform(String)` — a platform API call failed while creating,
-  installing, or anchoring the tray/surface; the message names the concrete
-  failure site (e.g. a failed `Shell_NotifyIcon(NIM_ADD)` / SNI registration, or a
-  main-thread requirement). A Windows/Linux tray-install failure is surfaced
-  synchronously through the tray-thread install handshake (via
-  `TrayIconBuilder::build_result`) rather than returning a false `Ok`.
+- `Error::TrayInstall(String)` — the OS tray/status-item install failed
+  (`Shell_NotifyIcon(NIM_ADD)` on Windows, or the SNI/`StatusNotifierItem` D-Bus
+  registration on Linux). On Windows/Linux this is surfaced **synchronously**
+  through the tray-thread install handshake (via `Tray::spawn`'s `Result`), so a
+  caller learns the icon never appeared instead of seeing a false `Ok`.
+- `Error::MainThread` — a tray/surface that must be created on the main thread was
+  requested off it (AppKit's `NSStatusItem`, and the platform's main-thread-only
+  install/run paths).
+- `Error::ThreadSpawn(String)` — the background `muri-tray` UI thread could not be
+  spawned.
+- `Error::Platform(String)` — the catch-all for a residual per-OS API failure
+  while creating or anchoring a surface that doesn't fit a more specific
+  structured variant; the message names the concrete failure site.
 
 ## Performance
 
@@ -342,10 +448,14 @@ verification and screen-reader validation.
    `Shell_NotifyIconGetRect`, DWM acrylic, theme-follow, `WH_MOUSE_LL`/`WH_KEYBOARD_LL`
    dismiss + keyboard, UIA via `accesskit_windows` (NVDA + Narrator validation
    remains).
-3. **Linux backend** (done) — SNI/AppIndicator native `dbusmenu` + pointer-anchored
-   `ContextMenu` on X11; AT-SPI via the native menu (Orca validation remains). A
-   `wlr-layer-shell` anchored backend is a possible future community opt-in
-   (wlroots/KWin only).
+3. **Linux backend** (done) — a runtime presenter seam over SNI/AppIndicator:
+   muri's own styled popup on X11, native `com.canonical.dbusmenu` on
+   GNOME-Wayland (and as the universal fallback), plus the pointer-anchored
+   `ContextMenu` on X11; AT-SPI via the native menu (Orca validation remains). An
+   **experimental** `wlr-layer-shell` styled popup for wlroots + KDE/Plasma is
+   scaffolded behind the off-by-default `wayland-styled` feature — the live
+   renderer and registry bind are device-side tasks (see
+   [ADR-0003](docs/adr/0003-linux-styled-tray-menu.md)).
 
 ## Minimum supported Rust version
 
