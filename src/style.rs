@@ -128,8 +128,16 @@ impl Weight {
     }
 }
 
-/// A resolved font: family, size (in logical points), weight, and tracking.
+/// A resolved font: family, size (in logical points), weight, tracking, and
+/// optional optical size.
+///
+/// Construct via [`Font::system`] / [`Font::mono`] and the `with_*` builders
+/// rather than a struct literal — the type is `#[non_exhaustive]` so future
+/// rendering knobs can be added without a breaking change (adding
+/// [`optical_size`](Self::optical_size) in 0.13 was the last field addition that
+/// required a major bump).
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Font {
     /// The font family.
     pub family: FontFamily,
@@ -144,6 +152,15 @@ pub struct Font {
     /// macOS `System` theme sets this so menu text matches native tracking (#42).
     /// Negative tightens, positive loosens.
     pub letter_spacing: f32,
+    /// Optical size (`opsz` axis) to instance the face at, in logical points, or
+    /// `None` to leave the face at its default optical master. A variable UI font
+    /// (San Francisco, Segoe UI Variable) carries an `opsz` axis whose masters are
+    /// tuned per size; the value is clamped into the face's own `opsz` range. macOS
+    /// SFNS defaults to the condensed *Display* master (`opsz` default 28), so a
+    /// 13pt menu left at the default renders narrower/"squished" than native — the
+    /// `System` theme sets this to the menu point size so CoreText's *Text* master
+    /// (clamped to `opsz` 17) is used instead (#77). `None` keeps prior behavior.
+    pub optical_size: Option<f32>,
 }
 
 impl Default for Font {
@@ -153,6 +170,7 @@ impl Default for Font {
             size: 13.0,
             weight: Weight::Regular,
             letter_spacing: 0.0,
+            optical_size: None,
         }
     }
 }
@@ -165,6 +183,7 @@ impl Font {
             size,
             weight,
             letter_spacing: 0.0,
+            optical_size: None,
         }
     }
 
@@ -175,6 +194,7 @@ impl Font {
             size,
             weight,
             letter_spacing: 0.0,
+            optical_size: None,
         }
     }
 
@@ -189,6 +209,15 @@ impl Font {
     /// field.
     pub fn with_letter_spacing(mut self, points: f32) -> Self {
         self.letter_spacing = points;
+        self
+    }
+
+    /// Return a copy of this font instanced at the given optical size (`opsz` axis,
+    /// logical points). See the [`optical_size`](Self::optical_size) field. The
+    /// value is clamped into the face's own `opsz` range at shaping time; on a face
+    /// with no `opsz` axis it has no effect.
+    pub fn with_optical_size(mut self, points: f32) -> Self {
+        self.optical_size = Some(points);
         self
     }
 }

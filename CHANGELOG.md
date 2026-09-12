@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-12
+
+### Added
+
+- **Optical-size (`opsz`) axis support — fixes squished macOS menu text (#77).**
+  The real cause behind #66/#57 ("letters touch / reads condensed vs native"): SF
+  (`SFNS.ttf`) is a variable font whose `opsz` axis *defaults* to 28 (the condensed
+  *Display* master), but CoreText renders a 13pt menu at `opsz` clamped to the axis
+  min (17, the wider *Text* master). muri instanced only `wght`, so every glyph
+  rendered at the Display master — narrower than native. `Font` now carries an
+  `optical_size: Option<f32>` (logical points), threaded through shaping and glyph
+  rasterization (advances and outline instanced at the same master, cached on it),
+  and clamped into each face's own `opsz` range. The macOS `System` theme opts in
+  at the menu point size; Windows/GNOME leave it `None` (mechanism is general —
+  Segoe UI Variable has `opsz` too — policy is macOS-only for now). No effect on
+  faces without an `opsz` axis. Verified on a live Tahoe menu: text now reads open
+  like native instead of condensed.
+
+### Changed
+
+- **BREAKING: `Font` gained a field and is now `#[non_exhaustive]`.** Adding
+  `Font::optical_size` breaks exhaustive struct literals, so construct `Font` via
+  `Font::system` / `Font::mono` + the `with_*` builders (including the new
+  `with_optical_size`). Marking it `#[non_exhaustive]` now means future rendering
+  knobs won't need another major bump. This is a 0.x major (minor-position) bump.
+- **macOS dark-glass menu: removed the opaque black overlay, restored native
+  translucency (#72 correction).** The 0.12.12 flat black `CALayer` (alpha 0.26)
+  matched native's luminance over a *flat gray* desktop but did so by occluding the
+  blur — making the menu opaque. A device recording showed native `NSMenu` glass is
+  genuinely translucent and tracks its backdrop (≈51 over neutral gray, ≈4 over a
+  dark window, colored bleed over content); the fixed-luminance target was a red
+  herring. muri now keeps the real `NSVisualEffectView(.menu)` + emphasized
+  translucency: lighter than native over a flat wallpaper, but see-through and
+  backdrop-tracking like native. Closing the residual darkness gap needs the
+  private menu material (no public equivalent), never an opaque layer.
+
+### Diagnostics
+
+- **`MURI_DEBUG_TEXT` gains a `MURI_RASTER` line (#65).** Per run, logs the
+  `(face, emb, opsz)` actually reaching glyph rasterization, to isolate the
+  live-vs-offscreen bold divergence (the `Variable(700)` decision is confirmed
+  correct and the offscreen raster thickens 1.38×, but the live on-screen popup
+  does not). Inert unless `MURI_DEBUG_TEXT` is set.
+
 ## [0.12.13] - 2026-09-12
 
 ### Fixed

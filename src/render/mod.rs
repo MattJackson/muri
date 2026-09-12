@@ -83,9 +83,11 @@ type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;
 
 /// Cache key for a shaped run: the text, the resolved primary face, the OpenType
 /// weight, and the device pixel size (as raw `f32` bits for exact equality).
-// (text, primary face, ot_weight, px-bits, tracking-bits). Tracking is part of
-// the key so a tracked and untracked shaping of the same text don't collide (#42).
-type ShapeKey = (String, Option<FaceId>, u16, u32, u32);
+// (text, primary face, ot_weight, px-bits, tracking-bits, opsz-bits). Tracking is
+// part of the key so a tracked and untracked shaping of the same text don't
+// collide (#42); optical size likewise, so the same text at two optical masters
+// keeps distinct advances (#77).
+type ShapeKey = (String, Option<FaceId>, u16, u32, u32, u32);
 
 /// A [`RasterDrawer::icons`] cache entry: the decoded icon plus a strong
 /// clone of the source `Arc<[u8]>` it was decoded from (see the field doc for
@@ -526,6 +528,15 @@ enum Embolden {
 pub(crate) const WGHT_AXIS_TAG: u32 =
     ((b'w' as u32) << 24) | ((b'g' as u32) << 16) | ((b'h' as u32) << 8) | (b't' as u32);
 
+/// OpenType `opsz` (optical-size) variation-axis tag, packed big-endian like
+/// [`WGHT_AXIS_TAG`]. A variable UI font (San Francisco, Segoe UI Variable) tunes
+/// its outlines per optical master; muri instances this axis to the menu point
+/// size so text renders at the correct master rather than the face's (often
+/// condensed *Display*) default — SFNS defaults to `opsz` 28 but a 13pt menu wants
+/// the *Text* master at `opsz` 17 (#77).
+pub(crate) const OPSZ_AXIS_TAG: u32 =
+    ((b'o' as u32) << 24) | ((b'p' as u32) << 16) | ((b's' as u32) << 8) | (b'z' as u32);
+
 /// A glyph positioned along a shaped line: which face rendered it, its glyph id,
 /// and its pen position + offset in device pixels (relative to the line start).
 struct ShapedGlyph {
@@ -535,6 +546,11 @@ struct ShapedGlyph {
     /// through to rasterization so the variation / synthetic-bold treatment and
     /// the glyph cache key match how it was shaped (#63).
     emb: Embolden,
+    /// The resolved optical size (`opsz` axis value) this glyph was shaped at, or
+    /// `None` for the face's default master. Carried through to rasterization so
+    /// the outline is scaled at the *same* master the shaper positioned it at, and
+    /// so the glyph cache key distinguishes optical masters (#77).
+    opsz: Option<f32>,
     /// Horizontal pen position (already including the shaper's x-offset), px.
     x: f32,
     /// Vertical offset above the baseline (shaper y-offset), px, positive up.
@@ -571,6 +587,10 @@ struct GlyphKey {
     /// and serve each other's bitmap, so the variation/synthetic-bold state is
     /// part of the identity.
     emb: Embolden,
+    /// The optical master (`opsz` axis) the outline is instanced at, as raw `f32`
+    /// bits (`0` = the face's default master), so glyphs at different optical sizes
+    /// don't collide on this key (#77).
+    opsz_bits: u32,
 }
 
 /// Raw font bytes for one face, kept alive so `harfrust`/`swash` borrows into
@@ -616,10 +636,11 @@ const EMBOLDEN_CACHE_CAP: usize = 256;
 /// practice.
 const FACE_CACHE_CAP: usize = 256;
 
-/// Cap on [`FontStore::shaper_instances`]'s entry count (`(FaceId, Embolden)` →
-/// [`ShaperInstance`]). A variable-font bold run's `from_variations` instance
-/// depends only on the face and its emboldening, so it is memoized here rather
-/// than rebuilt on every `shape` cache miss; bounded and cleared on overflow.
+/// Cap on [`FontStore::shaper_instances`]'s entry count
+/// (`(FaceId, Embolden, opsz-bits)` → [`ShaperInstance`]). A variable-font run's
+/// `from_variations` instance depends only on the face, its emboldening, and the
+/// optical master, so it is memoized here rather than rebuilt on every `shape`
+/// cache miss; bounded and cleared on overflow.
 const SHAPER_INSTANCE_CACHE_CAP: usize = 256;
 
 struct FontStore {
@@ -640,13 +661,13 @@ struct FontStore {
     /// hover-highlight felt laggy. Cached here, only the cheap per-call `Shaper`
     /// is rebuilt. Bounded by the handful of distinct faces a menu uses.
     shaper_data: RefCell<HashMap<FaceId, Rc<ShaperData>>>,
-    /// Memoized variable-font shaper instances per `(face, emboldening)` (#13).
-    /// `ShaperInstance::from_variations` reparses the font's variation tables and
-    /// so is rebuilt on *every* `shape` cache miss for a variable-bold run even
-    /// though it depends only on the face + its [`Embolden`]; memoized here
-    /// (mirroring how `shaper_data` is memoized per face), bounded by
-    /// [`SHAPER_INSTANCE_CACHE_CAP`] and cleared wholesale on overflow.
-    shaper_instances: RefCell<HashMap<(FaceId, Embolden), Rc<ShaperInstance>>>,
+    /// Memoized variable-font shaper instances per `(face, emboldening, opsz-bits)`
+    /// (#13/#77). `ShaperInstance::from_variations` reparses the font's variation
+    /// tables and so is rebuilt on *every* `shape` cache miss for a variable run
+    /// even though it depends only on the face, its [`Embolden`], and the optical
+    /// master; memoized here (mirroring how `shaper_data` is memoized per face),
+    /// bounded by [`SHAPER_INSTANCE_CACHE_CAP`] and cleared wholesale on overflow.
+    shaper_instances: RefCell<HashMap<(FaceId, Embolden, u32), Rc<ShaperInstance>>>,
     /// Memoized codepoint coverage per `(face, char)`. `face_has_glyph` otherwise
     /// re-parses the font and its cmap table on every call — and it is called per
     /// char, per candidate face, per render. Caching it (with the fallback cache
@@ -877,6 +898,19 @@ impl FontStore {
             .map(|axis| axis.max_value())
     }
 
+    /// Resolve the `opsz` (optical-size) axis value to instance `id` at for a
+    /// `points`-point render, clamped into the face's own `opsz` range, or `None`
+    /// when the face has no `opsz` axis (nothing to instance) (#77). Clamping
+    /// mirrors CoreText: a 13pt menu on SFNS (axis min 17) resolves to the *Text*
+    /// master at 17, not the default *Display* master at 28.
+    fn face_opsz(&self, id: FaceId, points: f32) -> Option<f32> {
+        let bytes = self.face_bytes(id)?;
+        let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
+        font.variations()
+            .find_by_tag(OPSZ_AXIS_TAG)
+            .map(|axis| points.clamp(axis.min_value(), axis.max_value()))
+    }
+
     /// Diagnostic (#65): a one-line description of the resolved face — its `fontdb`
     /// families/index/registered weight and the parsed `wght` axis min/default/max
     /// plus named-instance count. The live full-system DB resolves `System` to a
@@ -1064,11 +1098,18 @@ impl FontStore {
         // (logical points when measuring, device px when drawing) so measure and
         // draw stay proportional (#42). `0.0` is the metrics-only default.
         tracking: f32,
+        // Optical size (`opsz` axis) to instance every face at, in LOGICAL points
+        // (scale-independent — the same design master serves 1x and 2x), or `None`
+        // to leave each face at its default master (#77).
+        optical_size: Option<f32>,
     ) -> Rc<ShapedLine> {
         let px_bits = px.to_bits();
         let tracking_bits = tracking.to_bits();
+        // Optical size keys the shape cache in raw bits (`0` = default master), so
+        // the same text at two optical masters keeps distinct advances.
+        let opsz_bits = optical_size.map(f32::to_bits).unwrap_or(0);
         // Hash the borrowed components — no owned `String` on the lookup path.
-        let hash = shape_key_hash(text, primary, ot_weight, px_bits, tracking_bits);
+        let hash = shape_key_hash(text, primary, ot_weight, px_bits, tracking_bits, opsz_bits);
         if let Some((k, cached)) = self.shaped.borrow().get(&hash) {
             // Verify the retained owned key really matches (a hash collision must
             // not return another run's glyphs). Field-by-field so `String == &str`
@@ -1078,6 +1119,7 @@ impl FontStore {
                 && k.2 == ot_weight
                 && k.3 == px_bits
                 && k.4 == tracking_bits
+                && k.5 == opsz_bits
             {
                 return Rc::clone(cached);
             }
@@ -1116,27 +1158,43 @@ impl FontStore {
             // is instanced at the bold `wght` axis value so the shaper positions
             // the *bold* glyphs (advances included), not the regular ones (#63).
             let emb = self.face_embolden(face_id, ot_weight);
-            // Memoize the variable-font instance per `(face, emb)` (#13): it depends
-            // only on those two, so building it fresh on every shape cache miss (as
-            // the code used to) needlessly reparsed the font's variation tables.
-            let instance: Option<Rc<ShaperInstance>> = match emb {
-                Embolden::Variable(w) => {
-                    let key = (face_id, emb);
-                    let mut cache = self.shaper_instances.borrow_mut();
-                    let inst = if let Some(inst) = cache.get(&key) {
-                        Rc::clone(inst)
-                    } else {
-                        let inst =
-                            Rc::new(ShaperInstance::from_variations(&font, [("wght", w as f32)]));
-                        if cache.len() >= SHAPER_INSTANCE_CACHE_CAP {
-                            cache.clear();
-                        }
-                        cache.insert(key, Rc::clone(&inst));
-                        inst
-                    };
-                    Some(inst)
-                }
-                Embolden::None | Embolden::Synthetic => None,
+            // Resolve the optical master for THIS face (clamped into its own `opsz`
+            // range; `None` for a face with no `opsz` axis or an opt-out caller).
+            let opsz = optical_size.and_then(|pts| self.face_opsz(face_id, pts));
+            let opsz_bits = opsz.map(f32::to_bits).unwrap_or(0);
+            // Memoize the variable-font instance per `(face, emb, opsz)` (#13/#77):
+            // it depends only on those, so building it fresh on every shape cache
+            // miss (as the code used to) needlessly reparsed the font's variation
+            // tables. A single instance carries BOTH the bold `wght` and the `opsz`
+            // master so advances and outline stay on the same coordinates.
+            let wght = if let Embolden::Variable(w) = emb {
+                Some(w as f32)
+            } else {
+                None
+            };
+            let instance: Option<Rc<ShaperInstance>> = if wght.is_some() || opsz.is_some() {
+                let key = (face_id, emb, opsz_bits);
+                let mut cache = self.shaper_instances.borrow_mut();
+                let inst = if let Some(inst) = cache.get(&key) {
+                    Rc::clone(inst)
+                } else {
+                    let mut vars: Vec<(&str, f32)> = Vec::with_capacity(2);
+                    if let Some(w) = wght {
+                        vars.push(("wght", w));
+                    }
+                    if let Some(o) = opsz {
+                        vars.push(("opsz", o));
+                    }
+                    let inst = Rc::new(ShaperInstance::from_variations(&font, vars));
+                    if cache.len() >= SHAPER_INSTANCE_CACHE_CAP {
+                        cache.clear();
+                    }
+                    cache.insert(key, Rc::clone(&inst));
+                    inst
+                };
+                Some(inst)
+            } else {
+                None
             };
             let shaper = shaper_data
                 .shaper(&font)
@@ -1157,6 +1215,7 @@ impl FontStore {
                     face: face_id,
                     glyph: info.glyph_id as u16,
                     emb,
+                    opsz,
                     x: pen + pos.x_offset as f32 * s,
                     y: pos.y_offset as f32 * s,
                 });
@@ -1168,7 +1227,14 @@ impl FontStore {
         drop(scratch);
         let line = Rc::new(ShapedLine { glyphs, width: pen });
         // Build the owned key only now, on a genuine insert (never on a hit) (#4).
-        let key: ShapeKey = (text.to_owned(), primary, ot_weight, px_bits, tracking_bits);
+        let key: ShapeKey = (
+            text.to_owned(),
+            primary,
+            ot_weight,
+            px_bits,
+            tracking_bits,
+            opsz_bits,
+        );
         #[cfg(test)]
         self.owned_key_builds.set(self.owned_key_builds.get() + 1);
         let mut cache = self.shaped.borrow_mut();
@@ -1214,12 +1280,14 @@ impl FontStore {
         glyph: u16,
         px: f32,
         emb: Embolden,
+        opsz: Option<f32>,
     ) -> Option<Rc<GlyphImage>> {
         let key = GlyphKey {
             face: face_id,
             glyph,
             size_bits: px.to_bits(),
             emb,
+            opsz_bits: opsz.map(f32::to_bits).unwrap_or(0),
         };
         {
             let cache = self.glyphs.borrow();
@@ -1227,7 +1295,7 @@ impl FontStore {
                 return cached.clone();
             }
         }
-        let rendered = self.render_glyph(face_id, glyph, px, emb);
+        let rendered = self.render_glyph(face_id, glyph, px, emb, opsz);
         let mut cache = self.glyphs.borrow_mut();
         if cache.len() >= GLYPH_CACHE_CAP && !cache.contains_key(&key) {
             cache.clear();
@@ -1245,16 +1313,25 @@ impl FontStore {
         glyph: u16,
         px: f32,
         emb: Embolden,
+        opsz: Option<f32>,
     ) -> Option<Rc<GlyphImage>> {
         let bytes = self.face_bytes(face_id)?;
         let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
         let mut ctx = self.scale_ctx.borrow_mut();
-        // Instance the variable-font `wght` axis so the bold master's outline is
-        // scaled, matching how the shaper positioned it (#63). A no-op for a face
-        // with no `wght` axis or a non-variable emboldening.
+        // Instance the variable-font `wght` and `opsz` axes so the outline is
+        // scaled at the SAME masters the shaper positioned the advances at (#63 for
+        // wght, #77 for opsz). Both are no-ops for a face lacking the axis. A
+        // single `variations([...])` call carries whichever apply.
         let mut builder = ctx.builder(font).size(px).hint(false);
+        let mut vars: Vec<(&str, f32)> = Vec::with_capacity(2);
         if let Embolden::Variable(w) = emb {
-            builder = builder.variations([("wght", w as f32)]);
+            vars.push(("wght", w as f32));
+        }
+        if let Some(o) = opsz {
+            vars.push(("opsz", o));
+        }
+        if !vars.is_empty() {
+            builder = builder.variations(vars);
         }
         let mut scaler = builder.build();
         let image = Render::new(&[
@@ -1295,6 +1372,7 @@ fn shape_key_hash(
     ot_weight: u16,
     px_bits: u32,
     tracking_bits: u32,
+    opsz_bits: u32,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1303,6 +1381,7 @@ fn shape_key_hash(
     ot_weight.hash(&mut h);
     px_bits.hash(&mut h);
     tracking_bits.hash(&mut h);
+    opsz_bits.hash(&mut h);
     h.finish()
 }
 
@@ -1726,7 +1805,14 @@ impl SceneDrawer for RasterDrawer {
         // by `draw_text`; advances scale linearly, so widths stay consistent).
         // Tracking is in logical points here, matching the logical `font.size`.
         self.fonts
-            .shape(text, primary, ot_weight, font.size, font.letter_spacing)
+            .shape(
+                text,
+                primary,
+                ot_weight,
+                font.size,
+                font.letter_spacing,
+                font.optical_size,
+            )
             .width
     }
 
@@ -1763,7 +1849,14 @@ impl SceneDrawer for RasterDrawer {
                 run.text, run.font.letter_spacing,
             );
         }
-        let shaped = self.fonts.shape(run.text, primary, ot_weight, px, tracking);
+        let shaped = self.fonts.shape(
+            run.text,
+            primary,
+            ot_weight,
+            px,
+            tracking,
+            run.font.optical_size,
+        );
         let (ascent, descent) = self.fonts.v_metrics(primary, px);
         // Baseline that vertically centers the line within its box, matching the
         // previous path's `line_y` placement within `Metrics::line_height`.
@@ -1773,10 +1866,29 @@ impl SceneDrawer for RasterDrawer {
         let color = run.color;
         let (pw, ph) = (self.fb.width() as i32, self.fb.height() as i32);
 
+        // Diagnostic (#65): log the (face, emb, opsz) actually reaching glyph
+        // rasterization for this run — the live-vs-offscreen bold divergence is
+        // between the (correct) `Variable(700)` decision and the on-screen pixels,
+        // so this confirms whether the bold treatment survives to `glyph_image`.
+        // Inert unless `MURI_DEBUG_TEXT` is set.
+        if std::env::var_os("MURI_DEBUG_TEXT").is_some() {
+            if let Some(g0) = shaped.glyphs.first() {
+                eprintln!(
+                    "MURI_RASTER text={:?} glyphs={} first_face={:?} first_emb={:?} \
+                     first_opsz={:?} px={px}",
+                    run.text,
+                    shaped.glyphs.len(),
+                    g0.face,
+                    g0.emb,
+                    g0.opsz,
+                );
+            }
+        }
+
         for g in &shaped.glyphs {
             // Fetch (and cache) the glyph bitmap first, releasing the font-store
             // borrow before the disjoint `&mut self.fb` blit borrow.
-            let Some(image) = self.fonts.glyph_image(g.face, g.glyph, px, g.emb) else {
+            let Some(image) = self.fonts.glyph_image(g.face, g.glyph, px, g.emb, g.opsz) else {
                 continue;
             };
             let gx = (ox + g.x).round() as i32 + image.left;
@@ -2226,10 +2338,10 @@ mod tests {
         ot_weight: u16,
         px: f32,
     ) -> u64 {
-        let line = d.fonts.shape(text, primary, ot_weight, px, 0.0);
+        let line = d.fonts.shape(text, primary, ot_weight, px, 0.0, None);
         let mut sum = 0u64;
         for g in &line.glyphs {
-            if let Some(img) = d.fonts.glyph_image(g.face, g.glyph, px, g.emb) {
+            if let Some(img) = d.fonts.glyph_image(g.face, g.glyph, px, g.emb, g.opsz) {
                 if matches!(img.content, Content::Mask | Content::SubpixelMask) {
                     sum += img.data.iter().map(|&b| b as u64).sum::<u64>();
                 }
@@ -2377,6 +2489,36 @@ mod tests {
             matches!(emb, Embolden::Variable(_)),
             "a variable face with a heavy default weight must still instance bold (#65): got {emb:?}"
         );
+    }
+
+    /// #77: a face carrying an `opsz` axis clamps a requested optical size into the
+    /// axis's own range — the mechanism behind the "squished menu" fix. SFNS's axis
+    /// min is 17, so a 13pt menu resolves to 17 (the *Text* master), not the
+    /// default *Display* master. The test font has an `opsz` axis min=17/def=28/max=96.
+    #[test]
+    fn optical_size_clamps_into_the_faces_opsz_range() {
+        const VAR: &[u8] = include_bytes!("../../tests/fonts/variable-opsz-test.ttf");
+        let mut db = Database::new();
+        db.load_font_data(VAR.to_vec());
+        let d = RasterDrawer::from_parts(1.0, db, Some("Muri Var Test".to_string()));
+        let face = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        // Below the axis min -> clamped up to the min (the #77 "13 -> 17" case).
+        assert_eq!(d.fonts.face_opsz(face, 13.0), Some(17.0));
+        // Inside the range -> passed through unchanged.
+        assert_eq!(d.fonts.face_opsz(face, 50.0), Some(50.0));
+        // Above the axis max -> clamped down to the max.
+        assert_eq!(d.fonts.face_opsz(face, 200.0), Some(96.0));
+    }
+
+    /// #77: a face with no `opsz` axis yields `None` (nothing to instance), so the
+    /// optical-size feature is inert on plain faces — a `with_optical_size` caller
+    /// never perturbs a font that has no optical masters.
+    #[test]
+    fn face_without_opsz_axis_yields_no_optical_size() {
+        // DejaVu (headless default) is a static face with no variation axes.
+        let d = RasterDrawer::new_headless(1.0);
+        let face = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        assert_eq!(d.fonts.face_opsz(face, 13.0), None);
     }
 
     /// spec §7.1's font-fallback layer: when a primary face is pinned but has

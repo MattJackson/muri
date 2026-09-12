@@ -476,9 +476,11 @@ impl Theme {
             // System path in `platform::mac` recomputes the same value for the
             // live menu size (assign, not add) — no double application (#57).
             row_font: Font::system(MACOS_MENU_FONT_SIZE, Weight::Regular)
-                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE)),
+                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE))
+                .with_optical_size(MACOS_MENU_FONT_SIZE),
             header_font: Font::system(MACOS_MENU_FONT_SIZE, Weight::Bold)
-                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE)),
+                .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE))
+                .with_optical_size(MACOS_MENU_FONT_SIZE),
             ..base
         }
     }
@@ -1103,6 +1105,27 @@ mod tests {
             assert_eq!(gnome.row_font.letter_spacing, CANTARELL_TRACKING);
             assert_eq!(gnome.header_font.letter_spacing, CANTARELL_TRACKING);
             assert_eq!(gnome.row_font.letter_spacing, 0.0);
+        }
+    }
+
+    /// #77: the macOS preset opts into optical sizing at the menu point size (so
+    /// SF renders the *Text* master, not the condensed *Display* default), while
+    /// Windows / GNOME leave it `None` — the mechanism is general (Segoe UI
+    /// Variable has `opsz` too) but the policy is macOS-only for now.
+    #[test]
+    fn macos_preset_sets_optical_size_others_leave_it_default() {
+        for mac in [Theme::macos(false), Theme::macos(true)] {
+            assert_eq!(mac.row_font.optical_size, Some(MACOS_MENU_FONT_SIZE));
+            assert_eq!(mac.header_font.optical_size, Some(MACOS_MENU_FONT_SIZE));
+        }
+        for t in [
+            Theme::windows(false),
+            Theme::windows(true),
+            Theme::gnome(false),
+            Theme::gnome(true),
+        ] {
+            assert_eq!(t.row_font.optical_size, None);
+            assert_eq!(t.header_font.optical_size, None);
         }
     }
 

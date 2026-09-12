@@ -310,30 +310,23 @@ pub(super) fn make_panel(
         if let Some(layer) = effect.layer() {
             layer.setCornerRadius(corner_radius as f64);
             layer.setMasksToBounds(true);
-            // Dark Tahoe menu density (#72): the private `NSGlassView` a native
-            // `NSMenu` uses can't be replicated with public APIs, and glass
-            // `tintColor` is a content-adaptive tone-map, not a darkener (WWDC25
-            // "Meet Liquid Glass" — a near-black tint made it *lighter*). The only
-            // linearly predictable lever is a FLAT overlay: `.menu`+emphasized
-            // measures ~lum 69 over a gray-128 desktop, and a native `NSMenu`
-            // (Time Machine) glass measures **lum 51**, so a black `CALayer` at
-            // alpha `(69-51)/(69-0) ≈ 0.26`, composited normally on top of the
-            // vibrancy and under the raster, lands the menu at native lum 51.
-            // Measured on-device to also hold neutral (51,51,51, no backdrop tint)
-            // over a saturated warm wallpaper — i.e. it reads "blackish" like
-            // native rather than letting the desktop bleed through. Only for a DARK
-            // menu on a Liquid Glass (Tahoe) host, where the dark menu is routed to
-            // this vibrancy branch for density.
-            // DEVICE-VERIFY(0.12.12): native reference is lum 51 over gray-128; the
-            // base is backdrop-dependent, so re-solve alpha if base_lum (69) moves.
-            if super::system_is_dark() && glass_backdrop_available() {
-                let overlay = objc2_quartz_core::CALayer::new();
-                overlay.setFrame(bounds);
-                let black = objc2_core_graphics::CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
-                overlay.setBackgroundColor(Some(&black));
-                overlay.setOpacity(0.26);
-                layer.addSublayer(&overlay);
-            }
+            // Dark Tahoe menu density (#72): NO opaque overlay. An earlier flat
+            // black `CALayer` (alpha 0.26) was solved to hit native's lum 51 over a
+            // gray-128 desktop — but a device recording showed that measurement was
+            // a red herring: native `NSMenu` glass is genuinely TRANSLUCENT and
+            // tracks its backdrop (≈lum 51 over neutral gray, ≈4 over a dark window,
+            // colored bleed over colorful content), while the black overlay hit the
+            // number by occluding the blur entirely, making the menu OPAQUE — the
+            // one thing that doesn't read as native. The private `NSGlassView` a
+            // native menu uses reaches its density via a darker translucent MATERIAL
+            // (no public equivalent; `tintColor` is a content-adaptive tone-map, not
+            // a darkener). No public `NSVisualEffectMaterial` is dark enough while
+            // staying translucent (`Menu`≈69, `HUDWindow`≈94 over gray-128), so we
+            // keep the real `.menu` + emphasized translucency: it reads lighter than
+            // native over a flat/neutral wallpaper but stays see-through and darkens
+            // with real content behind it exactly as native does. Closing the
+            // remaining darkness gap needs the private menu material (separate
+            // investigation), never an opaque layer.
         }
         effect.addSubview(&view);
         panel.setContentView(Some(&effect));
