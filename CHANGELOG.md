@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.11] - 2026-09-12
+
+### Fixed
+
+- **No more visible placeholder-menu flash on tray start (#76).** The 0.12.1 live
+  native-menu metrics read popped a real `NSMenu` and tried to hide it
+  (`alphaValue = 0` + off-screen) before it painted; on Tahoe the hide raced the
+  first paint and flashed a "Row One/Row Two/Row Three" menu near the top-left on
+  every process start. The `popUp` path is removed entirely — the metrics now come
+  only from their accurate no-popup sources (version-gated corner radius 12pt
+  Tahoe / 6pt pre-Tahoe, preset leading inset 14pt, and a `NSMenu.size` row pitch
+  that is never displayed), so nothing is ever shown to measure. This also removes
+  the last of the async use-after-free hazard behind #75 and drops the `dispatch2`
+  dependency.
+
 ## [0.12.10] - 2026-09-11
 
 ### Diagnostic
