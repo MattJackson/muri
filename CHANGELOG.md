@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-09-11
+
+### Fixed
+
+- **Dark Tahoe menu now uses the vibrancy material, not glass, for native density
+  (#72).** On-device measurement showed `NSGlassEffectView.tintColor` is only a
+  color wash, not a darkness lever — driving it near-black actually *lightened* the
+  glass (lum 89), and the public `NSGlassEffectView` can't reach the private
+  `NSGlassView`'s dark-menu density. So a **dark** live menu now falls back to
+  `NSVisualEffectView(Material::Menu)` + `setEmphasized(true)`, which measures
+  closer to a native dark `NSMenu`; a **light** menu keeps the closer-matching
+  glass. The dead tint lever is removed. (Live path only; no goldens; still
+  `DEVICE-VERIFY` — target ~lum 56 over gray-128.)
+
 ## [0.12.6] - 2026-09-11
 
 ### Fixed

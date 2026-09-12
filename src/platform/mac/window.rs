@@ -272,46 +272,26 @@ pub(super) fn make_panel(
     let view = MuriView::new(mtm, bounds, kind);
     view.setWantsLayer(true);
 
-    // Backdrop: read the menu material from the OS itself. On a Liquid Glass
-    // system a native `NSMenu` is drawn on `NSGlassView` glass, not the classic
-    // vibrancy material (#68), so when `NSGlassEffectView` exists use glass and
-    // host the raster as its content; on every earlier system fall back to the
-    // vibrancy `Material::Menu`. Detecting the material by class-presence (not a
-    // hardcoded OS version) means muri renders whatever the running OS actually
-    // uses for menus, and whatever is normal for the user's UI otherwise.
-    if glass_backdrop_available() {
+    // Backdrop: on a Liquid Glass system (Tahoe) a native `NSMenu` is drawn on the
+    // private `NSGlassView` (#68). The public `NSGlassEffectView` is the closest
+    // API, and it matches for a LIGHT menu — but on a DARK menu it reads far too
+    // light (measured lum ~80-89 vs native ~56 over gray-128) and cannot be driven
+    // to the private view's density: `tintColor` is only a subtle color wash (a
+    // near-black tint even *lightened* it), not an opacity/darkness lever (#72). So
+    // a dark menu falls back to the classic `NSVisualEffectView(Material::Menu)`
+    // with `setEmphasized(true)`, which measures closer to native dark density; a
+    // light menu keeps the closer-matching glass. Detecting glass by class-presence
+    // (not a hardcoded OS version) still tracks whatever the OS provides.
+    if glass_backdrop_available() && !super::system_is_dark() {
+        // Light Liquid-Glass menu: the public `NSGlassEffectView` matches the
+        // native light `NSMenu` closely (the dark case, which it reads far too
+        // light for, is routed to the vibrancy branch above — #72). Glass rounds
+        // itself natively, so no layer mask is needed; the hosted raster paints a
+        // fully transparent background on the live System path (#64), so the glass
+        // is the surface.
         let glass: Retained<NSGlassEffectView> =
             NSGlassEffectView::initWithFrame(mtm.alloc(), bounds);
-        // Glass rounds itself natively — no layer mask needed.
         glass.setCornerRadius(corner_radius as f64);
-        // The public `NSGlassEffectView` reads lighter/clearer than a native
-        // `NSMenu`'s private `NSGlassView`, so a dark menu's glass looks less
-        // dense than the OS menu (#72). Nudge it toward the menu material with a
-        // tint — the glass analogue of the vibrancy path's `setEmphasized(true)`.
-        // Appearance-aware: a DARK menu gets a NEUTRAL dark tint toward the
-        // measured native dark-menu density; a LIGHT menu keeps the default glass
-        // (its density was not reported as off; the light-mode text crispness is
-        // handled by the opaque-text flatten, #73). The hosted raster paints a
-        // fully transparent background on the live System path (#64), so the
-        // glass — not a bulk fill — is the surface.
-        //
-        // `NSGlassEffectView.tintColor` is a *subtle wash*, not an alpha-over
-        // fill: an on-device re-measure over gray-128 (median of ~25k interior
-        // pixels) showed the 0.12.4 tint (RGB 40,40,41 @ 0.55) still left the glass
-        // at lum ~80 vs native's lum ~56 — ~24 lum too light — because a light,
-        // half-alpha tint barely darkens the material. So drive it much harder: a
-        // near-black tint at high alpha to actually reach native density.
-        // DEVICE-VERIFY(0.12.6): target the glass to read ~lum 56 over gray-128 to
-        // match native `NSMenu`, without going flat/opaque.
-        if super::system_is_dark() {
-            let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
-                14.0 / 255.0,
-                14.0 / 255.0,
-                15.0 / 255.0,
-                0.9,
-            );
-            glass.setTintColor(Some(&tint));
-        }
         glass.setContentView(Some(&view));
         panel.setContentView(Some(&glass));
     } else {
