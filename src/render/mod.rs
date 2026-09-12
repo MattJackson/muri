@@ -819,15 +819,27 @@ impl FontStore {
         if let Some(&cached) = self.embolden_cache.borrow().get(&key) {
             return cached;
         }
-        let actual_weight = self.db.face(id).map_or(ot_weight, |f| f.weight.0);
-        let emb = if actual_weight >= Self::LIGHT_WEIGHT {
-            // A genuinely bold-ish face resolved (a discrete bold, or the
-            // variable master's default is already heavy) — render as-is.
-            Embolden::None
-        } else {
-            match self.face_wght_axis_max(id) {
-                Some(max) => Embolden::Variable(Self::variable_bold_wght(ot_weight, max as u16)),
-                None => Embolden::Synthetic,
+        let emb = match self.face_wght_axis_max(id) {
+            // A **variable** face instances its `wght` axis to the requested bold
+            // weight regardless of its registered *default-instance* weight — the
+            // registered weight is only the default (the live macOS SFNS System
+            // face defaults to Regular but must bold *up* the axis), so a variable
+            // face must never be treated as "already bold" and skip instancing.
+            // This is the #65 live-System bold fix: when `fontdb` registers the
+            // resolved variable face at a mid/heavy default weight (>= LIGHT_WEIGHT),
+            // the old `actual_weight >= LIGHT_WEIGHT -> None` short-circuit dropped
+            // the instance entirely, so a bold row rendered identical to regular.
+            Some(max) => Embolden::Variable(Self::variable_bold_wght(ot_weight, max as u16)),
+            // A **static** face has no axis: only faux-bold when `fontdb` silently
+            // *downgraded* a heavy request to a light face; a genuinely heavy static
+            // face (a discrete bold) is already bold and needs nothing.
+            None => {
+                let actual_weight = self.db.face(id).map_or(ot_weight, |f| f.weight.0);
+                if actual_weight >= Self::LIGHT_WEIGHT {
+                    Embolden::None
+                } else {
+                    Embolden::Synthetic
+                }
             }
         };
         let mut cache = self.embolden_cache.borrow_mut();
@@ -2285,6 +2297,30 @@ mod tests {
             matches!(emb, Embolden::Variable(_)),
             "a variable face with a wght axis must instance the axis for bold, \
              not downgrade or synthesize (#65): got {emb:?}"
+        );
+    }
+
+    /// #65 regression (the live-System bold bug): a variable face registered at a
+    /// **heavy default weight** (OS/2 `usWeightClass` >= `LIGHT_WEIGHT`) must STILL
+    /// instance its `wght` axis for a bold request — the registered weight is only
+    /// the default instance, not "already bold". This is the exact shape that made
+    /// the live macOS SFNS System menu render bold rows identical to regular: the
+    /// old `actual_weight >= LIGHT_WEIGHT -> Embolden::None` short-circuit dropped
+    /// the instance whenever `fontdb` registered the resolved variable face at a
+    /// mid/heavy default, so `face_embolden(700)` returned `None` (ink ratio 1.00).
+    #[test]
+    fn variable_face_with_heavy_default_still_instances_bold() {
+        const VAR: &[u8] = include_bytes!("../../tests/fonts/variable-wght-heavy-test.ttf");
+        let mut db = Database::new();
+        db.load_font_data(VAR.to_vec());
+        let d = RasterDrawer::from_parts(1.0, db, Some("Muri Var Heavy".to_string()));
+        let bold = d.fonts.resolve_face(&FontFamily::System, 700).unwrap();
+        // Registered at OS/2 weight 600 (>= LIGHT_WEIGHT) yet has a wght axis, so a
+        // bold request must instance the axis rather than be treated as already-bold.
+        let emb = d.fonts.face_embolden(bold, 700);
+        assert!(
+            matches!(emb, Embolden::Variable(_)),
+            "a variable face with a heavy default weight must still instance bold (#65): got {emb:?}"
         );
     }
 

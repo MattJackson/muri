@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.9] - 2026-09-11
+
+### Fixed
+
+- **Live System menu bold no longer downgrades to regular (#65).** On the live
+  macOS System path, a variable menu font (SFNS) whose resolved face `fontdb`
+  registered at a mid/heavy default weight (>= the light-weight floor) had its
+  wght-axis instance dropped: `face_embolden` treated the registered *default*
+  instance as "already bold" and returned `Embolden::None`, so a `Weight::Bold`
+  row rendered identical to regular (measured ink ratio 1.00 vs the ~1.2–1.4×
+  expected). `face_embolden` now checks the `wght` axis **first** — a variable
+  face always instances up the axis for a bold request, regardless of its
+  registered default weight; only genuinely static faces use the
+  downgrade-detection path. Regression-tested with a heavy-default variable
+  fixture.
+
 ## [0.12.8] - 2026-09-11
 
 ### Fixed
