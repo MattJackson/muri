@@ -315,19 +315,23 @@ pub(super) fn make_panel(
             // `tintColor` is a content-adaptive tone-map, not a darkener (WWDC25
             // "Meet Liquid Glass" — a near-black tint made it *lighter*). The only
             // linearly predictable lever is a FLAT overlay: `.menu`+emphasized
-            // measures ~lum 69 over a gray-128 desktop vs native's ~56, so a black
-            // `CALayer` at alpha `(69-56)/(69-0) ≈ 0.19`, composited normally on top
-            // of the vibrancy and under the raster, lands the menu at the native
-            // ~lum 56. Only for a DARK menu on a Liquid Glass (Tahoe) host, where
-            // the dark menu is routed to this vibrancy branch for density.
-            // DEVICE-VERIFY(0.12.8): re-measure ~lum 56 over gray-128; the base is
-            // backdrop-dependent, so re-solve alpha if the base_lum reference moves.
+            // measures ~lum 69 over a gray-128 desktop, and a native `NSMenu`
+            // (Time Machine) glass measures **lum 51**, so a black `CALayer` at
+            // alpha `(69-51)/(69-0) ≈ 0.26`, composited normally on top of the
+            // vibrancy and under the raster, lands the menu at native lum 51.
+            // Measured on-device to also hold neutral (51,51,51, no backdrop tint)
+            // over a saturated warm wallpaper — i.e. it reads "blackish" like
+            // native rather than letting the desktop bleed through. Only for a DARK
+            // menu on a Liquid Glass (Tahoe) host, where the dark menu is routed to
+            // this vibrancy branch for density.
+            // DEVICE-VERIFY(0.12.12): native reference is lum 51 over gray-128; the
+            // base is backdrop-dependent, so re-solve alpha if base_lum (69) moves.
             if super::system_is_dark() && glass_backdrop_available() {
                 let overlay = objc2_quartz_core::CALayer::new();
                 overlay.setFrame(bounds);
                 let black = objc2_core_graphics::CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
                 overlay.setBackgroundColor(Some(&black));
-                overlay.setOpacity(0.19);
+                overlay.setOpacity(0.26);
                 layer.addSublayer(&overlay);
             }
         }

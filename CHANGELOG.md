@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.12] - 2026-09-12
+
+### Fixed
+
+- **Dark glass menu density re-calibrated to the correct native target (#72).** An
+  on-device re-measure of a real `NSMenu` (Time Machine) glass gave **lum 51**, not
+  the 56 used before, so the flat-overlay alpha is bumped from 0.19 to
+  `(69-51)/69 ≈ 0.26`. Verified on live over two backdrops: the menu now lands at
+  lum 51 (matching native) and stays neutral (51,51,51, "blackish") even over a
+  saturated warm wallpaper instead of letting the desktop bleed through. Live path
+  only; no goldens.
+
 ## [0.12.11] - 2026-09-12
 
 ### Fixed
