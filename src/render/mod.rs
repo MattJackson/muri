@@ -877,6 +877,46 @@ impl FontStore {
             .map(|axis| axis.max_value())
     }
 
+    /// Diagnostic (#65): a one-line description of the resolved face — its `fontdb`
+    /// families/index/registered weight and the parsed `wght` axis min/default/max
+    /// plus named-instance count. The live full-system DB resolves `System` to a
+    /// face whose axis *default* may already be heavy, in which case a
+    /// [`Embolden::Variable`] instance to 700 lightens rather than thickens it; this
+    /// surfaces exactly that. Only ever called under `MURI_DEBUG_TEXT`.
+    fn face_debug(&self, id: FaceId) -> String {
+        let (families, db_weight, db_index) = self
+            .db
+            .face(id)
+            .map(|f| {
+                let fams = f
+                    .families
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                (fams, f.weight.0, f.index)
+            })
+            .unwrap_or_else(|| ("<none>".into(), 0, 0));
+        let axis = self
+            .face_bytes(id)
+            .and_then(|b| {
+                let font = FontRef::from_index(&b.data, b.index as usize)?;
+                let wght = font.variations().find_by_tag(WGHT_AXIS_TAG);
+                let n_instances = font.instances().count();
+                Some(match wght {
+                    Some(a) => format!(
+                        "wght[min={} def={} max={}] named_instances={n_instances}",
+                        a.min_value(),
+                        a.default_value(),
+                        a.max_value(),
+                    ),
+                    None => format!("wght[none] named_instances={n_instances}"),
+                })
+            })
+            .unwrap_or_else(|| "wght[unparsed]".into());
+        format!("families={families:?} db_index={db_index} db_weight={db_weight} {axis}")
+    }
+
     /// Record a weight downgrade (#56): `ot_weight` was heavy
     /// (`>= HEAVY_WEIGHT`) but `resolved`'s actual registered weight in `db`
     /// is light (`< LIGHT_WEIGHT`) — `fontdb`'s CSS matching returned the
@@ -1714,9 +1754,12 @@ impl SceneDrawer for RasterDrawer {
         // live path. Inert unless `MURI_DEBUG_TEXT` is set; removed once diagnosed.
         if std::env::var_os("MURI_DEBUG_TEXT").is_some() {
             let emb = primary.map(|f| self.fonts.face_embolden(f, ot_weight));
+            let face_dbg = primary
+                .map(|f| self.fonts.face_debug(f))
+                .unwrap_or_default();
             eprintln!(
                 "MURI_TEXT text={:?} weight={ot_weight} letter_spacing={} tracking={tracking} \
-                 face={primary:?} embolden={emb:?} px={px}",
+                 face={primary:?} embolden={emb:?} px={px} [{face_dbg}]",
                 run.text, run.font.letter_spacing,
             );
         }

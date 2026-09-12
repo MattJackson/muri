@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.13] - 2026-09-12
+
+### Fixed
+
+- **macOS SF menu tracking is now metrics-only (0), matching native NSMenu
+  (#66).** A live-path capture (via the `MURI_DEBUG_TEXT` diagnostic) confirmed the
+  live System theme already renders `letter_spacing = 0`, and a side-by-side against
+  a real `NSMenu` on Tahoe verified native adds **no** extra tracking beyond the SF
+  face's own advances. The earlier conservative `-0.012` tightening (baked into the
+  forced `Theme::macos` preset and its offscreen goldens) over-corrected — adjacent
+  letters touched — and disagreed with the live path. `MACOS_SF_TRACKING_FRACTION`
+  is now `0.0` for **every** path (preset, goldens, live), so all three agree with
+  native. macOS goldens regenerated (glyphs slightly looser); no public API change.
+
+### Diagnostics
+
+- **`MURI_DEBUG_TEXT` now also dumps the resolved face's identity (#65).** The
+  per-run trace prints the `fontdb` families / index / registered weight and the
+  parsed `wght` axis min/default/max plus named-instance count for the live-resolved
+  face. This isolates the live-vs-offscreen bold divergence: whether the
+  full-system-DB face's axis *default* is already heavy (so a `Variable(700)`
+  instance lightens rather than thickens) or the outline instancing is a no-op.
+  Inert unless `MURI_DEBUG_TEXT` is set.
+
 ## [0.12.12] - 2026-09-12
 
 ### Fixed

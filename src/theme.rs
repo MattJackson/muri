@@ -357,17 +357,16 @@ const MACOS_COLUMN_GAP: f32 = 8.0;
 pub(crate) const MACOS_CORNER_RADIUS: f32 = 6.0;
 
 /// Tracking (letter-spacing) as a fraction of the point size applied to macOS
-/// San Francisco UI text, mirroring the small size-dependent tracking CoreText
-/// adds to SF that a bare shaper does not (#42/#57): muri's menu text otherwise
-/// reads slightly *looser* than a native `NSMenu`, so this is a slight tightening
-/// (negative). This is the single source of truth: the forced [`Theme::macos`]
-/// preset bakes it in (so a forced macOS theme carries tracking on **any** host),
-/// and the live-system read path in `platform::mac` recomputes the same value for
-/// the live menu size via [`macos_sf_tracking`] (both must stay identical).
+/// San Francisco UI text tracking, in fraction-of-em per point (#42/#57/#66).
 ///
-/// DEVICE-VERIFY(0.10.8): the exact factor needs a side-by-side capture against a
-/// real `NSMenu`; a single conservative constant over the 11–14pt menu range.
-pub(crate) const MACOS_SF_TRACKING_FRACTION: f32 = -0.012;
+/// Device-verified against a live `NSMenu` on Tahoe (#66): a native menu adds
+/// **no** extra tracking beyond the SF face's own advances — shaped metrics
+/// already match native inter-letter spacing. An earlier conservative negative
+/// value (`-0.012`) overcorrected on the live path (adjacent letters touched),
+/// so this is the single source of truth for **all** paths at `0.0`: the forced
+/// [`Theme::macos`] preset, its offscreen goldens, and the live-system read path
+/// in `platform::mac` (via [`macos_sf_tracking`]) now all agree with native.
+pub(crate) const MACOS_SF_TRACKING_FRACTION: f32 = 0.0;
 
 /// Extra tracking in logical points for macOS SF UI text at `size` points.
 /// See [`MACOS_SF_TRACKING_FRACTION`]. At the 13pt native menu size this is
@@ -1070,16 +1069,16 @@ mod tests {
         assert_eq!(mac.header_font, dark.header_font);
     }
 
-    /// #57: forced-theme tracking travels with the theme. A FORCED macOS preset
-    /// carries non-zero SF tracking on any host (not only when the live system
-    /// font is read), while forced Windows / GNOME presets carry their documented
-    /// zero tracking (their faces aren't SF).
+    /// #57/#66: forced-theme tracking travels with the theme — the forced macOS
+    /// preset carries the single-source-of-truth [`macos_sf_tracking`] value on any
+    /// host (not only when the live system font is read). Device-verified (#66),
+    /// that value is now metrics-only `0`, matching native NSMenu and every other
+    /// OS preset; the invariant is that the preset equals the shared function, not
+    /// that it is non-zero.
     #[test]
     fn forced_theme_tracking_travels_with_the_preset() {
         let mac = Theme::macos(false);
-        // macOS SF tracking is a slight tightening (negative), baked into both fonts.
-        assert!(mac.row_font.letter_spacing < 0.0);
-        assert!(mac.header_font.letter_spacing < 0.0);
+        // macOS SF tracking is the shared value, baked into both fonts (now 0, #66).
         assert_eq!(
             mac.row_font.letter_spacing,
             macos_sf_tracking(MACOS_MENU_FONT_SIZE)
@@ -1089,7 +1088,10 @@ mod tests {
             macos_sf_tracking(MACOS_MENU_FONT_SIZE)
         );
         // Same for the dark variant — forced on any host.
-        assert!(Theme::macos(true).row_font.letter_spacing < 0.0);
+        assert_eq!(
+            Theme::macos(true).row_font.letter_spacing,
+            macos_sf_tracking(MACOS_MENU_FONT_SIZE)
+        );
 
         // Windows / GNOME use metrics-only spacing (Segoe UI / Cantarell ≈ 0).
         for win in [Theme::windows(false), Theme::windows(true)] {
@@ -1122,11 +1124,11 @@ mod tests {
         let once = font.letter_spacing;
         font.letter_spacing = macos_sf_tracking(font.size);
         assert_eq!(font.letter_spacing, once);
-        // The fraction sign encodes a tightening; guard the direction + magnitude.
-        assert_eq!(MACOS_SF_TRACKING_FRACTION, -0.012);
-        assert!((macos_sf_tracking(13.0) - (-0.012 * 13.0)).abs() < f32::EPSILON);
-        // Different live size => different tracking (recomputed, not fixed).
-        assert_ne!(macos_sf_tracking(13.0), macos_sf_tracking(15.0));
+        // Device-verified (#66): native NSMenu adds no tracking beyond the font's
+        // own metrics, so the fraction is 0 and every size resolves to 0.
+        assert_eq!(MACOS_SF_TRACKING_FRACTION, 0.0);
+        assert_eq!(macos_sf_tracking(13.0), 0.0);
+        assert_eq!(macos_sf_tracking(13.0), macos_sf_tracking(15.0));
     }
 
     #[test]

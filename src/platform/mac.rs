@@ -841,18 +841,14 @@ impl PopupSession<'_> {
             theme.corner_radius = metrics.corner_radius;
             theme.padding.left = metrics.leading_inset;
             theme.padding.right = metrics.leading_inset;
-            // Live SF tracking (#66): the earlier negative tracking (baked into
-            // the forced preset for its 13pt base) overcorrected on the LIVE
-            // path — with the real SF face shaped at its own advances, the extra
-            // tightening made adjacent letters touch. A native `NSMenu` adds no
-            // extra tracking beyond the font's own metrics, so on the live System
-            // path we OVERWRITE (assign, not `+=`) with metrics-only (0) rather
-            // than the preset's baked value. The forced `Theme::macos` preset (and
-            // its offscreen goldens) keep their frozen tracking, matching how the
-            // live row-pitch and corner-radius reads leave the preset untouched.
-            // DEVICE-VERIFY(0.12.0): confirm native SF menu tracking is ~0.
-            theme.row_font.letter_spacing = 0.0;
-            theme.header_font.letter_spacing = 0.0;
+            // Live SF tracking (#66): device-verified against a live NSMenu on
+            // Tahoe — native menu text adds no extra tracking beyond the SF face's
+            // own advances. `MACOS_SF_TRACKING_FRACTION` is now 0 for every path
+            // (preset, goldens, live), so this assign is metrics-only and agrees
+            // with the forced preset. Kept explicit to pin intent on the live path.
+            theme.row_font.letter_spacing = crate::theme::macos_sf_tracking(theme.row_font.size);
+            theme.header_font.letter_spacing =
+                crate::theme::macos_sf_tracking(theme.header_font.size);
             if increase_contrast_enabled() {
                 // OS "Increase Contrast" accessibility setting (#74): a native
                 // `NSMenu` then renders opaque with max-contrast text and stronger
