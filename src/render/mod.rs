@@ -1708,6 +1708,18 @@ impl SceneDrawer for RasterDrawer {
         // Tracking in device px, matching the device `px` size (measure uses the
         // logical equivalent, so the two stay proportional).
         let tracking = run.font.letter_spacing * scale;
+        // Diagnostic (0.12.10, #65/#66): the live on-screen popup reportedly
+        // renders bold/tracking differently than the offscreen renderer, which no
+        // static trace explains — so print the exact per-run inputs on the real
+        // live path. Inert unless `MURI_DEBUG_TEXT` is set; removed once diagnosed.
+        if std::env::var_os("MURI_DEBUG_TEXT").is_some() {
+            let emb = primary.map(|f| self.fonts.face_embolden(f, ot_weight));
+            eprintln!(
+                "MURI_TEXT text={:?} weight={ot_weight} letter_spacing={} tracking={tracking} \
+                 face={primary:?} embolden={emb:?} px={px}",
+                run.text, run.font.letter_spacing,
+            );
+        }
         let shaped = self.fonts.shape(run.text, primary, ot_weight, px, tracking);
         let (ascent, descent) = self.fonts.v_metrics(primary, px);
         // Baseline that vertically centers the line within its box, matching the

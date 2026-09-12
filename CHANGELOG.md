@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.10] - 2026-09-11
+
+### Diagnostic
+
+- **Env-gated per-run text trace to diagnose the live-vs-offscreen bold/tracking
+  divergence (#65/#66).** The live on-screen popup reportedly renders bold and SF
+  tracking differently than the offscreen `render_menu_to_rgba` path, which no
+  static trace explains. `draw_text` now prints each run's text, requested weight,
+  letter-spacing, resolved face, and embolden decision when `MURI_DEBUG_TEXT` is
+  set (inert otherwise) — to capture ground truth on the real live tray. Will be
+  removed once the divergence is understood.
+
 ## [0.12.9] - 2026-09-11
 
 ### Fixed
