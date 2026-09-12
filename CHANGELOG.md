@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.8] - 2026-09-11
+
+### Fixed
+
+- **Dark menu density now matches native via a measured flat overlay (#72).**
+  Research (WWDC25 "Meet Liquid Glass") confirmed a native `NSMenu` uses the
+  *private* `NSGlassView`, which has no public equivalent, and that
+  `NSGlassEffectView.tintColor` is a content-adaptive tone-map — not a darkener
+  (a near-black tint made it *lighter*). So the dark menu keeps the
+  `NSVisualEffectView(Material::Menu)` + `emphasized` base and adds a **flat black
+  `CALayer` overlay** (the only linearly predictable darkness lever), composited
+  normally on top of the vibrancy and under the raster. The overlay alpha is
+  solved from measurement, not guessed: base `.menu`+emphasized reads ~lum 69 over
+  a gray-128 desktop vs native's ~56, so alpha `= (69-56)/(69-0) ≈ 0.19` lands the
+  menu at native density. Only for a dark menu on a Liquid Glass (Tahoe) host.
+  (Live path only; no goldens; `DEVICE-VERIFY` — target ~lum 56 over gray-128.)
+
 ## [0.12.7] - 2026-09-11
 
 ### Fixed

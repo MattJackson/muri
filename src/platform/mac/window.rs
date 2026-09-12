@@ -310,6 +310,26 @@ pub(super) fn make_panel(
         if let Some(layer) = effect.layer() {
             layer.setCornerRadius(corner_radius as f64);
             layer.setMasksToBounds(true);
+            // Dark Tahoe menu density (#72): the private `NSGlassView` a native
+            // `NSMenu` uses can't be replicated with public APIs, and glass
+            // `tintColor` is a content-adaptive tone-map, not a darkener (WWDC25
+            // "Meet Liquid Glass" — a near-black tint made it *lighter*). The only
+            // linearly predictable lever is a FLAT overlay: `.menu`+emphasized
+            // measures ~lum 69 over a gray-128 desktop vs native's ~56, so a black
+            // `CALayer` at alpha `(69-56)/(69-0) ≈ 0.19`, composited normally on top
+            // of the vibrancy and under the raster, lands the menu at the native
+            // ~lum 56. Only for a DARK menu on a Liquid Glass (Tahoe) host, where
+            // the dark menu is routed to this vibrancy branch for density.
+            // DEVICE-VERIFY(0.12.8): re-measure ~lum 56 over gray-128; the base is
+            // backdrop-dependent, so re-solve alpha if the base_lum reference moves.
+            if super::system_is_dark() && glass_backdrop_available() {
+                let overlay = objc2_quartz_core::CALayer::new();
+                overlay.setFrame(bounds);
+                let black = objc2_core_graphics::CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+                overlay.setBackgroundColor(Some(&black));
+                overlay.setOpacity(0.19);
+                layer.addSublayer(&overlay);
+            }
         }
         effect.addSubview(&view);
         panel.setContentView(Some(&effect));
