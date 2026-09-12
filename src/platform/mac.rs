@@ -2221,7 +2221,13 @@ fn measure_native_menu_metrics(mtm: MainThreadMarker) -> NativeMenuMetrics {
         item.setTitle(&NSString::from_str(title));
         menu.addItem(&item);
     }
-    let menu_ptr = Retained::as_ptr(&menu) as usize;
+    // Transfer an OWNING +1 retain of the menu into the async block. The block
+    // can run AFTER `popUp` has already returned and freed our local `menu`, so
+    // messaging a *raw* pointer to the freed (and address-reused) object was a
+    // use-after-free crash — `cancelTracking` landed on an unrelated
+    // `NSISUnrestrictedVariable` on the main queue (#75). The block reclaims this
+    // retain (keeping the menu alive while it runs) and releases it on drop.
+    let menu_ptr = Retained::into_raw(menu.clone()) as usize;
 
     dispatch2::DispatchQueue::main().exec_async(move || read_tracking_menu_metrics(menu_ptr));
 
@@ -2290,9 +2296,13 @@ fn read_tracking_menu_metrics(menu_ptr: usize) {
             }
         }
     }
-    // Unconditionally end tracking so `popUp` returns.
-    let menu = unsafe { &*(menu_ptr as *const objc2_app_kit::NSMenu) };
-    menu.cancelTracking();
+    // Reclaim ownership of the retain transferred in (#75): the menu is a live,
+    // valid object here — never a dangling/reused address — and is released when
+    // this `Retained` drops at the end of the block. Unconditionally end tracking
+    // so `popUp` returns.
+    if let Some(menu) = unsafe { Retained::from_raw(menu_ptr as *mut objc2_app_kit::NSMenu) } {
+        menu.cancelTracking();
+    }
 }
 
 /// The Objective-C `-className` of `obj` as a `String`.

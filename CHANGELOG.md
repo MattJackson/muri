@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-09-11
+
+### Fixed
+
+- **CRITICAL: fixed a use-after-free crash in the 0.12.1 invisible metrics-read
+  (#75).** The one-shot native-menu chrome read scheduled a main-queue block that
+  captured the throwaway `NSMenu` as a raw pointer, then called `cancelTracking`
+  on it. When that block ran *after* `popUp` had already returned and freed the
+  menu, the message landed on the freed (and address-reused) object — crashing the
+  host tray app on menu open with `-[NSISUnrestrictedVariable cancelTracking]:
+  unrecognized selector`. The block now holds an **owning retain** of the menu for
+  its whole lifetime (transferred via `Retained::into_raw`/`from_raw`), so the
+  object is always live when messaged. Affected 0.12.1–0.12.4; upgrade is
+  strongly recommended.
+
 ## [0.12.4] - 2026-09-11
 
 ### Fixed
