@@ -289,22 +289,26 @@ pub(super) fn make_panel(
         // dense than the OS menu (#72). Nudge it toward the menu material with a
         // tint — the glass analogue of the vibrancy path's `setEmphasized(true)`.
         // Appearance-aware: a DARK menu gets a NEUTRAL dark tint toward the
-        // measured native dark-menu color (controlled capture over a neutral
-        // desktop on Tahoe: native ~sRGB 44,44,45 / lum 44, vs muri's untinted
-        // glass ~lum 52 — ~8 lum too light, and *neutral*, not blue as an earlier
-        // busy-backdrop reading suggested). A LIGHT menu keeps the default glass
+        // measured native dark-menu density; a LIGHT menu keeps the default glass
         // (its density was not reported as off; the light-mode text crispness is
         // handled by the opaque-text flatten, #73). The hosted raster paints a
         // fully transparent background on the live System path (#64), so the
         // glass — not a bulk fill — is the surface.
-        // DEVICE-VERIFY(0.12.4): tune the tint alpha so the glass reads ~lum 44
-        // (neutral) to match native, without going opaque.
+        //
+        // `NSGlassEffectView.tintColor` is a *subtle wash*, not an alpha-over
+        // fill: an on-device re-measure over gray-128 (median of ~25k interior
+        // pixels) showed the 0.12.4 tint (RGB 40,40,41 @ 0.55) still left the glass
+        // at lum ~80 vs native's lum ~56 — ~24 lum too light — because a light,
+        // half-alpha tint barely darkens the material. So drive it much harder: a
+        // near-black tint at high alpha to actually reach native density.
+        // DEVICE-VERIFY(0.12.6): target the glass to read ~lum 56 over gray-128 to
+        // match native `NSMenu`, without going flat/opaque.
         if super::system_is_dark() {
             let tint = NSColor::colorWithSRGBRed_green_blue_alpha(
-                40.0 / 255.0,
-                40.0 / 255.0,
-                41.0 / 255.0,
-                0.55,
+                14.0 / 255.0,
+                14.0 / 255.0,
+                15.0 / 255.0,
+                0.9,
             );
             glass.setTintColor(Some(&tint));
         }

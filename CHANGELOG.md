@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-09-11
+
+### Fixed
+
+- **Dark glass menu density much closer to native (#72 follow-up).** An on-device
+  re-measure over a gray-128 desktop (median of ~25k interior pixels) showed the
+  0.12.4 tint (RGB 40,40,41 @ 0.55) still left the glass at lum ~80 vs native's
+  ~56 — `NSGlassEffectView.tintColor` is a subtle wash, so a light half-alpha tint
+  barely darkens it. The dark-menu tint is now driven much harder (near-black
+  RGB 14,14,15 @ 0.9) to actually reach native `NSMenu` density. (Live path only;
+  no goldens; tint still `DEVICE-VERIFY` — target ~lum 56 over gray-128.)
+
 ## [0.12.5] - 2026-09-11
 
 ### Fixed
