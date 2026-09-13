@@ -313,41 +313,25 @@ pub(super) fn make_panel(
         glass.setContentView(Some(&view));
         panel.setContentView(Some(&glass));
     } else {
-        // Vibrancy backdrop: the OS composites the real behind-window menu blur
-        // here; the raster layer sits above it. Rounded via a corner-radius mask
-        // so the blur takes muri's panel shape, not a square.
-        let effect: Retained<NSVisualEffectView> =
-            NSVisualEffectView::initWithFrame(mtm.alloc(), bounds);
-        effect.setMaterial(NSVisualEffectMaterial::Menu);
-        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        effect.setState(NSVisualEffectState::Active);
-        // Emphasized darkens/saturates the pre-Liquid-Glass `Menu` material
-        // toward a native `NSMenu`'s density (#68).
-        effect.setEmphasized(true);
-        effect.setWantsLayer(true);
-        if let Some(layer) = effect.layer() {
+        // DARK menu (and any pre-Tahoe host): NO OS material backdrop. The public
+        // materials (`Material::Menu`, `NSGlassEffectView`) are content-adaptive
+        // and lighten the backdrop to a neutral grey floor, so a native dark
+        // `NSMenu`'s dark/tinted/translucent look is unreachable through them — the
+        // menu reads as a flat opaque slab (#79). Instead the raster view is hosted
+        // DIRECTLY on the transparent panel (`setOpaque:false` + `clearColor`
+        // above), and muri paints its own SEMI-TRANSPARENT dark background
+        // (`mac.rs` theme()), which composites straight over the desktop — dark
+        // over dark, lifting over light, tinted by the content behind it — exactly
+        // like native. The view's layer is rounded + non-opaque so the desktop
+        // shows through the fill's alpha. (Trades the OS blur for predictable,
+        // fully-owned pixels; the darkness/transparency/tint is what reads as
+        // native, and the blur can't be had without the neutral floor.)
+        if let Some(layer) = view.layer() {
             layer.setCornerRadius(corner_radius as f64);
             layer.setMasksToBounds(true);
-            // Dark Tahoe menu density (#72): NO opaque overlay. An earlier flat
-            // black `CALayer` (alpha 0.26) was solved to hit native's lum 51 over a
-            // gray-128 desktop — but a device recording showed that measurement was
-            // a red herring: native `NSMenu` glass is genuinely TRANSLUCENT and
-            // tracks its backdrop (≈lum 51 over neutral gray, ≈4 over a dark window,
-            // colored bleed over colorful content), while the black overlay hit the
-            // number by occluding the blur entirely, making the menu OPAQUE — the
-            // one thing that doesn't read as native. The private `NSGlassView` a
-            // native menu uses reaches its density via a darker translucent MATERIAL
-            // (no public equivalent; `tintColor` is a content-adaptive tone-map, not
-            // a darkener). No public `NSVisualEffectMaterial` is dark enough while
-            // staying translucent (`Menu`≈69, `HUDWindow`≈94 over gray-128), so we
-            // keep the real `.menu` + emphasized translucency: it reads lighter than
-            // native over a flat/neutral wallpaper but stays see-through and darkens
-            // with real content behind it exactly as native does. Closing the
-            // remaining darkness gap needs the private menu material (separate
-            // investigation), never an opaque layer.
+            layer.setOpaque(false);
         }
-        effect.addSubview(&view);
-        panel.setContentView(Some(&effect));
+        panel.setContentView(Some(&view));
     }
 
     // Deliver `mouseMoved:` to the view regardless of key/active state so hover

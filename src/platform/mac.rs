@@ -879,20 +879,23 @@ impl PopupSession<'_> {
                 };
             } else if !transparency_enabled() {
                 theme.make_opaque();
+            } else if super::system_is_dark() {
+                // DARK live menu: no OS material backdrop (mac/window.rs adds the
+                // raster view DIRECTLY to the transparent panel). muri draws its
+                // OWN semi-transparent dark background here, which composites
+                // straight over the DESKTOP — dark over dark, lifting over light,
+                // tinted by whatever is behind it — exactly like a native dark
+                // `NSMenu`. The OS materials (`Material::Menu`, `NSGlassEffectView`)
+                // can't do this: they lighten the backdrop to a neutral grey floor,
+                // so the menu reads as a flat opaque slab (#79). Values solved from
+                // a live TM `NSMenu` across two backdrops (dark→28, gray→62 =>
+                // base≈rgb(31,31,31), alpha≈0.62 => 158/255).
+                theme.background = Color::Rgba(31, 31, 31, 158);
             } else {
-                // A native `NSMenu` paints NO bulk background over its vibrancy —
-                // the `Material::Menu` backdrop (our rounded `NSVisualEffectView`
-                // content view, `mac/window.rs`) *is* the surface. The macOS
-                // preset's translucent fill (~0.80 alpha) is a stand-in for hosts
-                // that have no real vibrancy (the offscreen renderer, forced
-                // themes). On the LIVE System path the vibrancy is present, so
-                // drop the bulk fill to fully transparent: the material shows
-                // through exactly like native, instead of masking ~80% of it with
-                // a flat gray (#64). Selection/hover/separators/text still paint
-                // on top. Offscreen/forced/preset themes never reach this branch
-                // (no `injects_system`), so their fill — and the goldens — stand.
-                // DEVICE-VERIFY(0.11.3): confirm the live popup background now
-                // reads as the translucent Menu material, not flat gray.
+                // LIGHT live menu: the `NSGlassEffectView` (mac/window.rs) IS the
+                // surface, so paint no bulk fill — it matches a native light
+                // `NSMenu` closely. Offscreen/forced/preset themes never reach this
+                // branch (no `injects_system`), so their fill — and goldens — stand.
                 theme.background = Color::Rgba(0, 0, 0, 0);
             }
         }
