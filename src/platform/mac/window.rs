@@ -219,18 +219,19 @@ pub(super) fn view_point(view: &NSView, event: &objc2_app_kit::NSEvent) -> (f64,
 }
 
 /// A freshly built native panel and the objects that must be kept alive with
-/// it. The vibrancy backdrop is retained by the panel (as its content view),
-/// so it isn't returned; the delegate is *not* retained by the panel and must
-/// be kept by the caller.
+/// it. `view` (the [`MuriView`] set as the panel's content view) is returned so
+/// the caller can blit into it; the delegate is *not* retained by the panel and
+/// must be kept by the caller.
 pub(super) struct NativePanel {
     pub panel: Retained<NSPanel>,
     pub view: Retained<MuriView>,
     pub delegate: Retained<MuriWindowDelegate>,
 }
 
-/// Create a non-activating vibrant panel at `content_rect` (screen coordinates,
-/// AppKit bottom-left origin) sized in points, its content view rounded to
-/// `corner_radius`. The panel is *not* shown; the caller orders it front.
+/// Create a non-activating, transparent panel at `content_rect` (screen
+/// coordinates, AppKit bottom-left origin) sized in points, its content view
+/// rounded to `corner_radius` (muri paints its own fill, #79/#82 — no OS
+/// material). The panel is *not* shown; the caller orders it front.
 pub(super) fn make_panel(
     mtm: MainThreadMarker,
     content_rect: NSRect,

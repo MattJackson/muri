@@ -348,8 +348,8 @@ pub(crate) const MACOS_CORNER_RADIUS: f32 = 6.0;
 pub(crate) const MACOS_SF_TRACKING_FRACTION: f32 = 0.0;
 
 /// Extra tracking in logical points for macOS SF UI text at `size` points.
-/// See [`MACOS_SF_TRACKING_FRACTION`]. At the 13pt native menu size this is
-/// ~-0.16pt of tightening.
+/// See [`MACOS_SF_TRACKING_FRACTION`], which is `0.0` — so this is currently
+/// `0.0` (no tightening) at every size, including the 13pt native menu.
 pub(crate) fn macos_sf_tracking(size: f32) -> f32 {
     size * MACOS_SF_TRACKING_FRACTION
 }

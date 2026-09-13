@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-13
+
+### Internal (code audit — round 3, doc drift)
+
+- Fixed stale doc comments found sweeping the previously-unread tree tail (no
+  code/behavior change): `macos_sf_tracking` no longer claims "~-0.16pt of
+  tightening" (the fraction is `0.0`, so it returns `0.0`); the macOS present
+  path and `NativePanel`/`make_panel` docs no longer describe an OS "vibrancy
+  backdrop" — since #79/#82 the panel is transparent and muri paints its own
+  fill, and the `MuriView` content view *is* returned in `NativePanel.view`.
+- Round 3's correctness, panics, resource, error-handling, and regression lenses
+  read the platform submodules, the render-file tails, and the Wayland/X11
+  backends in full and found no correctness, security, or robustness defect; the
+  0.13.9/0.14.0 fixes were independently re-verified as complete.
+
 ## [0.14.0] - 2026-09-13
 
 ### Fixed (code audit — round 2, regression sweep of 0.13.9)

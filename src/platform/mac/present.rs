@@ -3,9 +3,9 @@
 //!
 //! The framebuffer is premultiplied RGBA; we wrap its bytes in a `CGImage` and
 //! set that as the content view's `layer.contents`. Per-pixel alpha lets the
-//! rounded-corner transparency composite over the OS vibrancy backdrop (spec
-//! 20 §2) — no opaque flatten happens here (that was the shipped bug that hid
-//! vibrancy).
+//! rounded-corner transparency composite straight over the desktop: the panel
+//! is transparent and muri paints its own semi-transparent fill (#79/#82, no OS
+//! material), so no opaque flatten happens here.
 
 use core::ptr;
 
