@@ -3,12 +3,12 @@
 //! Each popup/flyout is a borderless, non-activating [`NSPanel`] (spec 20 §2),
 //! floating + `becomesKeyOnlyIfNeeded` so the panel itself takes keyboard focus
 //! without stealing it. (`open_popup` still activates muri's own app so it can
-//! own the pointer cursor while the menu is open, #78.) Its content view is the
-//! layer-backed
-//! [`MuriView`] hosted directly on the transparent panel, for BOTH appearances
-//! (#79/#82): muri paints its own semi-transparent fill rather than using an OS
-//! material, which reads greyer than a native `NSMenu` in light and dark alike.
-//! The raster pixmap is blitted into the [`MuriView`] (see [`super::present`]).
+//! own the pointer cursor while the menu is open, #78.) Its content view is an
+//! `NSVisualEffectView` (`.menu` material, `.behindWindow`, `.active`) that blurs
+//! the desktop like a native `NSMenu` (#84, no Screen Recording permission);
+//! the layer-backed [`MuriView`] rides on top as a non-opaque subview, and muri
+//! paints only a low-alpha tint so the blur reads through it. The raster pixmap
+//! is blitted into the [`MuriView`] (see [`super::present`]).
 //!
 //! The responder subclasses never touch [`super::AppState`] directly: every
 //! callback enqueues a [`super::UiEvent`] and asks for a main-thread drain, so
@@ -22,7 +22,8 @@ use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSCursor, NSPanel, NSPopUpMenuWindowLevel, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindowDelegate, NSWindowStyleMask,
+    NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
@@ -219,9 +220,9 @@ pub(super) fn view_point(view: &NSView, event: &objc2_app_kit::NSEvent) -> (f64,
 }
 
 /// A freshly built native panel and the objects that must be kept alive with
-/// it. `view` (the [`MuriView`] set as the panel's content view) is returned so
-/// the caller can blit into it; the delegate is *not* retained by the panel and
-/// must be kept by the caller.
+/// it. `view` (the [`MuriView`] raster, a subview of the blur content view) is
+/// returned so the caller can blit into it; the delegate is *not* retained by
+/// the panel and must be kept by the caller.
 pub(super) struct NativePanel {
     pub panel: Retained<NSPanel>,
     pub view: Retained<MuriView>,
@@ -229,9 +230,9 @@ pub(super) struct NativePanel {
 }
 
 /// Create a non-activating, transparent panel at `content_rect` (screen
-/// coordinates, AppKit bottom-left origin) sized in points, its content view
-/// rounded to `corner_radius` (muri paints its own fill, #79/#82 — no OS
-/// material). The panel is *not* shown; the caller orders it front.
+/// coordinates, AppKit bottom-left origin) sized in points, its `NSVisualEffect
+/// View` blur content view (with the raster [`MuriView`] on top) rounded to
+/// `corner_radius` (#84). The panel is *not* shown; the caller orders it front.
 pub(super) fn make_panel(
     mtm: MainThreadMarker,
     content_rect: NSRect,
@@ -265,23 +266,35 @@ pub(super) fn make_panel(
 
     let bounds = NSRect::new(NSPoint::new(0.0, 0.0), content_rect.size);
 
-    // The layer-backed raster surface the pixmap is blitted into.
+    // Backdrop blur (#84): an `NSVisualEffectView` with the `.menu` material
+    // blurs the desktop behind the popup like a native `NSMenu`, needing no
+    // Screen Recording permission. `.behindWindow` blends what's behind the
+    // window (not sibling views); `.active` forces the blur always-on so it
+    // doesn't animate in from an inactive/opaque state on this non-activating
+    // panel (the ~2s settle gap). Rounded + masked to the popup's corners.
+    let effect = NSVisualEffectView::initWithFrame(mtm.alloc(), bounds);
+    effect.setMaterial(NSVisualEffectMaterial::Menu);
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    effect.setState(NSVisualEffectState::Active);
+    effect.setWantsLayer(true);
+    if let Some(layer) = effect.layer() {
+        layer.setCornerRadius(corner_radius as f64);
+        layer.setMasksToBounds(true);
+    }
+
+    // The layer-backed raster surface the pixmap is blitted into, hosted as a
+    // subview ON TOP of the blur. Its layer is non-opaque and muri paints only a
+    // low-alpha tint (`mac.rs` theme()), so the blur reads through the raster
+    // like native menu glass (#84). The parent's masked corners clip it.
     let view = MuriView::new(mtm, bounds, kind);
     view.setWantsLayer(true);
-
-    // No OS material for either appearance (#79/#82): the public materials
-    // (`NSGlassEffectView`, `NSVisualEffectView(Material::Menu)`) are
-    // content-adaptive and read markedly greyer than a native `NSMenu` in BOTH
-    // light and dark. So the raster view is hosted DIRECTLY on the transparent
-    // panel and muri paints its own semi-transparent fill (`mac.rs` theme()),
-    // compositing straight over the desktop like native. Rounded + non-opaque
-    // layer so the desktop shows through the fill's alpha.
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(corner_radius as f64);
         layer.setMasksToBounds(true);
         layer.setOpaque(false);
     }
-    panel.setContentView(Some(&view));
+    effect.addSubview(&view);
+    panel.setContentView(Some(&effect));
 
     // Deliver `mouseMoved:` to the view regardless of key/active state so hover
     // highlighting works on the non-activating panel.
@@ -310,7 +323,8 @@ pub(super) fn make_panel(
     panel.setDelegate(Some(proto));
     panel.setInitialFirstResponder(Some(&view));
 
-    // The raster `view` is the panel's content view directly (no OS material).
+    // `view` (the raster) is a subview of the blur content view; it's returned
+    // so the caller can blit into it.
     NativePanel {
         panel,
         view,

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-09-13
+
+### Added
+
+- **macOS menu backdrop blur (#84).** The popup/flyout content view is now an
+  `NSVisualEffectView` (`.menu` material, `.behindWindow` blending, `.active`
+  state) that blurs the desktop behind the menu like a native `NSMenu` — with no
+  Screen Recording permission. The raster [`MuriView`] rides on top as a
+  non-opaque subview, and muri paints only a low-alpha tint over the blur:
+  - dark: `theme.background` → `Rgba(28, 32, 44, 40)` (down from `,184` — the
+    blur now provides the body; the tint supplies native's blue-cool cast)
+  - light: `Rgba(249, 249, 249, 168)` (unchanged; reads as light glass over blur)
+  - Increase-Contrast branch unchanged (`make_opaque`).
+
+  The `.active` state forces the blur always-on so it doesn't animate in from an
+  inactive/opaque state on the non-activating panel. This re-introduces the
+  `NSVisualEffectView` objc2-app-kit feature that #79/#82 had trimmed. Live macOS
+  path only — offscreen/forced/preset themes never take the blur or the live
+  tint, so goldens stand.
+
 ## [0.14.4] - 2026-09-13
 
 ### Changed

@@ -847,17 +847,18 @@ impl PopupSession<'_> {
             } else if !transparency_enabled() {
                 theme.make_opaque();
             } else if system_is_dark() {
-                // DARK live menu: no OS material — muri draws its own
-                // semi-transparent dark fill straight over the desktop like a
-                // native dark `NSMenu` (OS materials lighten to a neutral grey
-                // floor). Cool charcoal, not dead-neutral: native carries a
-                // subtle blue-cool cast, A/B-approved on-device (#79/#82/#83).
-                theme.background = Color::Rgba(28, 32, 44, 184);
+                // DARK live menu: a low-alpha cool-charcoal tint over the
+                // `NSVisualEffectView(.menu)` backdrop blur (#84). The blur
+                // provides the body; muri's tint (alpha 40) supplies the subtle
+                // blue-cool cast native carries, which the neutral OS material
+                // floor lacks. A/B-approved on-device (#79/#82/#83/#84).
+                theme.background = Color::Rgba(28, 32, 44, 40);
             } else {
-                // LIGHT live menu: same as dark — no OS material (the public glass
-                // reads ~202 vs native ~249), muri paints its own near-white
-                // semi-transparent fill, solved to native (#82). Offscreen/forced/
-                // preset themes never reach this branch, so goldens stand.
+                // LIGHT live menu: a near-white tint over the same
+                // `NSVisualEffectView(.menu)` blur (#84); at alpha 168 it reads
+                // as light glass, matching native (#82). Unchanged from #82.
+                // Offscreen/forced/preset themes never reach this branch, so
+                // goldens stand.
                 theme.background = Color::Rgba(249, 249, 249, 168);
             }
         }

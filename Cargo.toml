@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.14.4"
+version = "0.14.5"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -100,6 +100,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
     "NSPanel",
     "NSView",
+    "NSVisualEffectView",
     "NSColor",
     "NSColorSpace",
     "NSAppearance",
