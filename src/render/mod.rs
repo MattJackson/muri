@@ -1,37 +1,28 @@
 //! The scene-drawer interface and its one real implementation — the CPU raster
-//! backend (a muri-owned raster blitter for fills/blits, plus a muri-owned text
-//! layer built directly on the `fontdb` / `harfrust` / `swash` engines)
-//! described in the design. The same drawer paints the menu on macOS, Windows,
-//! and Linux; per-OS code is confined to the anchoring/dismiss shims (see
-//! [`crate::platform`]), never to drawing.
+//! backend (a muri-owned raster blitter plus a muri-owned text layer built
+//! directly on `fontdb` / `harfrust` / `swash`) described in the design. The
+//! same drawer paints the menu on macOS, Windows, and Linux; per-OS code is
+//! confined to the anchoring/dismiss shims (see [`crate::platform`]), never to
+//! drawing.
 //!
-//! [`SceneDrawer`] defines the boundary as a trait so the layout/paint code in
-//! [`crate::render::paint`] can be written and tested against it independent of
-//! any window. [`RasterDrawer`] is the concrete CPU backend; it renders into an
-//! owned [`Framebuffer`] (premultiplied RGBA) which the popup window blits to
-//! its surface (and which the headless snapshot test saves straight to PNG).
+//! [`SceneDrawer`] defines the boundary as a trait so [`crate::render::paint`]
+//! can be tested independent of any window. [`RasterDrawer`] is the concrete
+//! CPU backend, rendering into an owned [`Framebuffer`] (premultiplied RGBA).
 //!
 //! ## The text layer (ADR-0001)
 //!
-//! `cosmic-text` used to provide font lookup, shaping, rasterization, *and*
-//! cross-script fallback behind one `FontSystem`/`Buffer`/`SwashCache` facade.
-//! Per [ADR-0001](../../../docs/design/adr/0001-own-the-menu-use-engines-not-frameworks.md)
-//! muri now owns that glue and uses the deep engines directly:
+//! Per [ADR-0001](../../../docs/design/adr/0001-own-the-menu-use-engines-not-frameworks.md),
+//! muri owns font lookup/shaping/rasterization/fallback directly on the deep
+//! engines rather than through `cosmic-text`'s facade: [`fontdb::Database`] for
+//! family/weight queries, [`harfrust`] (the HarfBuzz project's Rust shaper) for
+//! shaping a run against one face, and [`swash`] for glyph rasterization.
 //!
-//! * [`fontdb::Database`] — the font database + CSS-like family/weight queries.
-//! * [`harfrust`] — the HarfBuzz-project's Rust shaper (the maintained
-//!   successor to `rustybuzz`) that shapes a run of text against one face
-//!   (clusters, kerning, ligatures, complex-script glyphs within a single run).
-//! * [`swash`] — the glyph rasterizer (outline and color-emoji), producing the
-//!   same `Content::{Mask, SubpixelMask, Color}` coverage muri blits with its
-//!   own `raster::blend_pixel`.
-//!
-//! Everything between those engines — the pinned-UI-family resolver ([§7.1]),
-//! the deterministic per-codepoint **font-fallback** layer (`FontStore::segment_faces`),
-//! and the persistent rasterized-glyph cache that replaces `SwashCache` — lives
-//! in this module. Scope is **LTR + per-run color/weight + complex-script glyphs
-//! within a single unstyled run**; bidi/RTL reordering is documented out
-//! (spec `10-rendering-layout.md` §7.2).
+//! This module owns everything between those engines: the pinned-UI-family
+//! resolver ([§7.1]), the per-codepoint font-fallback layer
+//! (`FontStore::segment_faces`), and the persistent glyph cache. Scope is
+//! **LTR + per-run color/weight + complex-script glyphs within a single
+//! unstyled run**; bidi/RTL reordering is documented out (spec
+//! `10-rendering-layout.md` §7.2).
 //!
 //! [§7.1]: ../../../docs/design/spec/10-rendering-layout.md
 
@@ -43,18 +34,13 @@ mod offscreen;
 pub use offscreen::{render_menu_to_png, render_menu_to_rgba};
 
 pub mod paint;
-// Not `pub`: this module's blit primitives (`blend_pixel`, `fill_round_rect`,
-// `fill_rect`, `scaled`) are internal-only implementation details with no
-// external caller (platform backends + `paint` are all in-crate). Only
-// `decode_png`/`Framebuffer` are muri's actual public raster surface, and they
-// stay reachable via the `pub use` re-export just below regardless of this
-// module's own visibility.
+// Not `pub`: this module's blit primitives are internal-only. Only
+// `decode_png`/`Framebuffer` are muri's actual public raster surface, reachable
+// via the `pub use` re-export just below.
 pub(crate) mod raster;
 // The `Icon::Svg` rasterizer (a restricted SVG subset → straight-alpha RGBA,
-// built on `zeno`, already in the tree via `swash`). Same output shape as
-// `raster::decode_png`, so it slots into the shared icon path; `rasterize_svg` is
-// re-exported for the platform backends (Windows HICON / Linux SNI / macOS
-// NSImage) to reuse.
+// built on `zeno`). Same output shape as `raster::decode_png`; `rasterize_svg`
+// is re-exported for the platform backends to reuse.
 pub(crate) mod svg;
 pub use svg::rasterize_svg;
 
@@ -146,12 +132,9 @@ impl Hasher for FxHasher {
 /// [`HashMap`] specialized to the fast internal [`FxHasher`].
 type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
-/// Cache key for a shaped run: the text, the resolved primary face, the OpenType
-/// weight, and the device pixel size (as raw `f32` bits for exact equality).
-// (text, primary face, ot_weight, px-bits, tracking-bits, opsz-bits). Tracking is
-// part of the key so a tracked and untracked shaping of the same text don't
-// collide (#42); optical size likewise, so the same text at two optical masters
-// keeps distinct advances (#77).
+/// Cache key for a shaped run: `(text, primary face, ot_weight, px-bits,
+/// tracking-bits, opsz-bits)`. Tracking and optical size are part of the key so
+/// distinct tracking (#42) or optical masters (#77) never collide.
 type ShapeKey = (String, Option<FaceId>, u16, u32, u32, u32);
 
 /// A [`RasterDrawer::icons`] cache entry: the decoded icon plus a strong
@@ -233,13 +216,11 @@ pub trait SceneDrawer {
 
     /// Decode a PNG icon (straight-alpha RGBA + dimensions), reusing a cached
     /// decode when `bytes` is the *same* `Arc` (pointer identity, not content)
-    /// as a previous call on this drawer. `Icon::Png` bytes live in an
-    /// `Arc<[u8]>` precisely so a menu re-rendered every frame (the live popup
-    /// repaints on hover) doesn't re-run the PNG decoder on unchanged icon
-    /// bytes each time.
+    /// as a previous call — so a menu repainted on every hover doesn't re-run
+    /// the PNG decoder on unchanged icon bytes.
     ///
-    /// The default implementation just decodes uncached (correct, only
-    /// non-caching); [`RasterDrawer`] overrides it with a real cache.
+    /// The default implementation just decodes uncached; [`RasterDrawer`]
+    /// overrides it with a real cache.
     fn decode_icon(&self, bytes: &Arc<[u8]>) -> Option<DecodedIcon> {
         decode_icon_bytes(bytes).map(Rc::new)
     }
@@ -296,30 +277,21 @@ const FALLBACK_FAMILIES: &[&str] = &[
 pub struct RasterDrawer {
     scale: f32,
     fb: Framebuffer,
-    /// The shared text layer (font DB + face/shaping/glyph caches). Held behind
-    /// an [`Rc`] so a fresh drawer for each popup/flyout open (the platform
-    /// backends build one per `for_menu_options` call) reuses the *same*
-    /// already-built [`FontStore`] — the expensive font-DB scan/registration and
-    /// UI-family resolution happen once per configuration, not once per open, and
-    /// the shaping/glyph caches stay warm across opens (#1). Per-frame layout
-    /// state (the framebuffer, `scale`) is still per-drawer, so a theme/scale
-    /// change between opens is honored; only the config-independent font DB is
-    /// shared (see [`shared_font_store`]).
+    /// The shared text layer (font DB + face/shaping/glyph caches). Held
+    /// behind an [`Rc`] so every drawer built for the same configuration
+    /// reuses the same already-built [`FontStore`] rather than re-scanning
+    /// fonts per open (#1); the framebuffer/scale stay per-drawer (see
+    /// [`shared_font_store`]).
     fonts: Rc<FontStore>,
     /// Decoded-PNG-icon cache, keyed by the source `Arc<[u8]>`'s pointer
     /// identity (see [`SceneDrawer::decode_icon`]). Bounded by
-    /// [`ICON_CACHE_CAP`] so a very long-lived drawer fed many distinct icon
-    /// byte buffers over its lifetime can't grow this without bound.
+    /// [`ICON_CACHE_CAP`].
     ///
-    /// Each entry also retains a strong clone of the `Arc<[u8]>` it was keyed
-    /// from. This is load-bearing, not incidental: a bare pointer (or
-    /// pointer+len) is not a stable identity for a dropped allocation — once
-    /// the caller's `Arc` is dropped, a later, *different* icon byte buffer
-    /// can be allocated at the exact same address (and even the same length),
-    /// producing a false cache hit that draws the wrong icon (ABA). Holding
-    /// the `Arc` alive for as long as the entry is cached makes that address
-    /// un-reusable while the entry exists, so a pointer match is only ever a
-    /// match against the *same* live allocation.
+    /// Each entry also retains a strong clone of the source `Arc<[u8]>`. This
+    /// is load-bearing: without it, once the caller drops its `Arc`, a later
+    /// *different* icon buffer could be allocated at the same address,
+    /// producing a false cache hit that draws the wrong icon (ABA). Keeping
+    /// the `Arc` alive makes that address un-reusable while the entry exists.
     icons: RefCell<HashMap<usize, IconCacheEntry>>,
 }
 
@@ -389,37 +361,23 @@ impl RasterDrawer {
     /// Create a raster drawer for a **forced** OS theme
     /// ([`ThemeSource::MacOs`](crate::theme::ThemeSource::MacOs) /
     /// [`Windows`](crate::theme::ThemeSource::Windows) /
-    /// [`Gnome`](crate::theme::ThemeSource::Gnome), i.e. whenever
-    /// [`ThemeSource::forced_family`](crate::theme::ThemeSource::forced_family)
-    /// returns `Some`), pinning `FontFamily::System` to the *target* OS's UI
-    /// font rather than the host's (issue #54).
+    /// [`Gnome`](crate::theme::ThemeSource::Gnome)), pinning `FontFamily::System`
+    /// to the *target* OS's UI font rather than the host's (issue #54).
     ///
-    /// [`RasterDrawer::new_native`] is correct only for `System(..)`: it pins
-    /// whatever native menu font [`Platform::system_menu_font`] reports for
-    /// the **host** OS. A forced theme must render in the *target* OS's font
-    /// on *any* host — a `Windows`-forced menu must use Segoe UI even when
-    /// running on macOS — so this constructor resolves against
-    /// [`OsFamily::ui_font_families`] / [`OsFamily::fallback_font_families`]
-    /// instead of the host-native path, and — the honest limit this issue is
-    /// about — **never** falls back to the host's resolved native UI family
-    /// (`resolve_ui_family`). See `resolve_forced_ui_family` for the exact
-    /// three-step resolution and the caveat about proprietary target faces
-    /// (Segoe UI / SF Pro) not being redistributable.
-    ///
-    /// Platform-backend wiring note: a popup's construction site should choose
-    /// between this and [`RasterDrawer::new_native`] based on
-    /// `theme_source.forced_family()` — `Some(family)` calls this,
-    /// `None` calls `new_native`.
+    /// Unlike [`RasterDrawer::new_native`] (which always pins the **host**'s
+    /// native menu font), this resolves against [`OsFamily::ui_font_families`] /
+    /// [`OsFamily::fallback_font_families`] and **never** falls back to the
+    /// host's resolved native UI family — a `Windows`-forced menu must render in
+    /// Segoe UI even on macOS. See `resolve_forced_ui_family` for the exact
+    /// resolution order and the caveat that Segoe UI / SF Pro aren't
+    /// redistributable.
     pub fn with_forced_theme(scale: f32, family: OsFamily) -> Self {
-        // A forced theme's store depends only on the target `OsFamily`, so it too
-        // is built once per family and shared across opens (#1) — keyed by family
-        // so switching the forced OS between opens still resolves correctly.
+        // Depends only on the target OsFamily, so it too is built once per
+        // family and shared across opens (#1).
         let fonts = shared_font_store(FontStoreKey::Forced(forced_family_tag(family)), || {
-            // With `bundled-fonts` on, resolution gains a middle tier: the vendored
-            // OSS substitute (registered into `db`, hence the `&mut`) is tried after
-            // the real target font is found absent and before any free host fallback
-            // (issue #54). With the feature off this is byte-for-byte the original
-            // read-only two-tier resolution — no regression.
+            // With `bundled-fonts` on, a middle tier tries the vendored OSS
+            // substitute before any free host fallback (#54); feature off is
+            // byte-for-byte the original two-tier resolution.
             #[cfg(feature = "bundled-fonts")]
             let (db, ui_family) = {
                 let mut db = cached_system_fonts_db();
@@ -457,25 +415,18 @@ impl RasterDrawer {
 
     /// Create a raster drawer whose text is shaped **only** against a
     /// repo-vendored font (`tests/fonts/DejaVuSans{,-Bold}.ttf`), with system
-    /// font discovery disabled entirely — no
-    /// [`fontdb::Database::load_system_fonts`] call, ever.
+    /// font discovery disabled entirely.
     ///
-    /// This is the determinism seam the golden-image snapshot suite needs (the
-    /// design spec's testing-verification doc, §3.3, "font selection"):
-    /// [`RasterDrawer::new`] deliberately resolves to *whatever UI font the host
-    /// OS has installed* (San Francisco on macOS, Segoe UI on Windows, DejaVu/
-    /// Liberation on Linux) so the live popup looks native — which also means a
-    /// golden PNG rendered with `new` can never match across all three CI
-    /// runners. `new_headless` instead builds an empty [`fontdb::Database`]
-    /// populated with exactly the two vendored DejaVu Sans faces (regular + bold,
-    /// same family so a bold section header and a regular row still read as one
-    /// typeface), so glyph outlines and metrics are byte-identical on every OS
-    /// and every developer machine.
+    /// This is the determinism seam the golden-image snapshot suite needs
+    /// (design spec §3.3, "font selection"): [`RasterDrawer::new`] resolves to
+    /// whatever UI font the host OS has installed, so a golden PNG rendered
+    /// with `new` could never match across CI runners. `new_headless` instead
+    /// builds an empty [`fontdb::Database`] with exactly the two vendored
+    /// DejaVu Sans faces, so glyph outlines and metrics are byte-identical
+    /// everywhere.
     ///
-    /// Intentionally **not** used by [`RasterDrawer::new`] / the live backends —
-    /// this constructor exists for the headless snapshot suite (`tests/golden.rs`,
-    /// `tests/fonts/`) only; it does not change the live, native-font-matching
-    /// popup rendering.
+    /// Intentionally **not** used by [`RasterDrawer::new`] / the live
+    /// backends — only by the headless snapshot suite.
     pub fn new_headless(scale: f32) -> Self {
         const DEJAVU_SANS: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
         const DEJAVU_SANS_BOLD: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans-Bold.ttf");
@@ -586,10 +537,8 @@ enum Embolden {
 
 /// The OpenType `wght` variation-axis tag (`b"wght"` as a big-endian `u32`),
 /// used to detect a variable font's weight axis via `swash`'s `Variations`.
-/// The OpenType `wght` variation-axis tag, `pub(crate)` so the macOS
-/// system-font path can single-source the same detection when deciding whether a
-/// regular face is variable (bold via axis instancing, #63/#65) rather than
-/// needing a discrete bold file.
+/// `pub(crate)` so the macOS system-font path can share the same detection
+/// (bold via axis instancing, #63/#65) rather than needing a discrete bold file.
 pub(crate) const WGHT_AXIS_TAG: u32 =
     ((b'w' as u32) << 24) | ((b'g' as u32) << 16) | ((b'h' as u32) << 8) | (b't' as u32);
 
@@ -665,17 +614,9 @@ struct FaceBytes {
     index: u32,
 }
 
-/// muri's owned text layer: the font database, the pinned UI family, a
-/// per-face byte cache, the shaping-glyph rasterization cache, and the
-/// deterministic fallback order. All lookup state is behind [`RefCell`] so the
-/// `&self` [`SceneDrawer::measure_text`]/[`SceneDrawer::line_height`] methods can
-/// shape without a `&mut self`.
 /// Cap on [`FontStore::glyphs`]'s entry count (see [`FontStore::glyph_image`]).
-/// Sized to comfortably exceed a rich menu's working set across the dimensions
-/// the [`GlyphKey`] splits on (glyph × device-size × weight × optical master),
-/// summed over all concurrently open menus/submenus that share this process-wide
-/// store — so the bound is effectively never hit in normal use and overflow
-/// evicts a single entry rather than thrashing (a `GlyphImage` is a small mask).
+/// Sized to comfortably exceed a rich menu's working set; overflow evicts a
+/// single entry rather than thrashing.
 const GLYPH_CACHE_CAP: usize = 4096;
 
 /// Cap on [`FontStore::shaped`]'s entry count. A menu has a few dozen distinct
@@ -714,6 +655,9 @@ const FACE_CACHE_CAP: usize = 256;
 /// cache miss; bounded and cleared on overflow.
 const SHAPER_INSTANCE_CACHE_CAP: usize = 256;
 
+/// muri's owned text layer: the font database, pinned UI family, per-face byte
+/// cache, shaping/glyph rasterization caches, and fallback order. All lookup
+/// state is behind [`RefCell`] so `&self` methods can shape without `&mut self`.
 struct FontStore {
     db: Database,
     /// The concrete family name the generic "system" font resolves to, pinned
@@ -760,16 +704,11 @@ struct FontStore {
     /// draw_text call (once per segment per row, every repaint); the result is
     /// stable for the drawer's lifetime, so it is cached like the others.
     face_cache: RefCell<FxHashMap<(FontFamily, u16), Option<FaceId>>>,
-    /// Memoized shaped runs, keyed by a **hash** of `(text, primary face,
-    /// ot_weight, px-bits, tracking-bits)` so the hot lookup path (measure +
-    /// draw both call `shape`, and a hover repaint re-shapes unchanged text)
-    /// never allocates an owned [`String`] key — it hashes the borrowed `&str`
-    /// and, on a hash hit, verifies the retained owned [`ShapeKey`] matches
-    /// field-by-field (guarding against a hash collision returning the wrong
-    /// glyphs). The owned key's `String` is built only when inserting a genuinely
-    /// new entry (#4). Bounded by [`SHAPED_CACHE_CAP`] (cleared wholesale on
-    /// overflow) so a live menu whose text changes each tick can't grow it
-    /// without limit.
+    /// Memoized shaped runs, keyed by a **hash** of the [`ShapeKey`] fields so
+    /// the hot lookup path never allocates an owned [`String`] — it hashes the
+    /// borrowed `&str` and, on a hit, verifies the retained owned key
+    /// field-by-field (guarding against a hash collision). The owned key is
+    /// built only on a genuine insert (#4). Bounded by [`SHAPED_CACHE_CAP`].
     shaped: RefCell<FxHashMap<u64, (ShapeKey, Rc<ShapedLine>)>>,
     /// Memoized vertical metrics `(ascent, descent)` per `(FaceId, px-bits)`.
     /// `v_metrics` otherwise re-parsed the font (`FontRef::from_index` + read the
@@ -791,15 +730,10 @@ struct FontStore {
     #[cfg(test)]
     owned_key_builds: std::cell::Cell<usize>,
     /// Test-only counter of times [`FontStore::resolve_face`] requested a
-    /// heavy weight (`ot_weight >= 600`, e.g. `Weight::Bold`) but the
-    /// database's best match resolved to a substantially lighter face
-    /// (`< 500`) — a silent weight downgrade, the exact failure mode behind
-    /// issue #56 (`fontdb::Database::query`'s CSS `find_best_match` never
-    /// fails on weight; with only a regular face registered it just returns
-    /// that face for every request). Per this crate's error philosophy (no
-    /// `log` crate dependency), this is how that downgrade is surfaced
-    /// instead of logged: a queryable counter so a test can assert on it
-    /// rather than it being silent. See [`FontStore::weight_downgrade_count`].
+    /// heavy weight but `fontdb`'s best-match resolved to a substantially
+    /// lighter face — a silent weight downgrade (#56). No `log` dependency, so
+    /// this queryable counter is how the downgrade is surfaced instead.
+    /// See [`FontStore::weight_downgrade_count`].
     #[cfg(test)]
     weight_downgrades: std::cell::Cell<usize>,
     scale_ctx: RefCell<ScaleContext>,
@@ -919,19 +853,14 @@ impl FontStore {
             return cached;
         }
         let emb = match self.face_wght_axis_max(id) {
-            // A **variable** face instances its `wght` axis to the requested bold
-            // weight regardless of its registered *default-instance* weight — the
-            // registered weight is only the default (the live macOS SFNS System
-            // face defaults to Regular but must bold *up* the axis), so a variable
-            // face must never be treated as "already bold" and skip instancing.
-            // This is the #65 live-System bold fix: when `fontdb` registers the
-            // resolved variable face at a mid/heavy default weight (>= LIGHT_WEIGHT),
-            // the old `actual_weight >= LIGHT_WEIGHT -> None` short-circuit dropped
-            // the instance entirely, so a bold row rendered identical to regular.
+            // A **variable** face always instances its `wght` axis to bold,
+            // regardless of its registered default weight (the live macOS SFNS
+            // face defaults to Regular but must bold *up* the axis) — the #65
+            // fix, since treating a heavy default as "already bold" skipped
+            // instancing and rendered bold rows identical to regular.
             Some(max) => Embolden::Variable(Self::variable_bold_wght(ot_weight, max as u16)),
-            // A **static** face has no axis: only faux-bold when `fontdb` silently
-            // *downgraded* a heavy request to a light face; a genuinely heavy static
-            // face (a discrete bold) is already bold and needs nothing.
+            // A **static** face has no axis: only faux-bold when `fontdb`
+            // silently downgraded a heavy request to a light face.
             None => {
                 let actual_weight = self.db.face(id).map_or(ot_weight, |f| f.weight.0);
                 if actual_weight >= Self::LIGHT_WEIGHT {
@@ -1508,19 +1437,6 @@ fn query_face(db: &Database, family: DbFamily, ot_weight: u16) -> Option<FaceId>
     })
 }
 
-/// Register the host's native menu font into `db` and return the family name
-/// [`FontFamily::System`] should pin to, or `None` if it couldn't be made
-/// resolvable (so the caller falls back to [`resolve_ui_family`]).
-///
-/// The OS-agnostic consumer of the per-OS
-/// [`SystemFont`](crate::platform::SystemFont): it loads bytes or a file into
-/// the database (or, for an already-installed family, validates the name) and
-/// returns the concrete family to pin. Unlike [`resolve_ui_family`] it does not
-/// require regular/bold to be two distinct faces — the OS menu font is
-/// authoritative even when it is a single variable face (macOS SF Pro).
-/// A clone of the process's system-font database, scanned **once** per thread and
-/// cached (the scan — `load_system_fonts` — is the dominant popup-open cost; a
-/// clone is a cheap metadata copy since fontdb `Arc`s the actual font data) (#22).
 /// Identifies a shareable [`FontStore`] configuration for the process-wide
 /// (per-thread) store cache. Two drawers with the same key resolve to the exact
 /// same font DB + pinned UI family, so they can share one built store (#1). The
@@ -1611,6 +1527,12 @@ pub(crate) fn prewarm_system_fonts() {
     });
 }
 
+/// Register the host's native menu font into `db` and return the family name
+/// [`FontFamily::System`] should pin to, or `None` if it couldn't be made
+/// resolvable (so the caller falls back to [`resolve_ui_family`]). Unlike
+/// [`resolve_ui_family`] this does not require regular/bold to be two
+/// distinct faces — the OS menu font is authoritative even as a single
+/// variable face (macOS SF Pro).
 fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<String> {
     let loaded: Option<FaceId> = match source {
         SystemFontSource::Family(name) => {
@@ -1642,23 +1564,16 @@ fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<S
 /// Magic prefix identifying a [`SystemFontSource::Data`] payload as a packed
 /// regular+bold pair rather than a single face's raw bytes (issue #56).
 ///
-/// [`SystemFontSource`] (defined in `src/platform/mod.rs`, part of the
-/// cross-platform `Platform` seam) has no field for a second face, so the
-/// live macOS backend (`src/platform/mac.rs`) that resolves a distinct bold
-/// system-menu face packs both faces' bytes into one `Data` blob with this
-/// header (its `pack_dual_face` producer — the only writer — is macOS-only and
-/// lives beside that backend in `src/platform/mac.rs`); [`unpack_dual_face`] is
-/// the matching decoder read only here, on the render side of the same seam.
-/// Not a real font-container format (no other platform produces or needs to
-/// parse it) — a private encoding between exactly those two call sites, so this
-/// magic is `pub(crate)` to let the macOS producer share the one definition.
+/// [`SystemFontSource`] has no field for a second face, so the macOS backend
+/// (`pack_dual_face` in `src/platform/mac.rs`, the only writer) packs both
+/// faces into one `Data` blob with this header; [`unpack_dual_face`] is the
+/// matching decoder, read only here. Not a real font-container format — a
+/// private encoding between those two call sites, `pub(crate)` so both share it.
 pub(crate) const DUAL_FACE_MAGIC: &[u8; 8] = b"MURIDUOF";
 
-/// Decode a `pack_dual_face` blob (packed by the macOS backend in
-/// `src/platform/mac.rs`) back into its `(regular, bold)` byte
-/// slices. `None` if `data` doesn't start with [`DUAL_FACE_MAGIC`] or is
-/// truncated — callers treat that as "not a dual-face blob, load it as a
-/// single plain face" rather than an error.
+/// Decode a `pack_dual_face` blob back into its `(regular, bold)` byte slices.
+/// `None` if `data` doesn't start with [`DUAL_FACE_MAGIC`] or is truncated —
+/// callers treat that as "not a dual-face blob, load as a single plain face".
 fn unpack_dual_face(data: &[u8]) -> Option<(&[u8], &[u8])> {
     let rest = data.strip_prefix(DUAL_FACE_MAGIC.as_slice())?;
     let (len_bytes, rest) = rest.split_first_chunk::<4>()?;
@@ -1673,16 +1588,11 @@ fn unpack_dual_face(data: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((regular, bold))
 }
 
-/// Load a macOS regular+bold face pair (packed by `pack_dual_face` in
-/// `src/platform/mac.rs`) into `db` and
-/// pin the family the regular face resolves to (#56). Registers the bold
-/// bytes best-effort: if the bold face's own name-table family doesn't match
-/// the regular one's — so `query_face` at weight 700 still can't find it —
-/// this still returns the regular face's family rather than failing outright,
-/// exactly like a bold-less single-face registration always has; the
-/// resulting weight downgrade is then caught (not silent) by
-/// [`FontStore::resolve_face`]'s downgrade detection instead of by this
-/// function refusing to register anything.
+/// Load a macOS regular+bold face pair (packed by `pack_dual_face`) into `db`
+/// and pin the family the regular face resolves to (#56). Registers the bold
+/// bytes best-effort: a family mismatch just means the resulting weight
+/// downgrade is caught by [`FontStore::resolve_face`]'s downgrade detection
+/// rather than this function refusing to register anything.
 fn register_dual_face(db: &mut Database, regular: &[u8], bold: &[u8]) -> Option<String> {
     let regular_id = db
         .load_font_source(DbSource::Binary(Arc::new(regular.to_vec())))
@@ -1702,29 +1612,20 @@ fn register_dual_face(db: &mut Database, regular: &[u8], bold: &[u8]) -> Option<
 /// Resolve the UI family to pin for a **forced** OS theme (issue #54):
 /// [`RasterDrawer::with_forced_theme`]'s pure resolution step.
 ///
-/// Tries, in order, each name in `target_families` (the target OS's real UI
-/// font, e.g. `["Segoe UI"]`), then each name in `fallback_families` (a free
-/// face broadly available regardless of host OS), returning the first that is
-/// actually installed in `db` (a plain family-query hit, at weight 400 — a
-/// forced theme's font doesn't need the regular/bold-distinct-face invariant
-/// [`resolve_ui_family`] enforces, since it's naming one specific real family
-/// rather than discovering *some* usable UI face).
+/// Tries each name in `target_families` (the target OS's real UI font), then
+/// each in `fallback_families` (a free face broadly available regardless of
+/// host OS), returning the first installed in `db`.
 ///
-/// Deliberately does **not** call [`resolve_ui_family`] (the *host's* native
-/// UI font resolver) as a last resort: doing so is exactly the bug issue #54
-/// reports — a forced Windows theme silently rendering in the host's SF Pro on
-/// macOS. Returns `None` when neither list has an installed hit, in which
-/// case the caller leaves `FontFamily::System` unpinned (falling through to
-/// `fontdb`'s own generic `SansSerif` family, not to a host-specific pin).
+/// Deliberately does **not** call [`resolve_ui_family`] (the host's native
+/// resolver) as a last resort — that's exactly the bug #54 reports, a forced
+/// Windows theme silently rendering in the host's SF Pro on macOS. Returns
+/// `None` when neither list hits, leaving `FontFamily::System` unpinned.
 ///
 /// Honesty caveat: Segoe UI and SF Pro are proprietary and not bundled by
-/// muri, so `target_families` only wins when the real target font happens to
-/// be installed on this host; otherwise the free `fallback_families` face is
-/// used, which is *not* metrically identical to the target font.
-// Under `bundled-fonts` the library routes forced resolution through
-// [`resolve_forced_ui_family_bundled`] instead, so this read-only two-tier
-// resolver is reached only by the feature-off build and by unit tests — hence
-// the `dead_code` allow for the feature-on lib build (tests still use it).
+/// muri, so `target_families` only wins when actually installed; otherwise
+/// the free `fallback_families` face is used (not metrically identical).
+// Reached only by the feature-off build and unit tests; `bundled-fonts`
+// routes through `resolve_forced_ui_family_bundled` instead.
 #[cfg_attr(feature = "bundled-fonts", allow(dead_code))]
 pub(crate) fn resolve_forced_ui_family(
     db: &Database,
@@ -1777,15 +1678,10 @@ pub(crate) fn resolve_forced_ui_family_bundled(
 /// `bundled-fonts` feature, and the wiring that registers the right one for a
 /// forced [`OsFamily`] into a [`fontdb::Database`].
 ///
-/// muri cannot bundle the proprietary originals (Apple SF Pro / Microsoft Segoe
-/// UI forbid redistribution), so it vendors the closest OFL substitutes instead —
-/// Inter (SF Pro), Microsoft's own metric-compatible Selawik (Segoe UI), and the
-/// genuine, already-OFL Cantarell (GNOME). All are SIL OFL 1.1; see
-/// `assets/fonts/README.md` for licenses and sources. The `.ttf` bytes are
-/// `include_bytes!`-embedded only under this feature, so the default build
-/// carries none of them. This is cross-platform, feature-gated code — never
-/// `cfg(target_os)`-gated (ADR-0002) — living in the render layer, not
-/// `src/platform/`.
+/// muri can't bundle the proprietary originals (SF Pro / Segoe UI forbid
+/// redistribution), so it vendors OFL substitutes instead — Inter, Selawik,
+/// Cantarell (see `assets/fonts/README.md` for licenses). Feature-gated, never
+/// `cfg(target_os)`-gated (ADR-0002).
 #[cfg(feature = "bundled-fonts")]
 pub(crate) mod bundled_fonts {
     use super::{query_face, Arc, Database, DbFamily, DbSource};
@@ -1832,17 +1728,13 @@ pub(crate) mod bundled_fonts {
 }
 
 /// Resolve a concrete UI font family whose **regular and bold are distinct,
-/// real faces within that same family**, so a bold section header and a regular
-/// row read as one typeface at two weights.
+/// real faces within that same family**, so a bold section header and a
+/// regular row read as one typeface at two weights.
 ///
-/// The generic `Family::SansSerif` is deliberately avoided, and a name-only
-/// lookup isn't enough: on macOS the native `.SF NS` (San Francisco) is a single
-/// variable face, so a `fontdb` query for regular and for bold return the *same*
-/// face — there is no static bold to pair with the regular, the "different face
-/// for bold" glitch the Phase 1 report flagged. So each candidate is verified by
-/// confirming both weights resolve to **distinct** in-family faces (and that the
-/// bold one is actually bold); the first that passes wins (Helvetica Neue on
-/// stock macOS, DejaVu Sans in the headless suite).
+/// A name-only lookup isn't enough: on macOS `.SF NS` is a single variable
+/// face, so regular and bold queries return the *same* face (the "different
+/// face for bold" glitch). Each candidate is verified by confirming both
+/// weights resolve to **distinct** in-family faces; the first that passes wins.
 fn resolve_ui_family(db: &Database) -> Option<String> {
     for cand in [
         ".SF NS",
@@ -1974,10 +1866,9 @@ impl SceneDrawer for RasterDrawer {
         // Tracking in device px, matching the device `px` size (measure uses the
         // logical equivalent, so the two stay proportional).
         let tracking = run.font.letter_spacing * scale;
-        // Diagnostic (0.12.10, #65/#66): the live on-screen popup reportedly
-        // renders bold/tracking differently than the offscreen renderer, which no
-        // static trace explains — so print the exact per-run inputs on the real
-        // live path. Inert unless `MURI_DEBUG_TEXT` is set; removed once diagnosed.
+        // Diagnostic (#65/#66): print per-run inputs to debug a reported
+        // live-vs-offscreen bold/tracking divergence. Inert unless
+        // `MURI_DEBUG_TEXT` is set.
         if debug_text_enabled() {
             let emb = primary.map(|f| self.fonts.face_embolden(f, ot_weight));
             let face_dbg = primary
@@ -2007,9 +1898,7 @@ impl SceneDrawer for RasterDrawer {
         let (pw, ph) = (self.fb.width() as i32, self.fb.height() as i32);
 
         // Diagnostic (#65): log the (face, emb, opsz) actually reaching glyph
-        // rasterization for this run — the live-vs-offscreen bold divergence is
-        // between the (correct) `Variable(700)` decision and the on-screen pixels,
-        // so this confirms whether the bold treatment survives to `glyph_image`.
+        // rasterization, confirming the bold treatment survives to `glyph_image`.
         // Inert unless `MURI_DEBUG_TEXT` is set.
         if debug_text_enabled() {
             if let Some(g0) = shaped.glyphs.first() {

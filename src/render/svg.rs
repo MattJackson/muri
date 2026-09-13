@@ -3,37 +3,27 @@
 //! transitively (via `swash`), so `Icon::Svg` is lit up by depending on it
 //! *directly* — no `tiny-skia`/`resvg`, no second PNG codec, no XML crate.
 //!
-//! This module owns a small, hand-rolled XML/attribute reader and the SVG glue
+//! This module owns a hand-rolled XML/attribute reader and the SVG glue
 //! (color/transform/shape parsing, a straight-alpha compositor); [`zeno`] owns
-//! the actual anti-aliased fill/stroke rasterization into an 8-bit alpha
-//! coverage mask. The output shape is the **same** as
+//! the anti-aliased fill/stroke rasterization. Output is the **same** shape as
 //! [`raster::decode_png`](super::raster::decode_png) — `(rgba, width, height)`
-//! straight-alpha RGBA — so it slots straight into the existing icon path.
+//! straight-alpha RGBA — so it slots into the existing icon path.
 //!
 //! ## Supported subset
 //!
-//! * `<svg viewBox|width|height>`, `<g>` grouping.
-//! * `<path d=…>` (the full M/L/H/V/C/S/Q/T/A/Z grammar, parsed by zeno's own
-//!   SVG path reader), `<rect>` (+`rx`/`ry`), `<circle>`, `<ellipse>`, `<line>`,
-//!   `<polygon>`, `<polyline>`.
-//! * Presentation attributes: `fill` (named / `#hex` / `rgb()`), `fill-opacity`,
-//!   `opacity`, `stroke`, `stroke-width`, `stroke-opacity`, `fill-rule`
-//!   (`nonzero`/`evenodd`), and `transform`
-//!   (`matrix`/`translate`/`scale`/`rotate`/`skewX`/`skewY`), all inherited
-//!   through `<g>`.
-//!
-//! Anything else (gradients, `<use>`, `<text>`, filters, clip paths, CSS
-//! `<style>`) is skipped gracefully — this is a library and the SVG bytes are
-//! untrusted input, so unsupported or malformed constructs never panic and the
-//! whole thing returns `None` when it can't produce a sensible raster.
+//! `<svg viewBox|width|height>`, `<g>`; `<path d>`, `<rect>` (+`rx`/`ry`),
+//! `<circle>`, `<ellipse>`, `<line>`, `<polygon>`, `<polyline>`; `fill`,
+//! `fill-opacity`, `opacity`, `stroke`, `stroke-width`, `stroke-opacity`,
+//! `fill-rule`, and `transform`, all inherited through `<g>`. Anything else
+//! (gradients, `<use>`, `<text>`, filters, clip paths, CSS) is skipped
+//! gracefully — the SVG bytes are untrusted input, so malformed constructs
+//! never panic and just return `None`.
 //!
 //! ## Sizing
 //!
-//! The image is rasterized at a fixed device size (max dimension
-//! [`TARGET_MAX`], aspect-ratio preserved from the viewBox) so it composes with
-//! muri's existing icon-scaling blit. Per-DPI-exact rendering is approximated
-//! for now: the icon is produced once at this size and the blitter scales it,
-//! rather than re-rasterizing the vector at each DPI.
+//! Rasterized at a fixed device size ([`TARGET_MAX`], aspect preserved from the
+//! viewBox): produced once and scaled by the blitter rather than re-rasterized
+//! per DPI.
 
 use zeno::{Command, Fill, Format, Mask, PathBuilder, PathData, Stroke, Style, Transform};
 

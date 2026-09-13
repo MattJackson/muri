@@ -1,16 +1,13 @@
 //! Present path: blit the shared [`Framebuffer`] to a layered popup window
 //! with per-pixel alpha via `UpdateLayeredWindow`.
 //!
-//! The `RasterDrawer` framebuffer is premultiplied RGBA (byte order R, G, B, A).
-//! A layered window with `ULW_ALPHA` + an `AC_SRC_ALPHA` blend wants a **top-down
-//! 32-bit premultiplied BGRA** DIB, so the only conversion is the R/B channel
-//! swap — the premultiplication the raster blitter already did is exactly what
-//! the layered blit expects, so the rounded-corner transparency and any
-//! reduced-alpha panel body composite over whatever is behind the window (the
-//! acrylic backdrop, spec 21 §2). No opaque flatten happens here.
+//! The `RasterDrawer` framebuffer is premultiplied RGBA. A layered window with
+//! `ULW_ALPHA` + `AC_SRC_ALPHA` wants top-down 32-bit premultiplied BGRA, so the
+//! only conversion is the R/B channel swap; transparency then composites over
+//! whatever is behind the window (the acrylic backdrop, spec 21 §2).
 //!
-//! `UpdateLayeredWindow` also *positions* the window (via `pptdst`), so one call
-//! both moves and paints it — there is no separate `SetWindowPos` for geometry.
+//! `UpdateLayeredWindow` also positions the window (via `pptdst`), so one call
+//! both moves and paints it.
 
 use std::ptr::null_mut;
 

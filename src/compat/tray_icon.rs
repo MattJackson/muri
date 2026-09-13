@@ -5,40 +5,28 @@
 //!
 //! Like its sibling [`muda`](super::muda), this facade mirrors `tray-icon`'s
 //! public API **exactly — no more, no less**, so both `s/tray-icon/muri/` and
-//! `s/muri/tray-icon/` hold. It carries **no** muri-only customization: forcing a
-//! [`ThemeSource`](crate::ThemeSource) / [`MenuOptions`](crate::MenuOptions) on
-//! the tray, a live theme/options swap, and liveness/spawn-error introspection
-//! are **not** on this surface. A consumer that wants any of them has left compat
-//! and uses the native [`Tray`](crate::Tray) builder
-//! ([`options`](crate::Tray::options) / [`theme`](crate::Tray::theme)),
-//! [`Tray::spawn`](crate::Tray::spawn) (whose `Result<TrayHandle, Error>` is the
-//! liveness/error signal), and [`TrayHandle`](crate::TrayHandle)
-//! ([`set_theme`](crate::TrayHandle::set_theme) /
-//! [`set_options`](crate::TrayHandle::set_options)).
+//! `s/muri/tray-icon/` hold. It carries **no** muri-only customization (theme,
+//! options, liveness/spawn-error introspection); a consumer that wants those has
+//! left compat and uses the native [`Tray`](crate::Tray) builder,
+//! [`Tray::spawn`](crate::Tray::spawn), and [`TrayHandle`](crate::TrayHandle)
+//! directly.
 //!
-//! `TrayIconBuilder::build()` returns immediately with a live handle (as
-//! tray-icon's does); it does **not** block the caller (spec `02` §2.1). Unlike
-//! tray-icon — which registers the icon and leans on the host's own event loop —
-//! muri installs a **live** tray driven on a background UI thread (macOS: on the
-//! host's main-thread run loop) via [`Tray::spawn`](crate::Tray::spawn), so the
-//! icon actually appears (issues #6, #7). The important behavior change: raw
-//! tray-icon's click opens the OS's native menu, whereas muri's opens the
-//! **custom-drawn** popup — the point of migrating.
+//! `TrayIconBuilder::build()` returns immediately with a live handle (spec `02`
+//! §2.1). Unlike tray-icon — which registers the icon and leans on the host's
+//! own event loop — muri installs a **live** tray driven on a background UI
+//! thread via [`Tray::spawn`](crate::Tray::spawn), so the icon actually appears
+//! (issues #6, #7); its click opens muri's **custom-drawn** popup rather than an
+//! OS native menu.
 //!
 //! ### Divergences (spec `02` §8)
 //!
 //! - `TrayIconEvent` is emitted on macOS/Windows and **not on Linux** (matching
-//!   tray-icon's own contract — the SNI host never delivers the click). The
-//!   facade never fabricates Linux events.
-//! - The tray icon is carried as raw RGBA in the facade [`Icon`]. It is encoded
-//!   to PNG and handed to the muri [`Tray`](crate::Tray) as
-//!   [`Icon::Png`](crate::menu::Icon::Png) at build time (and on
-//!   [`TrayIcon::set_icon`]), so the pixels reach the drawn tray. (Previously the
-//!   facade left the tray on a placeholder symbol and the RGBA never reached it —
-//!   a facade-specific gap, distinct from the spec's `NativeIcon`/`Icon::Symbol`
-//!   divergence D6, which is about menu-item glyphs.) On Linux this populates the
-//!   SNI `icon_pixmap` GNOME's appindicator extension needs (issue #6); the
-//!   placeholder symbol is used only when no icon is configured.
+//!   tray-icon's own contract — the SNI host never delivers the click).
+//! - The tray icon is carried as raw RGBA in the facade [`Icon`] and encoded to
+//!   PNG for the muri [`Tray`](crate::Tray) as [`Icon::Png`](crate::menu::Icon::Png)
+//!   at build time (and on [`TrayIcon::set_icon`]), populating the Linux SNI
+//!   `icon_pixmap` (issue #6); the placeholder symbol is used only when no icon
+//!   is configured.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -143,15 +131,12 @@ pub enum MouseButtonState {
 
 /// A tray icon event, mirroring `tray-icon`'s `TrayIconEvent`.
 ///
-/// **Not yet emitted by the backend.** The type, the process-global
-/// [`receiver`](TrayIconEvent::receiver), and [`set_event_handler`] exist for
-/// source/API parity with `tray-icon`, but muri's tray backends do not yet
-/// surface icon-level pointer events (click/enter/leave/move) into this channel —
-/// so a handler installed here currently never fires. Row *activations* inside
-/// the popup are delivered through the muda [`MenuEvent`](crate::MenuEvent)
-/// channel instead. When wired, events will (per spec `02` §8) fire on
-/// macOS/Windows and **not on Linux** (the SNI host never reports icon clicks).
-/// Tracked as a follow-up; do not rely on this channel for click handling yet.
+/// **Not yet emitted by the backend.** The type, [`receiver`](TrayIconEvent::receiver),
+/// and [`set_event_handler`] exist for API parity, but muri's tray backends do
+/// not yet surface icon-level pointer events into this channel, so a handler
+/// installed here currently never fires. Row *activations* go through the muda
+/// [`MenuEvent`](crate::MenuEvent) channel instead. Tracked as a follow-up; do
+/// not rely on this channel for click handling yet.
 ///
 /// [`set_event_handler`]: TrayIconEvent::set_event_handler
 #[derive(Clone, Debug)]
@@ -328,13 +313,11 @@ impl TrayIconBuilder {
     /// Attach the menu. Routes the menu to a muri **custom** surface (spec
     /// `02` §2). Takes a concrete `Box<Menu>`, not a trait object like real
     /// tray-icon's `Box<dyn ContextMenu + Send + Sync>` (issue #53, item 1):
-    /// the facade's `Menu` is `Rc`-shared (`!Send`), so it cannot satisfy that
-    /// `Send + Sync` bound. Making `ContextMenu` object-safe *and* dropping
-    /// `Send + Sync` here would ripple into every surface method's signature
-    /// across both compat modules — a real trait-object refactor, not a
-    /// same-file fix — so this facade instead documents the divergence and
-    /// keeps the concrete type; there is exactly one facade `Menu` type, so
-    /// nothing is actually lost by not being generic over it.
+    /// the facade's `Menu` is `Rc`-shared (`!Send`), so it can't satisfy that
+    /// bound. Fixing this would ripple into every surface method's signature
+    /// across both compat modules, so the facade documents the divergence and
+    /// keeps the concrete type — there is exactly one facade `Menu` type, so
+    /// nothing is lost by not being generic over it.
     // `Box<Menu>` is deliberate signature parity with tray-icon's `with_menu`.
     #[allow(clippy::boxed_local)]
     pub fn with_menu(mut self, menu: Box<Menu>) -> Self {
@@ -371,20 +354,16 @@ impl TrayIconBuilder {
         tray
     }
 
-    /// Build the tray icon. Returns immediately (passive model, spec `02` §2.1):
-    /// it does **not** block the caller, but — unlike tray-icon, which relies on
-    /// the host's event loop — it installs a **live** muri tray driven on a
-    /// background UI thread (macOS: on the host's main-thread run loop), so the
-    /// icon actually appears (issues #6, #7). The returned handle mutates it
-    /// (`set_icon` / `set_menu` / `set_tooltip`) via the same cross-thread path.
+    /// Build the tray icon. Returns immediately (passive model, spec `02` §2.1)
+    /// but, unlike tray-icon, installs a **live** muri tray on a background UI
+    /// thread so the icon actually appears (issues #6, #7). The returned handle
+    /// mutates it via the same cross-thread path.
     ///
     /// **Infallible-degrade:** matching `tray-icon`'s practically-infallible
-    /// `build()`, this returns `Ok` even when the underlying `Tray::spawn` fails —
-    /// a headless/off-main-thread environment, but also a *real* failure such as an
-    /// unavailable Linux session D-Bus. In that case the tray is not live: the
-    /// returned `TrayIcon` records state but its post-construction setters are
-    /// no-ops. A consumer that must detect install failure has left compat: drive
-    /// the native [`crate::Tray::spawn`] directly, whose
+    /// `build()`, this returns `Ok` even when the underlying `Tray::spawn` fails
+    /// (headless env, or a real failure like an unavailable Linux D-Bus session).
+    /// The tray is then not live: setters become no-ops. A consumer that must
+    /// detect install failure uses [`crate::Tray::spawn`] directly, whose
     /// `Result<TrayHandle, Error>` **is** the liveness/error signal (#61).
     pub fn build(self) -> super::muda::Result<TrayIcon> {
         // Infallible-degrade for tray-icon parity: a spawn failure yields a
@@ -458,17 +437,11 @@ impl TrayIcon {
         &self.id
     }
 
-    /// Replace the tray icon image.
-    ///
-    /// The new icon is recorded on the facade (previously the argument was
-    /// silently discarded and `Ok(())` returned unconditionally — a no-op that
-    /// falsely claimed success).
-    ///
-    /// The facade's raw RGBA is encoded to PNG and posted to the live muri
-    /// [`Tray`](crate::Tray): the new pixels reach the drawn tray — on Linux the
-    /// SNI `icon_pixmap` is re-registered, on Windows the `HICON` is replaced. A
-    /// `None` icon (or RGBA that fails to encode)
-    /// clears the facade record and reverts the tray to the placeholder symbol.
+    /// Replace the tray icon image. The new icon is recorded on the facade and
+    /// encoded to PNG for the live muri [`Tray`](crate::Tray) — on Linux the SNI
+    /// `icon_pixmap` is re-registered, on Windows the `HICON` is replaced. A
+    /// `None` icon (or RGBA that fails to encode) reverts to the placeholder
+    /// symbol.
     pub fn set_icon(&self, icon: Option<Icon>) -> super::muda::Result<()> {
         if let Some(handle) = &self.handle {
             handle.set_icon(icon_to_muri(&icon));
@@ -620,10 +593,9 @@ mod tests {
     }
 
     /// A tray handler that re-enters `set_event_handler` from inside its own body
-    /// must run to completion, not deadlock. Serialized on the shared global-event
-    /// test lock so it doesn't race other handler-installing tests. Before the
-    /// `Arc`-clone-then-drop-lock fix this hung: `emit` held the slot lock across
-    /// the callback and the callback's `set_event_handler(None)` re-acquired it.
+    /// must run to completion, not deadlock. Before the `Arc`-clone-then-drop-lock
+    /// fix this hung: `emit` held the slot lock across the callback while the
+    /// callback's `set_event_handler(None)` re-acquired it.
     #[test]
     fn tray_reentrant_set_event_handler_from_handler_does_not_deadlock() {
         let _guard = crate::event::test_lock();
@@ -739,12 +711,9 @@ mod tests {
 
     #[test]
     fn facade_setters_and_drop_post_the_matching_commands_to_the_live_handle() {
-        // The facade setters only reach a live tray through `self.handle`, but
-        // build() spawns best-effort and leaves `handle: None` headlessly — so
-        // the other facade tests never exercise that branch. Build a TrayIcon
-        // around a known handle directly and assert each setter (and Drop) posts
-        // the *right* TrayCommand. A swap (set_title -> SetTooltip, or Drop not
-        // posting Shutdown) would fail here.
+        // build() spawns best-effort and leaves `handle: None` headlessly, so
+        // build a TrayIcon around a known handle directly and assert each setter
+        // (and Drop) posts the *right* TrayCommand.
         use crate::TrayCommand;
         let native = crate::Tray::new(MuriIcon::Symbol("tray"));
         let handle = native.handle();
@@ -779,12 +748,10 @@ mod tests {
 
     #[test]
     fn rect_maps_the_native_anchor_rect_through_the_live_handle() {
-        // #48: `rect()` must consult the live `TrayHandle::anchor_rect()`
-        // rather than unconditionally returning `None`. There is no running
-        // platform backend in a headless unit test to answer the query, so the
-        // *query path* is exercised (it must not panic and must time out to
-        // `None` rather than hang); the `From<LogicalRect>` conversion itself
-        // is asserted directly below.
+        // #48: `rect()` must consult the live `TrayHandle::anchor_rect()` rather
+        // than unconditionally returning `None`. No backend answers the query
+        // headlessly, so this exercises the query path (must time out to `None`,
+        // not hang); the `From<LogicalRect>` conversion is asserted below.
         let native = crate::Tray::new(MuriIcon::Symbol("tray"));
         let handle = native.handle();
         let tray = TrayIcon {

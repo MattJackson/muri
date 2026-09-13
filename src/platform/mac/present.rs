@@ -1,13 +1,11 @@
-//! Present path: blit the shared [`Framebuffer`] to a panel's content view
-//! via a `CALayer`, replacing the old `softbuffer` framebuffer.
+//! Present path: blit the shared [`Framebuffer`] to a panel's content view via
+//! a `CALayer`, replacing the old `softbuffer` framebuffer.
 //!
-//! The `RasterDrawer` framebuffer is premultiplied straight-alpha RGBA (byte
-//! order R, G, B, A). We wrap its bytes in a `CGImage` and set that as the
-//! content view's `layer.contents`. Because the image carries per-pixel alpha,
-//! the rounded-corner transparency and any reduced-alpha panel body composite
-//! over the `NSVisualEffectView` backdrop — the OS supplies the vibrancy blur
-//! behind the raster, exactly as spec 20 §2 requires. No opaque flatten happens
-//! here (that was the shipped bug that hid vibrancy).
+//! The framebuffer is premultiplied RGBA; we wrap its bytes in a `CGImage` and
+//! set that as the content view's `layer.contents`. Per-pixel alpha lets the
+//! rounded-corner transparency composite over the OS vibrancy backdrop (spec
+//! 20 §2) — no opaque flatten happens here (that was the shipped bug that hid
+//! vibrancy).
 
 use core::ptr;
 
@@ -75,12 +73,9 @@ pub(super) fn set_layer_contents(view: &NSView, image: &CGImage, scale: f32) {
     };
     // A `CGImageRef` is toll-free acceptable as `CALayer.contents`.
     let obj: *const AnyObject = (image as *const CGImage).cast();
-    // `contents` is an animatable CALayer property: assigning it outside a
-    // `drawRect:` cycle triggers Core Animation's DEFAULT implicit action — a
-    // ~0.25s cross-fade — on every swap. On hover that makes each highlight fade
-    // in mushily and feel laggy (the native menu highlights instantly). Wrap the
-    // update in a `CATransaction` with actions disabled so the contents swap is
-    // immediate, matching the OEM menu's instant highlight.
+    // `contents` is animatable: assigning it outside `drawRect:` otherwise
+    // triggers Core Animation's default ~0.25s cross-fade, making hover feel
+    // laggy. Disable actions so the swap is immediate, like native.
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     unsafe {

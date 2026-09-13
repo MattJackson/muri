@@ -1,52 +1,35 @@
 //! Linux backend (M5) — the honest carve-out plus the recommended default path.
 //!
 //! The modern Linux tray is StatusNotifierItem / AppIndicator over D-Bus: the
-//! *host* (GNOME Shell, KDE Plasma, an XEmbed shim) owns and draws the icon in
-//! its own process and renders the menu from a `com.canonical.dbusmenu`
-//! description. The application is never told the icon's on-screen rectangle and
-//! never receives the click coordinate, and Wayland additionally forbids a client
-//! from positioning its own toplevel. A tray-*anchored* styled popup is therefore
-//! **architecturally impossible** here — a permanent, honest non-goal — so
-//! [`LinuxPlatform::tray_anchor_rect`] returns
-//! [`Unsupported::TrayAnchor`] and
-//! [`LinuxPlatform::supports_tray_anchor`] returns `false` (spec 22 §1, §6).
+//! host owns and draws the icon in its own process and renders the menu from a
+//! `com.canonical.dbusmenu` description. The app is never told the icon's
+//! rectangle or click coordinate, and Wayland forbids a client from positioning
+//! its own toplevel — so a tray-*anchored* styled popup is **architecturally
+//! impossible** here: [`LinuxPlatform::tray_anchor_rect`] returns
+//! [`Unsupported::TrayAnchor`] (spec 22 §1, §6).
 //!
-//! ## What this backend delivers (spec 22 §2, Path 1 — the recommended default)
+//! ## Path 1 — native menu (default)
 //!
-//! [`Platform::run_tray`] registers an SNI item (via the pure-Rust [`ksni`]
-//! crate — no GTK/`libdbus` runtime dependency) and exports a native
-//! `com.canonical.dbusmenu` menu **built from muri's own [`Menu`]** (see the
-//! `sni` submodule). The host draws it on X11 and Wayland alike, and it is accessible over
-//! AT-SPI **for free** because it is a real native menu — so Path 1 needs no
-//! AccessKit bridge. Row activations dispatch through the muri tray's unified
-//! handler. Runtime `TrayCommand`s from a
-//! [`TrayHandle`](crate::TrayHandle) are drained on the run-loop thread and applied
-//! via [`ksni::blocking::Handle::update`], which re-exports the SNI properties and
-//! the dbusmenu tree — so `set_menu` rebuilds the menu, `set_icon`/`set_tooltip`
-//! update the item.
+//! [`Platform::run_tray`] registers an SNI item via the pure-Rust [`ksni`] crate
+//! and exports a `com.canonical.dbusmenu` built from muri's own [`Menu`] (see the
+//! `sni` submodule); the host draws it and it's accessible over AT-SPI for free.
+//! Runtime `TrayCommand`s are drained on the run-loop thread and applied via
+//! [`ksni::blocking::Handle::update`].
 //!
-//! ## The styled pointer-anchored popup (spec 22 §2, Path 2)
+//! ## Path 2 — styled pointer-anchored popup
 //!
-//! [`Platform::open_popup_session`] wires the styled `ContextMenu::open_at`
-//! pointer path, degrading honestly per display server:
+//! [`Platform::open_popup_session`] wires `ContextMenu::open_at`, degrading
+//! honestly per display server:
 //!
-//! - **X11 (incl. XWayland):** where an X server is reachable (`$DISPLAY` set),
-//!   muri opens an **override-redirect** `_NET_WM_WINDOW_TYPE_POPUP_MENU` window at
-//!   the caller's absolute pointer coordinate — X11 permits client positioning —
-//!   paints the shared [`RasterDrawer`](crate::render::RasterDrawer) framebuffer via
-//!   `PutImage`, grabs the pointer + keyboard, and runs a local hover / click /
-//!   keyboard-nav loop with the full N-level flyout stack (decision #8). See the
-//!   `x11` submodule.
-//! - **Wayland (no X server):** returns
-//!   [`Unsupported::ClientPositioning`]. This
-//!   is the honest protocol limit, not a stub: a Wayland client cannot self-position
-//!   a popup without a parent surface + input serial (spec 22 §3), and
-//!   `open_popup_session` carries neither. The styled path on Wayland must go
-//!   through the caller's own surface (a future `raw-window-handle` parameter, spec
-//!   22 §2), so muri refuses rather than fabricating a mis-placed toplevel.
+//! - **X11 (incl. XWayland):** opens an override-redirect
+//!   `_NET_WM_WINDOW_TYPE_POPUP_MENU` window at the pointer, paints via
+//!   `PutImage`, grabs pointer + keyboard, runs a local nav loop (see `x11`).
+//! - **Wayland (no X server):** returns [`Unsupported::ClientPositioning`] — a
+//!   Wayland client can't self-position without a parent surface + input serial
+//!   (spec 22 §3), which this API carries neither of.
 //!
-//! The Linux styled surface is an **opaque** panel (spec 22 §6: the compositor owns
-//! blur; there is no client-controllable vibrancy in any portable protocol).
+//! The Linux styled surface is an **opaque** panel (spec 22 §6: no
+//! client-controllable vibrancy in any portable protocol).
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -69,19 +52,16 @@ use ksni::blocking::{Handle, TrayMethods};
 use sni::MuriSni;
 
 /// Which presenter draws the tray/context menu on this Linux session — the
-/// runtime seam between the three Linux menu-presentation strategies (deliverable
-/// #1, research doc §10). Selected once by [`detect_linux_presenter`] and carried
-/// on the SNI adapter so a right-click / activate routes to the right surface.
+/// runtime seam between the three Linux menu-presentation strategies
+/// (deliverable #1, research doc §10). Selected once by
+/// [`detect_linux_presenter`] and carried on the SNI adapter.
 ///
-/// - [`NativeDbusMenu`](LinuxMenuPresenter::NativeDbusMenu) — the SNI host draws a
-///   `com.canonical.dbusmenu` tree ([`sni`]). Universal baseline: every SNI host
-///   incl. GNOME, accessible for free over AT-SPI. Also the honest fallback
-///   anywhere the custom path isn't available.
+/// - [`NativeDbusMenu`](LinuxMenuPresenter::NativeDbusMenu) — host-drawn
+///   `com.canonical.dbusmenu` ([`sni`]); universal baseline, accessible for free.
 /// - [`X11Popup`](LinuxMenuPresenter::X11Popup) — muri's own override-redirect
-///   styled popup at the pointer ([`x11`]), on a real X11 session.
+///   styled popup at the pointer ([`x11`]).
 /// - [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell) — muri's own
-///   `wlr-layer-shell` styled popup ([`wayland`]) on wlroots + KWin/Plasma.
-///   **Scaffold only** in 0.11.0 (see the `wayland` module).
+///   `wlr-layer-shell` styled popup ([`wayland`]). **Scaffold only** in 0.11.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // `WaylandLayerShell` is only *constructed* under the off-by-default
 // `wayland-styled` feature; keep the variant present (and matched) unconditionally
@@ -100,19 +80,15 @@ pub(crate) enum LinuxMenuPresenter {
 /// Pick the Linux menu presenter for the current session from the environment
 /// (deliverable #2, research doc §10 "Runtime detection strategy"):
 ///
-/// 1. `$WAYLAND_DISPLAY` set → **Wayland**. If the desktop is GNOME/Mutter (which
-///    refuses layer-shell — research doc §6) → [`NativeDbusMenu`]. Otherwise, when
-///    the `wayland-styled` scaffold is compiled *and* the env suggests a
-///    layer-shell compositor, prefer [`WaylandLayerShell`] (the live
-///    `zwlr_layer_shell_v1` registry bind, [`wayland::layer_shell_available`], is
-///    the device-side confirmation before a surface is actually created). Without
-///    the feature (today's default) Wayland always falls back to [`NativeDbusMenu`].
-/// 2. Else `$DISPLAY` set → real **X11** → [`X11Popup`] when the `x11-popup`
-///    feature is compiled, else [`NativeDbusMenu`].
-/// 3. Else (no display env: headless/CI) → [`NativeDbusMenu`].
+/// 1. `$WAYLAND_DISPLAY` set → GNOME/Mutter (refuses layer-shell) →
+///    [`NativeDbusMenu`]; else, with `wayland-styled` compiled and the env
+///    suggesting a layer-shell compositor, [`WaylandLayerShell`].
+/// 2. Else `$DISPLAY` set → [`X11Popup`] when `x11-popup` is compiled, else
+///    [`NativeDbusMenu`].
+/// 3. Else (headless/CI) → [`NativeDbusMenu`].
 ///
-/// This is the cheap, non-blocking, never-panicking env logic; it never opens a
-/// Wayland/X connection itself, so it is safe to call on the SNI service thread.
+/// Cheap, non-blocking, never-panicking; never opens a Wayland/X connection
+/// itself, so it's safe to call on the SNI service thread.
 ///
 /// [`NativeDbusMenu`]: LinuxMenuPresenter::NativeDbusMenu
 /// [`X11Popup`]: LinuxMenuPresenter::X11Popup
@@ -230,11 +206,9 @@ pub struct LinuxPlatform {
     /// long as the platform handle lives. The managed [`Platform::run_tray`] path
     /// spawns its own service instead and does not use this.
     ///
-    /// Pinned to the `MENU_ON_ACTIVATE = true` (native-dbusmenu) variant of
-    /// [`MuriSni`]: `install_tray` registers a bare icon with an empty menu for
-    /// consumers running their own loop, so there is no styled popup to route an
-    /// `Activate` into — the host-drawn baseline is the right behavior here (the
-    /// styled-presenter split lives on the managed [`run_sni_loop`] path).
+    /// Pinned to the `MENU_ON_ACTIVATE = true` (native-dbusmenu) variant: a bare
+    /// icon with an empty menu has no styled popup to route an `Activate` into
+    /// (the styled-presenter split lives on the managed [`run_sni_loop`] path).
     service: Option<Handle<MuriSni<true>>>,
 }
 
@@ -260,12 +234,10 @@ impl LinuxPlatform {
 impl Drop for LinuxPlatform {
     /// Tear down a standalone [`Platform::install_tray`] SNI service on the
     /// platform's final drop. `ksni`'s blocking `Handle` has no unregistering
-    /// `Drop` of its own (the same reason the re-install path in `install_tray`
-    /// shuts the prior handle down explicitly, #35), so without this the D-Bus
-    /// service + its thread + the tray icon would leak until process exit — this
-    /// mirrors `MacosAnchor`/`WindowsAnchor` tearing their OS registration down on
-    /// `Drop`. The managed `run_tray` path owns its own service and never
-    /// populates `self.service`, so this only fires for the standalone API.
+    /// `Drop` of its own (#35), so without this the D-Bus service, its thread,
+    /// and the tray icon would leak until process exit. The managed `run_tray`
+    /// path never populates `self.service`, so this only fires for the
+    /// standalone API.
     fn drop(&mut self) {
         if let Some(service) = self.service.take() {
             service.shutdown().wait();
@@ -277,10 +249,8 @@ impl Platform for LinuxPlatform {
     fn install_tray(&mut self, icon: &Icon, tooltip: Option<&str>) -> Result<()> {
         // Scan installed fonts in the background so the first menu open is instant.
         crate::render::prewarm_system_fonts();
-        // Register a bare SNI item (icon + tooltip, empty menu). The full menu
-        // and click handler only exist on the owning `Tray`, so the rich menu is
-        // delivered through `run_tray`; this method is for consumers that manage
-        // their own loop and just want the icon visible.
+        // Bare SNI item (icon + tooltip, empty menu): the rich menu + click
+        // handler only exist on the owning `Tray`, delivered via `run_tray`.
         let mut tray = Tray::new(icon.clone());
         if let Some(tip) = tooltip {
             tray = tray.tooltip(tip);
@@ -294,11 +264,9 @@ impl Platform for LinuxPlatform {
         .map_err(|e| {
             Error::TrayInstall(format!("SNI/StatusNotifierItem registration failed: {e}"))
         })?;
-        // Re-install: shut the prior ksni service down before replacing it (#35).
-        // ksni's blocking `Handle` has no `Drop` that unregisters, so simply
-        // overwriting `self.service` would leak the old D-Bus service + thread and
-        // leave a stale, unremovable tray icon. The new handle spawned first, so a
-        // failed re-install leaves the existing icon intact.
+        // Re-install: shut the prior ksni service down before replacing it (#35),
+        // since it has no unregistering `Drop`. The new handle spawned first, so
+        // a failed re-install leaves the existing icon intact.
         if let Some(old) = self.service.take() {
             old.shutdown().wait();
         }
@@ -316,17 +284,15 @@ impl Platform for LinuxPlatform {
 
     fn cursor_position(&self) -> Option<LogicalPoint> {
         // X11 (incl. XWayland) can report the global pointer; a pure-Wayland
-        // session cannot (no client pointer query) — `None` there is honest. Also
-        // `None` in a tray-only build that compiled out the X11 path (#1).
+        // session cannot (no client pointer query) — `None` there is honest.
         #[cfg(feature = "x11-popup")]
         {
             if x11::is_available() {
                 return x11::cursor_position();
             }
         }
-        // A pure-Wayland session has no client pointer query (research doc §5): the
-        // styled layer-shell popup discovers the pointer within its own overlay
-        // surface instead, so this is honestly `None` here.
+        // No client pointer query on Wayland (research doc §5); the layer-shell
+        // popup discovers the pointer within its own overlay surface instead.
         #[cfg(feature = "wayland-styled")]
         {
             return wayland::cursor_position();
@@ -370,10 +336,10 @@ impl Platform for LinuxPlatform {
     }
 
     /// Open the styled, pointer-anchored `ContextMenu::open_at` popup (spec 22 §2
-    /// Path 2). On X11 (incl. XWayland) this draws muri's own surface at the
-    /// pointer via an override-redirect window (the `x11` submodule); on a Wayland-only session
-    /// it returns [`Unsupported::ClientPositioning`] — the honest protocol limit
-    /// (spec 22 §3), since this API carries no parent surface + input serial.
+    /// Path 2). On X11 (incl. XWayland) this draws muri's own override-redirect
+    /// surface at the pointer (the `x11` submodule); on Wayland-only it returns
+    /// [`Unsupported::ClientPositioning`] (spec 22 §3), since this API carries
+    /// no parent surface + input serial.
     fn open_popup_session(
         &mut self,
         menu: Menu,
@@ -407,18 +373,13 @@ impl Platform for LinuxPlatform {
 /// [`X11Popup`](LinuxMenuPresenter::X11Popup) presenter (deliverable #3): ignore
 /// any host-supplied SNI coordinate (unreliable / often `0,0`) and use
 /// [`x11::cursor_position`] (`XQueryPointer`) as the anchor, then route to the
-/// shared [`x11::open_popup_session`]. The menu, options and click dispatch come
-/// straight off the live [`Tray`], so the popup shows muri's exact styled rows and
-/// activations flow through the tray's `on_click` — the very path
-/// [`ContextMenu::open_at`](crate::ContextMenu::open_at) uses. Blocks the calling
-/// (SNI service) thread until the popup dismisses.
+/// shared [`x11::open_popup_session`] with the menu/options/dispatch off the
+/// live [`Tray`]. Blocks the calling (SNI service) thread until dismissed.
 ///
-/// DEVICE-VERIFY(0.11.0): the end-to-end SNI-click → cursor read → styled popup on
-/// a real X11 session, including the ksni `ItemIsMenu`/`activate` interplay noted
-/// on `MuriSni::activate` (ksni 0.3.6 only calls `activate` when `ItemIsMenu` is
-/// false, and its `ContextMenu` right-click D-Bus method is a hard `UnknownMethod`
-/// — so a fully host-agnostic right-click hook needs an upstream ksni capability
-/// or a raw-`zbus` SNI impl; see ADR-0003).
+/// DEVICE-VERIFY(0.11.0): the end-to-end SNI-click → cursor read → styled popup
+/// on a real X11 session, including the ksni `ItemIsMenu`/`activate` interplay
+/// (ksni 0.3.6's right-click `ContextMenu` D-Bus method is a hard
+/// `UnknownMethod`; see ADR-0003).
 #[cfg(feature = "x11-popup")]
 pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
     let Some(point) = x11::cursor_position() else {
@@ -427,15 +388,9 @@ pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
     let anchor = LogicalRect::new(point, LogicalSize::new(0.0, 0.0));
     let dark = system_appearance().is_dark();
     let dispatch = |id: &MenuId| tray.dispatch(id);
-    // Reuse the exact styled-popup backend `ContextMenu::open_at` funnels into (it
-    // attaches the AT-SPI adapter itself — deliverable #5).
-    //
-    // The `Result` is deliberately discarded (#F10/F11): ksni's `activate(&mut
-    // self, x, y)` callback returns nothing, so there is no channel back to the SNI
-    // host or the app for a popup-open failure; the crate also has a no-`log` rule,
-    // so there is no honest place to surface it. A failed open on this background
-    // SNI service thread has no consumer-visible consequence beyond "no popup
-    // appeared" — the swallow is intended, not an oversight.
+    // `Result` deliberately discarded (#F10/F11): ksni's `activate` callback
+    // returns nothing and the crate has a no-`log` rule, so a failed open here
+    // has no honest channel to report through.
     let _ = x11::open_popup_session(
         tray.menu.clone(),
         tray.options.clone(),
@@ -448,14 +403,13 @@ pub(super) fn open_x11_popup_at_cursor(tray: &Tray) {
 
 /// Open muri's OWN `wlr-layer-shell` styled popup for the
 /// [`WaylandLayerShell`](LinuxMenuPresenter::WaylandLayerShell) presenter
-/// (deliverable #1): anchor at the SNI-reported `(x, y)` — the one real coordinate
-/// channel on Wayland (research doc §5), meaningful on Plasma/Waybar and a
-/// best-effort top-left fallback (0,0) elsewhere — and route to the shared
-/// [`wayland::open_popup_session`], with the menu, options and click dispatch off the
-/// live [`Tray`]. Blocks the calling (SNI service) thread until the popup dismisses.
+/// (deliverable #1): anchor at the SNI-reported `(x, y)` — the one real
+/// coordinate channel on Wayland (research doc §5) — and route to
+/// [`wayland::open_popup_session`] with the menu/options/dispatch off the live
+/// [`Tray`]. Blocks the calling (SNI service) thread until dismissed.
 ///
 /// DEVICE-VERIFY(0.11.1): end-to-end SNI-click → layer-shell popup on a real
-/// wlroots/KWin session; the SNI coordinate quality is the host's (research doc §5).
+/// wlroots/KWin session.
 #[cfg(feature = "wayland-styled")]
 pub(super) fn open_wayland_popup_at(tray: &Tray, x: i32, y: i32) {
     // Authoritative confirmation (beyond the env heuristic used to pre-select the
@@ -470,10 +424,7 @@ pub(super) fn open_wayland_popup_at(tray: &Tray, x: i32, y: i32) {
     );
     let dark = system_appearance().is_dark();
     let dispatch = |id: &MenuId| tray.dispatch(id);
-    // Deliberately discard the `Result` (#F10/F11): as with the X11 path above,
-    // ksni's `activate` callback is void — no return channel to the host or the app
-    // — and the crate does not log, so a failed layer-shell open on this SNI service
-    // thread has nowhere honest to be reported. The swallow is intentional.
+    // Deliberately discarded (#F10/F11), same rationale as the X11 path above.
     let _ = wayland::open_popup_session(
         tray.menu.clone(),
         tray.options.clone(),
@@ -488,19 +439,14 @@ pub(super) fn open_wayland_popup_at(tray: &Tray, x: i32, y: i32) {
 /// completion (spec 22 §2, Path 1).
 ///
 /// `ksni` runs the D-Bus service on its own background thread; this function
-/// blocks the caller's thread draining [`TrayCommand`]s posted by any
-/// [`TrayHandle`](crate::TrayHandle) and applying them via
-/// [`Handle::update`], which re-exports the affected SNI properties / dbusmenu.
-/// A condvar woken by the tray's installed waker keeps the drain responsive, with
-/// a periodic timeout as a backstop so a missed wake never wedges the loop.
+/// blocks the caller's thread draining [`TrayCommand`]s and applying them via
+/// [`Handle::update`]. A condvar woken by the tray's installed waker keeps the
+/// drain responsive, with a periodic timeout as a backstop.
 fn run_sni_loop(tray: Tray, report: &super::InstallReport) -> Result<()> {
-    // Resolve the presenter — and therefore ksni's type-level `MENU_ON_ACTIVATE` /
-    // `ItemIsMenu` — *before* the service is spawned (deliverable #2, ADR-0003 §3):
-    // the two `MuriSni<const>` instantiations are distinct types, and
-    // `spawn_tray_thread` handed us a non-generic `fn` pointer, so the const must be
-    // fixed here, at the seam. The styled presenters (X11/Wayland) want
-    // `MENU_ON_ACTIVATE = false` so the host forwards `Activate` to muri's own popup;
-    // the native-dbusmenu baseline wants `true` so the host draws the exported menu.
+    // Resolve the presenter before the service is spawned (deliverable #2,
+    // ADR-0003 §3): the two `MuriSni<const>` instantiations are distinct types,
+    // and `spawn_tray_thread` handed us a non-generic `fn` pointer, so the const
+    // must be fixed here.
     let presenter = detect_linux_presenter();
     if presenter_uses_custom_popup(presenter) {
         run_sni_loop_impl::<false>(tray, presenter, report)
@@ -654,11 +600,9 @@ fn apply_command<const M: bool>(handle: &Handle<MuriSni<M>>, command: TrayComman
         // The SNI host owns menu presentation; muri cannot force-open or close a
         // host-drawn menu from the app side (spec 22 §1). Honest no-op.
         TrayCommand::Open | TrayCommand::Close => {}
-        // Intercepted in `run_sni_loop`'s drain before reaching here (it needs to
-        // end the loop + call `Handle::shutdown`), so this arm is never taken.
-        // The debug assertion catches a future second `apply_command` caller that
-        // forgets to intercept Shutdown (which would silently swallow it and
-        // regress the drop-removes contract); it stays a no-op in release.
+        // Intercepted in `run_sni_loop`'s drain before reaching here; the debug
+        // assertion catches a future caller that forgets to intercept it (which
+        // would regress the drop-removes contract).
         TrayCommand::Shutdown => debug_assert!(
             false,
             "TrayCommand::Shutdown must be intercepted by run_sni_loop's drain, \
@@ -678,17 +622,10 @@ fn apply_command<const M: bool>(handle: &Handle<MuriSni<M>>, command: TrayComman
     }
 }
 
-/// Best-effort system light/dark appearance via the `org.freedesktop.appearance`
-/// `color-scheme` desktop-portal setting (spec 22 §4). Falls back to
-/// [`Appearance::Light`] whenever the portal, the session bus, or the value is
-/// unavailable — a headless/CI environment always takes the fallback.
-///
-/// DEVICE-VERIFY(0.9.0): the live portal read against a real desktop session.
-/// The GNOME UI font from gsettings `org.gnome.desktop.interface font-name`
-/// (a Pango `"Family [Styles] Size"` spec, e.g. `"Cantarell 11"`), as a
-/// [`SystemFont`](crate::platform::SystemFont) the renderer pins by family name
-/// (fontdb already has the installed desktop font). Best-effort: `None` when
-/// gsettings is absent/fails or the value can't be parsed (#10, #14).
+/// The GNOME UI font from gsettings `org.gnome.desktop.interface font-name` (a
+/// Pango `"Family [Styles] Size"` spec, e.g. `"Cantarell 11"`), as a
+/// [`SystemFont`](crate::platform::SystemFont) the renderer pins by family name.
+/// Best-effort: `None` when gsettings is absent/fails or unparseable (#10, #14).
 fn system_menu_font() -> Option<crate::platform::SystemFont> {
     use crate::platform::{SystemFont, SystemFontSource};
     const STYLES: &[&str] = &[
@@ -736,14 +673,11 @@ fn system_menu_font() -> Option<crate::platform::SystemFont> {
 }
 
 /// The GNOME accent color from gsettings `org.gnome.desktop.interface
-/// accent-color` (GNOME 47+, a named accent), mapped to the libadwaita accent
-/// RGB, or `None` if unavailable/unrecognized. Injected into `Color::Accent`
-/// (#14). Best-effort.
+/// accent-color` (GNOME 47+), mapped to the libadwaita accent RGB, or `None` if
+/// unavailable/unrecognized. Injected into `Color::Accent` (#14). Best-effort.
 ///
-/// Only the styled popup paths read the accent (the SNI tray defers all styling to
-/// the host's dbusmenu renderer), so this is gated to the styled-popup features — a
-/// tray-only build (`default-features = false`, no styled popup) compiles neither
-/// the `x11`/`wayland` submodules nor this reader (#21).
+/// Gated to the styled-popup features: the SNI tray defers all styling to the
+/// host's dbusmenu renderer, so a tray-only build has no reader for this (#21).
 #[cfg(any(feature = "x11-popup", feature = "wayland-styled"))]
 pub(super) fn system_accent() -> Option<(u8, u8, u8, u8)> {
     let out = std::process::Command::new("gsettings")
@@ -769,6 +703,12 @@ pub(super) fn system_accent() -> Option<(u8, u8, u8, u8)> {
     Some((r, g, b, 255))
 }
 
+/// Best-effort system light/dark appearance via the `org.freedesktop.appearance`
+/// `color-scheme` desktop-portal setting (spec 22 §4). Falls back to
+/// [`Appearance::Light`] whenever the portal, session bus, or value is
+/// unavailable.
+///
+/// DEVICE-VERIFY(0.9.0): the live portal read against a real desktop session.
 fn system_appearance() -> Appearance {
     portal_color_scheme_is_dark()
         .map(Appearance::from_is_dark)

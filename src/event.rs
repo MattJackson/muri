@@ -1,20 +1,17 @@
 //! The process-global [`MenuEvent`] channel — muri's single, unified event
 //! source (spec `03` §3).
 //!
-//! muri emits its **own** activation events for every surface it draws (the
-//! custom tray/context menus *and* any native menu bar it installs), so a
-//! migrated muda app's single `MenuEvent::receiver()` loop sees every activation
-//! with no cross-channel bridge. This module owns that global channel and the
-//! optional `set_event_handler` escape hatch.
+//! muri emits its **own** activation events for every surface it draws (custom
+//! tray/context menus *and* any native menu bar it installs), so a migrated muda
+//! app's single `MenuEvent::receiver()` loop sees every activation with no
+//! cross-channel bridge. This module owns that global channel and the optional
+//! `set_event_handler` escape hatch.
 //!
-//! The [`MenuEvent`] struct itself lives in [`crate::menu`] (it is the same type
-//! the native `.on_click` path already carries); this module adds the
-//! process-global [`MenuEvent::receiver`] / [`MenuEvent::set_event_handler`]
-//! projection on top of it. Keeping one `MenuEvent` type — rather than a second,
-//! facade-only copy — is what lets a native consumer and a muda-compat consumer
-//! observe the *same* value. The channel and its `receiver()` API are part of the
-//! **native** crate surface (always compiled, no crate feature required); the
-//! muda-compat facade only re-exports them.
+//! The [`MenuEvent`] struct itself lives in [`crate::menu`] (the same type the
+//! native `.on_click` path carries); this module adds the process-global
+//! `receiver`/`set_event_handler` projection on top of it, so a native and a
+//! muda-compat consumer observe the *same* value. The channel is part of the
+//! **native** crate surface; the muda-compat facade only re-exports it.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -63,13 +60,12 @@ impl MenuEvent {
     }
 
     /// Install (or clear, with `None`) a global handler invoked for every
-    /// activation. This mirrors muda's escape hatch for apps that forward events
-    /// into their own loop (tao/tauri) rather than polling the receiver. The
-    /// handler runs *after* the event has been placed on the channel.
+    /// activation. Mirrors muda's escape hatch for apps that forward events into
+    /// their own loop (tao/tauri) rather than polling the receiver. Runs *after*
+    /// the event is placed on the channel.
     ///
-    /// The signature is generic over the closure type (`Option<F>`), exactly like
-    /// `muda::MenuEvent::set_event_handler`, so a migrated app's bare-closure call
-    /// — `set_event_handler(Some(|event| ...))` — compiles unchanged. Clear with a
+    /// Generic over the closure type, exactly like `muda::MenuEvent::set_event_handler`,
+    /// so a migrated app's bare-closure call compiles unchanged. Clear with a
     /// type-annotated `None`, e.g. `set_event_handler(None::<fn(MenuEvent)>)`.
     pub fn set_event_handler<F>(handler: Option<F>)
     where

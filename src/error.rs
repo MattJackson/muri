@@ -24,15 +24,11 @@ impl std::fmt::Display for Unsupported {
 
 /// Errors returned by muri's fallible operations.
 ///
-/// The failure sites that carry actionable meaning are captured as structured
-/// variants — [`TrayInstall`](Error::TrayInstall), [`MainThread`](Error::MainThread),
+/// Failure sites with actionable meaning get structured variants —
+/// [`TrayInstall`](Error::TrayInstall), [`MainThread`](Error::MainThread),
 /// [`ThreadSpawn`](Error::ThreadSpawn) — so a consumer can `match` on the *kind*
-/// of failure (e.g. distinguish "the OS refused the tray install" from "you called
-/// this off the main thread") rather than string-matching a message.
-/// [`Platform`](Error::Platform) remains the catch-all for residual per-OS API
-/// failures that don't fit a structured kind. A synchronous tray-install handshake
-/// surfaces a Windows/Linux install failure as [`TrayInstall`](Error::TrayInstall)
-/// (via [`Tray::spawn`](crate::Tray::spawn)) instead of a false `Ok`.
+/// of failure rather than string-matching a message. [`Platform`](Error::Platform)
+/// is the catch-all for residual per-OS failures that don't fit a structured kind.
 ///
 /// `#[non_exhaustive]`: future muri versions may add variants, so a consumer's
 /// `match` must include a `_` arm.
@@ -106,12 +102,10 @@ mod tests {
         );
     }
 
-    /// The real, regressable behavior (a `matches!(X, X)` tautology restates the
-    /// enum and can't fail): muri's structured `TrayInstall` / `MainThread` kinds
-    /// — and any future `#[non_exhaustive]` variant — collapse into the muda
-    /// facade's `Platform` catch-all via `From`, so the compat surface stays
-    /// byte-for-byte muda-shaped (#61), while a variant with a dedicated muda
-    /// counterpart (`BadIcon`) maps across unchanged.
+    /// muri's structured `TrayInstall`/`MainThread` kinds — and any future
+    /// `#[non_exhaustive]` variant — collapse into the muda facade's `Platform`
+    /// catch-all via `From`, keeping the compat surface muda-shaped (#61), while
+    /// `BadIcon` maps across unchanged.
     #[cfg(feature = "muda-compat")]
     #[test]
     fn structured_kinds_map_onto_the_compat_error_surface() {

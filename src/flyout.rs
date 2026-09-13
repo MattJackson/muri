@@ -1,22 +1,16 @@
 //! Pure, platform-independent flyout-submenu geometry and hover-stack logic.
 //!
 //! A [`Item::Submenu`](crate::Item::Submenu) row opens a second panel beside it.
-//! Two decisions are pure and testable, and live here free of any window or OS
-//! dependency:
+//! Two decisions are pure and testable, free of any window or OS dependency:
 //!
-//! - **Placement** ([`place_flyout`]): where the flyout panel sits relative to
-//!   its parent popup — to the parent's right by default, flipped to the left
-//!   when it would spill off the monitor, and clamped vertically into the work
-//!   area.
+//! - **Placement** ([`place_flyout`]): where the flyout sits relative to its
+//!   parent popup — right by default, flipped left on spill, clamped vertically.
 //! - **Hover-stack transitions** ([`next_flyout`]): which parent row's flyout is
 //!   open as the pointer moves between parent rows, the open flyout, and empty
-//!   space. Hovering a submenu parent opens (or switches to) its flyout; hovering
-//!   a different, non-submenu row closes it; moving into the flyout — or across
-//!   the gap between the two panels — keeps it open.
+//!   space.
 //!
-//! The live backends ([`crate::platform`]) drive their second popup window from these
-//! two functions; the snapshot test composits a parent + child using
-//! [`place_flyout`] directly.
+//! The live backends ([`crate::platform`]) drive their second popup window from
+//! these two functions.
 
 use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
 
@@ -42,18 +36,10 @@ pub struct FlyoutPlacement {
 
 /// Place a flyout panel beside its parent row.
 ///
-/// - `parent` is the parent popup's rectangle in screen coordinates.
-/// - `row` is the hovered submenu row's rectangle, relative to the parent
-///   popup's top-left (i.e. window/content coordinates, as produced by
-///   [`render_menu`](crate::render::paint::render_menu)).
-/// - `flyout` is the child panel's size.
-/// - `work_area` is the target monitor's usable rectangle in screen coordinates.
-///
-/// The flyout is placed flush against the parent's right edge and vertically
-/// aligned so its top lines up with the hovered row. If it would overflow the
-/// right edge of `work_area` it flips to the parent's left; if that still
-/// overflows the left edge it is clamped inside the work area. Finally it is
-/// clamped vertically so it never spills off the top or bottom.
+/// `parent`/`work_area` are screen coordinates; `row` is relative to the
+/// parent's top-left. The flyout is placed flush against the parent's right
+/// edge, top-aligned with the hovered row; it flips to the parent's left on
+/// right-edge overflow, and is clamped fully inside `work_area`.
 pub fn place_flyout(
     parent: LogicalRect,
     row: LogicalRect,
@@ -117,18 +103,13 @@ pub enum HoverTarget {
 
 /// Decide the open-flyout **stack** after the pointer moves to `target`, given the
 /// currently open stack (`current`): `current[k]` is the submenu-row index, within
-/// panel `k`'s menu, whose flyout is open as panel `k + 1`. The returned stack has
-/// the same shape.
+/// panel `k`'s menu, whose flyout is open as panel `k + 1`.
 ///
-/// Rules (matching native menu behavior, generalized across the stack):
-/// - hovering a submenu parent in panel `p` opens/switches its flyout and closes
-///   everything deeper (`current[..p]` then the newly hovered index) — but
-///   re-hovering the *already-open* parent keeps its deeper levels intact so
-///   grandchildren don't collapse;
-/// - hovering a non-submenu row in panel `p` closes panel `p`'s flyout and deeper;
-/// - hovering a flyout body or crossing an inter-panel gap keeps the stack;
-/// - drifting outside leaves the stack as-is (dismissal is a click-outside / Esc
-///   concern handled by the caller).
+/// Hovering a submenu parent in panel `p` opens/switches its flyout and closes
+/// everything deeper, unless it's already the open parent (grandchildren stay
+/// open). Hovering a non-submenu row in panel `p` closes panel `p`'s flyout and
+/// deeper. Hovering the flyout body or an inter-panel gap keeps the stack;
+/// drifting outside leaves it as-is (dismissal is the caller's concern).
 pub fn next_flyout(current: &[usize], target: HoverTarget) -> Vec<usize> {
     match target {
         HoverTarget::ParentRow { panel, index } => {

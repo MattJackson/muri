@@ -86,12 +86,10 @@ pub(super) fn make_adapter(
 /// Refresh a panel's snapshot and push the resulting tree if the adapter is
 /// active (a no-op when no assistive technology is listening).
 ///
-/// The snapshot is refreshed — and `menu` invoked to produce the (cloned) menu —
-/// *only* when the adapter is active, since [`SubclassingAdapter::update_if_active`]
-/// skips the factory entirely otherwise. This keeps the hot hover/keynav path
-/// free of the per-frame `Menu` clone when no assistive technology is listening;
-/// the snapshot stays correct whenever an AT is attached (the adapter is active,
-/// so the factory runs on every sync).
+/// `menu` is only invoked (and the snapshot only refreshed) when the adapter is
+/// active, since [`SubclassingAdapter::update_if_active`] skips the factory
+/// otherwise — keeping the hot hover/keynav path free of the per-frame `Menu`
+/// clone when no AT is listening.
 pub(super) fn sync(
     adapter: &mut SubclassingAdapter,
     snapshot: &Rc<RefCell<A11ySnapshot>>,

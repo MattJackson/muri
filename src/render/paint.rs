@@ -1,13 +1,10 @@
 //! Painting a [`Menu`] through a [`SceneDrawer`]: the single, platform-agnostic
 //! layout + draw pass that turns the declarative menu tree into pixels and a
-//! hit-test map. It measures text through the drawer, resolves the
-//! [`Flex`](crate::Flex)/[`Align`] layout with
-//! [`crate::layout::resolve_segments`] (the flush-right promise), and emits
-//! fills, separators, icons, and text runs.
+//! hit-test map, resolving [`Flex`](crate::Flex)/[`Align`] via
+//! [`crate::layout::resolve_segments`].
 //!
-//! [`render_menu`] is called once for a snapshot and once per frame by the live
-//! popup (cheap — menus are small); it returns a [`LaidMenu`] describing the
-//! popup size and the clickable rows for hit-testing.
+//! [`render_menu`] runs once per frame (cheap — menus are small) and returns a
+//! [`LaidMenu`] with the popup size and clickable rows for hit-testing.
 
 use std::collections::HashMap;
 
@@ -22,17 +19,13 @@ use crate::theme::{MenuOptions, Theme, TrailingGutterPolicy};
 use crate::Menu;
 
 /// A scratch memo of `(text, font)` -> measured width, cleared at the start of
-/// every [`render_menu`] call. A row's segments are measured once for the width
-/// pass (`row_intrinsic`) and again while laying out the draw pass
-/// (`draw_row_content`'s `SegmentMetrics` + per-styled-piece widths); without
-/// this cache the same `(text, font)` gets re-shaped through the drawer's text
-/// engine up to 3× per frame for no behavioral difference.
+/// every [`render_menu`] call, so the same `(text, font)` isn't re-shaped up to
+/// 3× per frame across the width pass and the draw pass.
 ///
 /// Keyed by a **hash** of the borrowed `(text, font)` components (mirroring
-/// [`FontStore::shape`](crate::render)'s `shaped` design, #4): the hot lookup path
-/// hashes the borrowed `&str`/`&Font` and, on a hash hit, verifies the retained
-/// owned [`MeasureKey`] field-by-field — so a cache HIT never builds an owned key
-/// (no `String` clone). The owned key is materialized only on a genuine miss (#F12).
+/// [`FontStore::shape`](crate::render)'s `shaped` design, #4): a hash hit
+/// verifies the owned [`MeasureKey`] field-by-field without allocating, and the
+/// owned key is built only on a genuine miss (#F12).
 type MeasureCache = HashMap<u64, (MeasureKey, f32)>;
 
 #[derive(PartialEq, Eq)]
@@ -233,15 +226,12 @@ fn row_leading_width(row: &Row, gap: f32) -> f32 {
 }
 
 /// Whether the menu reserves a shared leading gutter: true when any row is
-/// **checkable** — `checked.is_some()`, i.e. `Some(true)` *or* `Some(false)`, per
-/// the `Row::checked` contract that "`Some(true/false)` shows a check column" —
-/// so checked *and* currently-unchecked-but-checkable rows align their text past
-/// the gutter (the native `NSMenu` look). Testing only `Some(true)` would leave a
-/// menu whose checkable rows are all currently unchecked with no reserved column,
-/// making every row's text jump right the instant one row is toggled on. A menu
-/// with only a section-header icon and no checkable rows reserves nothing and
-/// stays per-row inline (#16). This reconciles #16's shared-left-x with native
-/// alignment.
+/// **checkable** — `checked.is_some()`, per the `Row::checked` contract that
+/// "`Some(true/false)` shows a check column" — so checked *and*
+/// currently-unchecked-but-checkable rows align their text past the gutter
+/// (native `NSMenu` look). Testing only `Some(true)` would leave an
+/// all-unchecked-but-checkable menu with no reserved column, so every row's
+/// text would jump right the instant one is toggled on (#16 reconciliation).
 fn menu_reserves_gutter(menu: &Menu) -> bool {
     menu.items.iter().any(|it| {
         item_row(it)
@@ -526,14 +516,11 @@ fn paint_stack<D: SceneDrawer>(
 /// [`StyleRun`](crate::StyleRun) spans, falling back to `base_color`/`base_weight`.
 ///
 /// `StyleRun` colors resolve against the **live** `theme` so a semantic run color
-/// (`Label`/`SecondaryLabel`/`Accent`/`Separator`) is correct in dark mode, not
-/// baked against a hard-coded light palette (spec §7.3).
-///
-/// When `highlighted` (the row is filled with the accent and every other glyph —
-/// label, checkmark, chevron — is forced to `base_color`, i.e. white), a run's
-/// semantic color is **suppressed** so styled runs invert with the rest of the
-/// row instead of rendering, say, saturated red on accent blue. Per-run *weight*
-/// overrides still apply in both states.
+/// is correct in dark mode, not baked against a hard-coded light palette (spec
+/// §7.3). When `highlighted` (row filled with accent, every glyph forced to
+/// `base_color`), a run's semantic color is **suppressed** so it inverts with
+/// the rest of the row instead of e.g. rendering red on accent blue; per-run
+/// *weight* overrides still apply in both states.
 fn style_pieces<'a>(
     seg: &'a Segment,
     base_color: Rgba,
@@ -663,13 +650,11 @@ pub fn render_menu<D: SceneDrawer>(
     };
 
     // Reserve the trailing column per the caller's policy (#60), symmetric to the
-    // leading gutter above. `Auto` (the OEM default) reserves it menu-wide only
-    // when some item needs it — a submenu (its chevron) or a row carrying an
-    // explicit trailing icon/accessory (issue A) — so every row's segment band
-    // ends at the same right edge (native `NSMenu`); a menu with neither lets its
-    // right content reach the true edge. `Always`/`Never` force it. Under `Never`
-    // a submenu chevron/accessory still draws (see the draw pass) but overlays the
-    // content area rather than getting its own column, mirroring leading `Never`.
+    // leading gutter above: `Auto` reserves it menu-wide only when some item
+    // needs it (a submenu chevron or an explicit trailing icon, issue A), so
+    // every row's segment band ends at the same right edge. `Always`/`Never`
+    // force it; under `Never` a chevron/accessory still draws but overlays the
+    // content area instead of getting its own column.
     let reserve_trailing = match opts.trailing_gutter {
         TrailingGutterPolicy::Always => true,
         TrailingGutterPolicy::Never => false,
@@ -1007,12 +992,9 @@ fn draw_row_content<D: SceneDrawer>(
         }
     }
 
-    // The left x of the trailing column. When the menu reserves the trailing
-    // gutter (#60), the column sits just past the segment band (`band_x + band_w`
-    // == the pre-column right edge). When it does not — `TrailingGutterPolicy::Never`,
-    // or `Auto` with no submenu/accessory — the band already reaches the inner
-    // right edge, so a chevron/accessory (if any) overlays the tail of the content
-    // area instead, its right edge flush to the inner edge (mirrors leading `Never`).
+    // The left x of the trailing column: just past the segment band when the
+    // menu reserves it (#60); otherwise the band already reaches the inner right
+    // edge, so a chevron/accessory overlays the tail of the content area instead.
     let trailing_col_x = if reserve_trailing {
         band_x + band_w
     } else {
@@ -1063,15 +1045,12 @@ fn draw_row_content<D: SceneDrawer>(
 }
 
 /// The single funnel every icon-drawing site routes through (leading slot,
-/// trailing slot, standalone checkmark, content-stack image). It matches **every**
-/// [`Icon`] variant exhaustively — there is deliberately no `_` arm, so adding a
-/// future `Icon` variant is a compile error *here* rather than a silently-undrawn
-/// icon (the recurring muri bug class where a model attribute is set but never
-/// rendered).
+/// trailing slot, standalone checkmark, content-stack image). It matches
+/// **every** [`Icon`] variant exhaustively — no `_` arm — so a future `Icon`
+/// variant is a compile error here rather than a silently-undrawn icon.
 ///
-/// `glyph_color` is the color a glyph-based icon (checkmark / a symbol's fallback)
-/// draws in; it is ignored for image icons. `enabled` dims the whole icon to
-/// [`DISABLED_ALPHA`] when `false` (issue E) — both a blitted image and a glyph.
+/// `glyph_color` is the color a glyph-based icon draws in (ignored for images);
+/// `enabled` dims the whole icon to [`DISABLED_ALPHA`] when `false` (issue E).
 #[allow(clippy::too_many_arguments)]
 fn draw_icon<D: SceneDrawer>(
     drawer: &mut D,
@@ -1102,10 +1081,9 @@ fn draw_icon<D: SceneDrawer>(
             dim_color(glyph_color, enabled),
             rect,
         ),
-        // A named symbol has no bundled per-name glyph yet (SF Symbols are macOS-
-        // only), but it must NOT be a silent no-op — that is exactly the bug class
-        // this funnel guards. Draw a neutral placeholder glyph so a `Symbol` icon
-        // is always visibly rendered until a real symbol face is wired up.
+        // No bundled per-name glyph yet (SF Symbols are macOS-only), but it must
+        // NOT be a silent no-op — draw a neutral placeholder until a real symbol
+        // face is wired up.
         Icon::Symbol(_) => draw_glyph_centered(
             drawer,
             cache,
@@ -1396,18 +1374,13 @@ mod tests {
 
     /// A drawer that records the geometry of every draw op, with deterministic
     /// monospace metrics (7px/char, 14px line height) so layout is exactly
-    /// reproducible in a test. Icons decode to an **opaque** 2x2 stub (not
-    /// all-zero) so a dimmed-alpha blit is observable, and every op is recorded:
-    /// fills (issue B), text colors (issue E checkmark dimming), and per-image
-    /// alpha (issue E icon dimming).
+    /// reproducible in a test. Icons decode to an **opaque** 2x2 stub so a
+    /// dimmed-alpha blit is observable.
     ///
-    /// The extra `fill_radii`, `separators`, and `text_fonts` channels (added for
-    /// the theme-completeness guard) capture the *last* visually-meaningful inputs
-    /// the earlier channels dropped: a `fill_round_rect`'s corner radius, a
-    /// separator's color (the base drawer ignored both), and the resolved `Font`
-    /// each `draw_text` ran in (size/weight/family/tracking — none of which the
-    /// deterministic 7px/char metric reflects in the recorded x). With these, the
-    /// full op record differs whenever *any* `Theme` field reaches the paint layer.
+    /// The extra `fill_radii`/`separators`/`text_fonts` channels (for the
+    /// theme-completeness guard) capture inputs the earlier channels drop —
+    /// corner radius, separator color, resolved `Font` — so the full op record
+    /// differs whenever *any* `Theme` field reaches the paint layer.
     #[derive(Default, PartialEq)]
     struct RecordingDrawer {
         texts: Vec<(String, f32, f32)>,        // (text, origin.x, origin.y)
@@ -2280,14 +2253,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Deliverable 2: measure == draw.
-    //
-    // The laid-out popup size (`LaidMenu::size`) must bound every primitive the
-    // draw pass emits: in no-width-clamp mode the popup is sized exactly to its
-    // content + padding, so the max extent of the recorded ops equals the
-    // reported size on both axes (the full-panel background fill reaches the far
-    // corner; nothing may exceed it). A primitive escaping the measured rect is a
-    // real measure/layout mismatch.
+    // Deliverable 2: measure == draw. In no-width-clamp mode the popup is sized
+    // exactly to its content + padding, so the max extent of every recorded op
+    // must equal `LaidMenu::size` on both axes — nothing may exceed it, and a
+    // primitive escaping the measured rect is a real measure/layout mismatch.
     // -------------------------------------------------------------------------
 
     /// The bottom-right-most extent of every recorded op (text advanced at the

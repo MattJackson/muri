@@ -494,16 +494,9 @@ impl Row {
 // =============================================================================
 //
 // A declarative, opt-in layout primitive for a row whose body is an arbitrary
-// nested stack rather than the `Segment`-based column model above — the
-// motivating case is an Apple-Weather-style "extra" row: a horizontal hourly
-// strip whose cells each stack a time label, an icon, and a temperature
-// vertically. This is purely additive: every existing `Item`/`Row`/`Segment`
-// path is untouched, and a `Content` row is opted into via the new
-// [`Item::Content`] variant only.
-//
-// Rendering (recursive measure + paint over this tree) lives in
-// `crate::render::paint`, which is the only consumer of these types outside
-// this module.
+// nested stack rather than the `Segment`-based column model above (e.g. an
+// hourly-forecast strip). Purely additive: opted into via [`Item::Content`]
+// only. Rendering lives in `crate::render::paint`.
 
 /// The main axis a [`Stack`] lays its children out along.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -674,9 +667,7 @@ pub enum Item {
     /// model — e.g. a horizontal hourly-forecast strip. Row height is derived
     /// from the stack's measured content. Never carries a [`MenuId`]: like
     /// [`Item::SectionHeader`], it is always non-interactive (see
-    /// [`Item::is_interactive`]) and never appears in
-    /// [`crate::render::paint::LaidMenu::rows`] — a future revision could add
-    /// an id if an interactive content row is ever needed.
+    /// [`Item::is_interactive`]).
     Content(Stack),
 }
 

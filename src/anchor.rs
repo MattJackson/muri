@@ -3,20 +3,14 @@
 //! Anchoring is the one genuinely per-OS problem, but the *arithmetic* — given an
 //! icon rectangle, a popup size, the screen work area, and which edge to grow
 //! from, where does the popup's top-left corner go? — is identical everywhere.
-//! Each backend obtains the anchor rect natively (`NSStatusItem.button` on macOS,
-//! `Shell_NotifyIconGetRect` on Windows) and the work area from its screen APIs,
-//! then calls [`place_popup`]; keeping the geometry here makes it exhaustively
-//! unit-testable without a window server.
+//! Each backend obtains the anchor rect and work area natively, then calls
+//! [`place_popup`]; keeping the geometry here makes it exhaustively unit-testable
+//! without a window server.
 //!
-//! Placement rules:
-//! - **[`Edge::Bottom`]** opens the popup below the anchor; if it would spill off
-//!   the bottom of the work area it flips to open *above* instead.
-//! - **[`Edge::Top`]** opens above, flipping below on spill.
-//! - **[`Edge::Right`]/[`Edge::Left`]** open to that side of the anchor, flipping
-//!   to the opposite side on spill (used for taskbar-edge tray layouts).
-//! - The cross axis is aligned to the anchor's leading edge (top for
-//!   left/right), then the whole rect is clamped into the work area so it is
-//!   always fully on-screen.
+//! Placement rules: [`Edge::Bottom`]/[`Edge::Top`] open below/above the anchor,
+//! flipping to the opposite side on spill; [`Edge::Right`]/[`Edge::Left`] do the
+//! same on the horizontal axis (taskbar-edge layouts). The cross axis aligns to
+//! the anchor's leading edge, then the whole rect is clamped into the work area.
 
 use crate::geometry::{Edge, LogicalPoint, LogicalRect, LogicalSize};
 
@@ -186,11 +180,9 @@ mod tests {
         assert_eq!(p.y, 0.0);
     }
 
-    // Multi-monitor cases: a secondary monitor whose work area does NOT start at
-    // (0, 0) — here one placed up and to the left of the primary, at
-    // (-1920, -1080), 1920x1080. If `place_popup` ever implicitly assumed a
-    // primary-origin work area, these would place the popup relative to (0, 0)
-    // instead of the given `work_area`'s own bounds.
+    // A secondary monitor whose work area does NOT start at (0, 0), placed up and
+    // to the left of the primary. Guards against `place_popup` implicitly
+    // assuming a primary-origin work area.
     fn secondary_monitor_up_left() -> LogicalRect {
         LogicalRect::new(
             LogicalPoint::new(-1920.0, -1080.0),

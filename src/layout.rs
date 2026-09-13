@@ -48,16 +48,11 @@ pub struct SegmentBox {
 /// Resolve the segment boxes for a row, given the content-band `available_width`
 /// (the width remaining after leading/trailing icon columns and padding).
 ///
-/// Rules:
-/// - Every segment gets at least its intrinsic width.
-/// - Leftover width (`available_width - sum(intrinsic)`, clamped at zero) is
-///   split evenly among [`Flex::Grow`] segments. With no `Grow` segment the row
-///   is left-packed and any leftover stays empty on the right.
-/// - Within its box, a segment's text is placed per its [`Align`].
-///
-/// A single `Grow` segment followed by a `Fixed` + `Align::Right` segment
-/// therefore yields a value flush with the right edge of the content band, with
-/// no reserved column — the core layout muri exists to provide.
+/// Every segment gets at least its intrinsic width; leftover width is split
+/// evenly among [`Flex::Grow`] segments (left-packed if there are none); within
+/// its box, a segment's text is placed per its [`Align`]. A single `Grow` label
+/// followed by a `Fixed` + `Align::Right` value therefore yields a value flush
+/// with the right edge, with no reserved column.
 pub fn resolve_segments(segments: &[SegmentMetrics], available_width: f32) -> Vec<SegmentBox> {
     let total_intrinsic: f32 = segments.iter().map(|s| s.intrinsic_width).sum();
     let leftover = (available_width - total_intrinsic).max(0.0);

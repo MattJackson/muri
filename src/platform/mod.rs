@@ -3,28 +3,19 @@
 //!
 //! This module is the **only** place in the crate allowed to branch on
 //! `#[cfg(target_os = ...)]` (see [ADR-0002] and the `strict_cfg` test). Every
-//! other module — the menu data model, layout, rendering glue, the `Tray` /
-//! `ContextMenu` surface in the crate root — is OS-agnostic and reaches the host
-//! only through the [`Platform`] trait and the unified types below
-//! ([`PlatformEvent`], [`Appearance`]). No OS- or toolkit-specific handle
-//! (`NSWindow`, `HWND`, a winit `Window`, …) is ever named in this trait or in
-//! the types it exchanges with the engine.
+//! other module reaches the host only through [`Platform`] and the unified
+//! types below; no OS/toolkit handle (`NSWindow`, `HWND`, a winit `Window`, …)
+//! ever crosses this seam.
 //!
-//! The concrete per-OS type is re-exported as [`PlatformImpl`], and
-//! [`current()`] returns a fresh instance of it. The engine only ever writes
-//! `platform::current()` — it never names `MacPlatform` / `WindowsPlatform` /
-//! `LinuxPlatform` directly.
+//! The concrete per-OS type is re-exported as [`PlatformImpl`]; the engine
+//! only ever writes `platform::current()`, never a per-OS type name.
 //!
-//! - **macOS** — `mac`: `NSStatusItem` anchor + a native non-activating
-//!   `NSPanel` run-loop popup (implemented).
-//! - **Windows** — `windows`: `Shell_NotifyIcon` tray + anchor-rect, plus a
-//!   native `WS_EX_NOACTIVATE` layered-window message-pump popup
-//!   (implemented).
-//! - **Linux** — `linux`: an SNI/AppIndicator native tray menu, plus an X11
-//!   override-redirect `open_at` for pointer-anchored popups; tray-anchored
-//!   popups remain the honest carve-out (SNI/AppIndicator gives no geometry),
-//!   so [`Platform::run_tray`] reports
-//!   [`Unsupported::TrayAnchor`](crate::Unsupported::TrayAnchor).
+//! - **macOS** — `NSStatusItem` anchor + native `NSPanel` popup.
+//! - **Windows** — `Shell_NotifyIcon` tray + layered-window popup.
+//! - **Linux** — SNI/AppIndicator tray + X11 override-redirect `open_at`;
+//!   tray-anchored popups report
+//!   [`Unsupported::TrayAnchor`](crate::Unsupported::TrayAnchor) (SNI gives no
+//!   geometry).
 //!
 //! [ADR-0002]: https://github.com/MattJackson/muri/blob/main/docs/design/adr/0002-single-platform-module-per-os-behind-one-trait.md
 
@@ -163,16 +154,12 @@ pub enum PlatformEvent {
 /// tray / accessibility APIs.
 ///
 /// Exactly one implementation is compiled per target (see [`PlatformImpl`]).
-/// All OS-specific behavior — installing the tray icon, reporting the anchor
-/// rectangle, creating the non-activating popup + flyout windows, presenting the
-/// rendered pixmap, pumping the native event loop into [`PlatformEvent`]s,
-/// tracking focus/dismiss, driving the accessibility adapter (behind the `a11y`
-/// feature), and querying the environment (appearance, work area, scale) — lives
-/// behind these methods, inside the single per-OS module that implements them.
+/// All OS-specific behavior lives behind these methods, inside the single
+/// per-OS module that implements them.
 ///
 /// Only unified, OS-neutral types cross this boundary: [`LogicalRect`],
-/// [`Appearance`], [`PlatformEvent`], the [`Icon`] / [`Menu`] data
-/// model, and [`Result`]. No `NSWindow` / `HWND` / winit handle is ever exposed.
+/// [`Appearance`], [`PlatformEvent`], the [`Icon`] / [`Menu`] data model, and
+/// [`Result`]. No `NSWindow` / `HWND` / winit handle is ever exposed.
 pub trait Platform {
     /// Install the tray/status icon with an optional tooltip / accessible name.
     ///
@@ -218,13 +205,10 @@ pub trait Platform {
     }
 
     /// The host's live menu palette — label / secondary-label / separator (and,
-    /// where meaningful, background) colors read from the OS at draw time, so the
-    /// custom surface tracks the exact native menu colors, not just hardcoded
-    /// defaults. Each field is optional: a platform fills what it can read and
-    /// leaves the rest `None`, and the theme keeps its per-OS base value for any
-    /// unread field. The default returns an empty palette (no overrides).
-    ///
-    /// Must never panic: an acquisition failure returns `None` per field.
+    /// where meaningful, background) colors read from the OS at draw time. Each
+    /// field is optional: a platform fills what it can read and leaves the rest
+    /// `None`, and the theme keeps its per-OS base value. The default returns an
+    /// empty palette (no overrides). Must never panic.
     fn system_palette(&self) -> SystemPalette {
         SystemPalette::default()
     }
@@ -249,18 +233,14 @@ pub trait Platform {
 
     /// Install the tray and begin driving it **without blocking the caller**,
     /// returning once the icon is (best-effort) live. The non-blocking
-    /// counterpart to [`run_tray`](Platform::run_tray), for hosts that own their
-    /// own event loop or want only a passive handle — notably the `tray-icon`
-    /// compatibility facade, whose `TrayIconBuilder::build()` must return
-    /// immediately.
+    /// counterpart to [`run_tray`](Platform::run_tray), needed by the
+    /// `tray-icon` facade's `TrayIconBuilder::build()`.
     ///
-    /// - **Windows / Linux** run the tray's native UI pump on a dedicated
-    ///   background thread; a [`TrayHandle`](crate::TrayHandle) obtained before
-    ///   the call drives it cross-thread (the existing command/waker path).
-    /// - **macOS** is best-effort: AppKit's `NSStatusItem` must live on the main
-    ///   thread, so this must be called from the main thread and relies on the
-    ///   host's existing `NSApplication` run loop to service the item — it does
-    ///   **not** call `app.run()` and does not change the app's activation policy.
+    /// - **Windows / Linux** run the pump on a background thread, driven
+    ///   cross-thread via a [`TrayHandle`](crate::TrayHandle).
+    /// - **macOS** is best-effort: must be called from the main thread and
+    ///   relies on the host's existing `NSApplication` run loop; it does not
+    ///   call `app.run()`.
     ///
     /// The default reports the capability as unavailable; every per-OS backend
     /// overrides it.
@@ -278,13 +258,10 @@ pub trait Platform {
     /// [`ContextMenu::open_at`](crate::ContextMenu::open_at) and
     /// [`Popup::anchored_to`](crate::Popup::anchored_to) — and block until it
     /// dismisses. `anchor` is the rectangle the popup grows from relative to
-    /// `edge` (a zero-size rect at a point for `open_at`); `on_click` is dispatched
-    /// with the activated row's id and is borrowed only for the duration of the
-    /// blocking call.
+    /// `edge`; `on_click` is dispatched with the activated row's id.
     ///
     /// The default reports the capability as not-yet-implemented; all three
-    /// per-OS backends override it (macOS: spec 20 §3 `NSPanel`; Windows: the
-    /// layered-window popup; Linux: X11 override-redirect).
+    /// per-OS backends override it.
     fn open_popup_session(
         &mut self,
         menu: Menu,
@@ -323,34 +300,26 @@ pub fn current() -> PlatformImpl {
 }
 
 /// The one-shot install-report channel a backend fires the moment it has
-/// attempted the OS tray install, *before* entering its blocking message pump.
-/// [`spawn_tray_thread`] hands the sender to `run` and blocks on the receiver, so
-/// the spawning thread learns the real install result synchronously instead of
-/// returning `Ok` while the actual `Shell_NotifyIcon` / SNI registration is still
-/// pending on the freshly-spawned thread (and only `eprintln!`'d on failure).
+/// attempted the OS tray install, *before* entering its blocking message pump,
+/// so the spawning thread learns the real install result synchronously instead
+/// of returning `Ok` while the OS registration is still pending.
 ///
-/// Compiled on the spawning targets plus `test`, matching [`spawn_tray_thread`],
-/// so the handshake is unit-testable on the host: see the `handshake_tests` below.
+/// Compiled on the spawning targets plus `test` so the handshake is
+/// unit-testable: see `handshake_tests` below.
 #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos")), test))]
 pub(crate) type InstallReport = std::sync::mpsc::Sender<Result<()>>;
 
 /// Launch the `muri-tray` background UI thread that drives a tray to completion
-/// via `run`, blocking only until the tray thread has **attempted the OS install**
-/// and reported its real result through the [`InstallReport`] handshake. Shared by
-/// the Windows and Linux [`Platform::spawn_tray`] implementations (macOS installs
-/// on the main thread instead, so it does not use this).
+/// via `run`, blocking only until the thread has **attempted the OS install**
+/// and reported its real result through the [`InstallReport`] handshake. Shared
+/// by the Windows and Linux [`Platform::spawn_tray`] (macOS installs on the main
+/// thread instead).
 ///
-/// `run` must fire the supplied [`InstallReport`] exactly once, immediately after
-/// its install step and before entering its blocking pump: `Ok(())` on a
-/// confirmed install, else the real [`Error`](crate::error::Error). This function
-/// then returns `Ok(())` only on a confirmed install; on a reported failure it
-/// returns that error, and if the thread dies before signalling (sender dropped)
-/// it returns an [`Error::Platform`](crate::error::Error::Platform) install error
-/// rather than hanging. A `run` failure *after* the install (inside the pump) is still
-/// reported on stderr, since the caller has already returned by then.
-///
-/// Gated to the spawning targets plus `test`, so the host can exercise the
-/// handshake seam without a real OS install.
+/// `run` must fire the supplied [`InstallReport`] exactly once, before entering
+/// its blocking pump. This function returns `Ok(())` only on a confirmed
+/// install; a reported failure or a dropped sender (thread died before
+/// signalling) both surface as an error rather than hanging. A `run` failure
+/// *after* install is only reported on stderr, since the caller has returned.
 #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos")), test))]
 pub(crate) fn spawn_tray_thread(
     tray: Tray,
@@ -368,9 +337,8 @@ pub(crate) fn spawn_tray_thread(
         })
         .map_err(|e| crate::error::Error::ThreadSpawn(e.to_string()))?;
 
-    // Block until the tray thread has attempted the OS install and reported the
-    // real result. A dropped sender (the thread panicked/returned before firing
-    // the handshake) surfaces as an install error, never a hang.
+    // A dropped sender (thread panicked/returned before firing the handshake)
+    // surfaces as an install error, never a hang.
     match wait.recv() {
         Ok(result) => result,
         Err(_) => Err(crate::error::Error::TrayInstall(
@@ -391,10 +359,8 @@ mod handshake_tests {
 
     #[test]
     fn spawn_tray_thread_surfaces_a_reported_install_failure() {
-        // The backend seam (EH-1): a `run` that reports an install failure through
-        // the handshake (as run_event_loop / run_sni_loop do when
-        // Shell_NotifyIcon / SNI registration fails) makes spawn_tray_thread return
-        // that error — the mechanism `Tray::spawn`'s `Result` relies on.
+        // The backend seam (EH-1): a reported install failure must propagate as
+        // the error `Tray::spawn`'s `Result` relies on.
         // DEVICE-VERIFY(0.10.8): a true Shell_NotifyIcon(NIM_ADD)/SNI failure on a
         // real Windows/Linux session flowing through this same seam to `Tray::spawn`.
         fn failing(_tray: Tray, report: &InstallReport) -> Result<()> {
@@ -410,9 +376,8 @@ mod handshake_tests {
 
     #[test]
     fn spawn_tray_thread_returns_ok_on_a_confirmed_install() {
-        // A `run` that reports success then enters its (here, trivial) pump makes
-        // spawn_tray_thread return Ok — the tray genuinely installed. The handshake
-        // already unblocked the spawner, so the pump does not serialize build().
+        // A confirmed install returns Ok; the handshake already unblocked the
+        // spawner, so the pump does not serialize build().
         fn ok_then_pump(_tray: Tray, report: &InstallReport) -> Result<()> {
             let _ = report.send(Ok(()));
             Ok(())
@@ -422,9 +387,8 @@ mod handshake_tests {
 
     #[test]
     fn spawn_tray_thread_does_not_hang_when_the_thread_dies_before_signalling() {
-        // If the tray thread returns/panics before firing the handshake, the
-        // dropped sender must surface as an install error rather than blocking
-        // the spawner forever.
+        // A thread that dies before firing the handshake must surface as an
+        // install error, not block the spawner forever.
         fn dies_silently(_tray: Tray, _report: &InstallReport) -> Result<()> {
             Ok(())
         }

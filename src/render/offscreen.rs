@@ -2,47 +2,27 @@
 //! (issue #59).
 //!
 //! [`render_menu_to_png`] / [`render_menu_to_rgba`] rasterize a menu popup to a
-//! bitmap **without** creating a tray, a window, or requiring any display, TCC
-//! prompt, or Accessibility permission — the exact same layout + paint pass a
-//! live popup runs ([`render_menu`](super::paint::render_menu) over a
-//! [`RasterDrawer`]), driven straight into an in-memory
-//! [`Framebuffer`](super::Framebuffer) and read back out. That makes them
-//! suitable for generating screenshots and cross-OS golden images on a headless
-//! CI runner.
+//! bitmap **without** creating a tray, a window, or requiring any display, TCC,
+//! or Accessibility permission — the same layout + paint pass a live popup runs
+//! ([`render_menu`](super::paint::render_menu) over a [`RasterDrawer`]), driven
+//! into an in-memory [`Framebuffer`](super::Framebuffer). Useful for
+//! screenshots and cross-OS golden images on a headless CI runner. These entry
+//! points need no platform/tray feature and carry no `#[cfg(target_os)]`.
 //!
-//! These entry points are always available: they need no platform/tray feature
-//! and carry no `#[cfg(target_os)]` — they render the same way on every OS.
-//!
-//! ## Theme resolution is handled for you
-//!
-//! The caller passes only `&Menu`, `&MenuOptions`, and a device `scale`; the
-//! concrete [`Theme`](crate::Theme) is resolved internally from
-//! [`MenuOptions::theme`](crate::MenuOptions) exactly as a real popup resolves
-//! it, and the matching font tier is selected the same way
-//! ([`RasterDrawer::for_menu_options`]): a forced OS look pins the *target* OS's
-//! UI font via the forced-theme / bundled-font resolution path, so the offscreen
-//! pixels match what the on-screen popup would draw.
-//!
-//! ## Cross-OS looks from a single host
-//!
+//! The concrete [`Theme`](crate::Theme) and font tier are resolved internally
+//! from [`MenuOptions`](crate::MenuOptions) exactly as a real popup would.
 //! Set [`MenuOptions::theme`](crate::MenuOptions) to a forced source
 //! ([`ThemeSource::MacOs`](crate::ThemeSource::MacOs) /
 //! [`Windows`](crate::ThemeSource::Windows) /
 //! [`Gnome`](crate::ThemeSource::Gnome)) to render any OS's OEM menu look from
-//! any host — the basis for a single-runner cross-OS golden suite. With the
-//! `bundled-fonts` feature on, a forced look also renders in a vendored OSS
-//! substitute face when the real target font is absent, so the output is
-//! byte-identical across macOS/Windows/Linux runners.
+//! any host; with `bundled-fonts` on, this also renders in a vendored OSS
+//! substitute when the real target font is absent, for byte-identical output
+//! across runners.
 //!
-//! ## Appearance and hovered rows
-//!
-//! The render is deterministic and headless, so it does **not** query the live
-//! system appearance or accent: a `System(..)`/forced source with
-//! [`ThemeMode::Auto`](crate::ThemeMode) resolves to the *light* look. Pass an
-//! explicit dark mode (e.g. `ThemeSource::MacOs(ThemeMode::Dark)`) for the dark
-//! variant. No row is highlighted (no hovered state); to render a specific
-//! hovered row, drive [`render_menu`](super::paint::render_menu) over a
-//! [`RasterDrawer`] directly with a `highlight` index.
+//! The render is deterministic and headless: it does not query the live system
+//! appearance/accent, so an `Auto` theme mode resolves to the *light* look
+//! (pass an explicit dark mode for the dark variant), and no row is
+//! highlighted — for a specific hovered row, drive `render_menu` directly.
 
 use crate::menu::Menu;
 use crate::theme::{MenuOptions, OsFamily, Theme};
@@ -87,25 +67,9 @@ fn render_to_drawer(menu: &Menu, options: &MenuOptions, scale: f32) -> RasterDra
 }
 
 /// Render a built [`Menu`] to PNG bytes, display-free — no tray, no window, no
-/// display/TCC/Accessibility permission required.
-///
-/// The popup is laid out and painted exactly as a live one would be
-/// ([`render_menu`](super::paint::render_menu) over a [`RasterDrawer`]), then
-/// encoded to a straight-alpha RGBA8 PNG. `scale` is the device scale factor
-/// (device pixels per logical pixel, e.g. `2.0` for a Retina-density capture).
-///
-/// The [`Theme`](crate::Theme) is resolved internally from
-/// [`options.theme`](crate::MenuOptions) — the caller never builds a `Theme`.
-/// Force a cross-OS look with
-/// [`ThemeSource::MacOs`](crate::ThemeSource::MacOs) /
-/// [`Windows`](crate::ThemeSource::Windows) /
-/// [`Gnome`](crate::ThemeSource::Gnome) to render any OS's OEM menu from any
-/// host (ideal for CI screenshots and cross-OS golden tests).
-///
-/// The render is deterministic and headless: it does not query the live system
-/// appearance or accent, so a `System(..)`/forced source with
-/// [`ThemeMode::Auto`](crate::ThemeMode) resolves to the *light* look (pass an
-/// explicit dark mode for the dark variant), and no row is highlighted.
+/// display/TCC/Accessibility permission required (see the module docs for
+/// theme resolution, cross-OS forcing, and determinism). `scale` is the device
+/// scale factor (device pixels per logical pixel, e.g. `2.0` for Retina).
 ///
 /// # Examples
 ///
@@ -123,17 +87,8 @@ pub fn render_menu_to_png(menu: &Menu, options: &MenuOptions, scale: f32) -> Vec
 /// Render a built [`Menu`] to straight-alpha RGBA8 pixels, returning
 /// `(rgba, width, height)` in device pixels — the same display-free pass as
 /// [`render_menu_to_png`] without the PNG encode, for callers that want the raw
-/// buffer (diffing, custom encoding, feeding another rasterizer).
-///
-/// `rgba` is `width * height * 4` bytes, row-major, un-premultiplied
-/// (`R, G, B, A`). `scale` is the device scale factor. The
-/// [`Theme`](crate::Theme) is resolved internally from
-/// [`options.theme`](crate::MenuOptions); force a cross-OS look with
-/// [`ThemeSource::MacOs`](crate::ThemeSource::MacOs) /
-/// [`Windows`](crate::ThemeSource::Windows) /
-/// [`Gnome`](crate::ThemeSource::Gnome). Like [`render_menu_to_png`], the render
-/// is deterministic and headless (light look for an `Auto` appearance, no
-/// highlighted row).
+/// buffer. `rgba` is `width * height * 4` bytes, row-major, un-premultiplied
+/// (`R, G, B, A`). `scale` is the device scale factor.
 ///
 /// # Examples
 ///

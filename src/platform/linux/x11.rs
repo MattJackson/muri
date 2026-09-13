@@ -2,29 +2,22 @@
 //!
 //! X11 — unlike Wayland — lets a client position its own toplevel at absolute
 //! screen coordinates, so muri's portable `place_popup`/`place_flyout` math
-//! applies directly here (spec 22 §2, "X11 *does* allow client positioning").
-//! This module opens an **override-redirect** `_NET_WM_WINDOW_TYPE_POPUP_MENU`
-//! window (the X11 equivalent of "no WM decoration, no focus steal") at the
-//! caller's pointer coordinate, paints the same [`RasterDrawer`] framebuffer every
-//! backend uses via `PutImage`, grabs the pointer + keyboard, and runs a local
-//! event loop: pointer motion drives hover + the N-level flyout **stack**
-//! (decision #8) through the shared pure [`next_flyout`]/[`place_flyout`] logic, a
-//! click on a row dispatches (or opens a submenu), and Esc / a click outside every
-//! panel / `FocusOut` dismisses without dispatching.
+//! applies directly here. This module opens an **override-redirect**
+//! `_NET_WM_WINDOW_TYPE_POPUP_MENU` window at the pointer, paints the same
+//! [`RasterDrawer`] framebuffer every backend uses via `PutImage`, grabs the
+//! pointer + keyboard, and runs a local event loop: motion drives hover + the
+//! N-level flyout **stack** (decision #8) via [`next_flyout`]/[`place_flyout`],
+//! a row click dispatches (or opens a submenu), and Esc / an outside click /
+//! `FocusOut` dismisses without dispatching.
 //!
-//! It uses x11rb's **pure-Rust** `RustConnection` (no `libxcb`), so muri gains no
-//! system X11 link dependency — only a reachable X server (including XWayland) at
-//! runtime.
+//! Uses x11rb's **pure-Rust** `RustConnection` (no `libxcb`), so muri gains no
+//! system X11 link dependency.
 //!
-//! ## Verification status
-//!
-//! The protocol flow (connect, override-redirect create, `PutImage` present,
-//! pointer/keyboard grab, event pump) is complete and compiles cleanly for the
-//! Linux target, but the live pixel/grab/keymap behavior needs a real X server:
-//! every such spot is marked `DEVICE-VERIFY(0.9.0)`. The window is an **opaque**
-//! panel drawn on the screen's default (typically 24-bit) visual — spec 22 §6
-//! makes the Linux styled surface opaque anyway (no client-controllable vibrancy),
-//! and a real ARGB visual for rounded-corner alpha is deferred (see
+//! The protocol flow is complete and compiles cleanly, but live pixel/grab/
+//! keymap behavior needs a real X server: every such spot is marked
+//! `DEVICE-VERIFY(0.9.0)`. The window is an **opaque** panel on the screen's
+//! default visual (spec 22 §6: no client-controllable vibrancy on Linux); a
+//! real ARGB visual for rounded-corner alpha is deferred (see
 //! [`encode_framebuffer`]).
 
 use x11rb::connection::{Connection, RequestConnection};
@@ -831,12 +824,10 @@ fn load_keymap(conn: &RustConnection) -> Result<(Vec<u32>, u8, u8)> {
     let setup = conn.setup();
     let min = setup.min_keycode;
     let max = setup.max_keycode;
-    // `GetKeyboardMapping`'s `count` is a single byte, so the server-reported
-    // range has to fit within it. `min`/`max` come from a possibly hostile or
-    // buggy `$DISPLAY` server (untrusted): a `min > max` pair would underflow
-    // the naive `max - min + 1`, and a 256-keycode span (e.g. min=0, max=255)
-    // would overflow it. Reject anything that doesn't fit rather than panic
-    // or misindex `keymap` later in `translate_key`.
+    // `min`/`max` come from a possibly hostile/buggy `$DISPLAY` server: a
+    // `min > max` pair would underflow `max - min + 1`, and a 256-keycode span
+    // would overflow the single-byte `count`. Reject rather than panic or
+    // misindex `keymap` later.
     let count = keycode_range_count(min, max).ok_or_else(|| {
         Error::Platform(format!(
             "X11 server reported an invalid keycode range (min={min}, max={max})"

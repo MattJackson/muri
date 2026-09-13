@@ -1,52 +1,31 @@
 //! Accessibility bridge for the **self-drawn** Linux popups (X11 override-redirect
 //! + Wayland layer-shell), wired to `accesskit_unix` behind the `a11y` feature.
 //!
-//! ## Why this exists
+//! The native dbusmenu presenter ([`super::sni`]) is accessible over AT-SPI for
+//! free; a self-drawn popup is just opaque pixels to the compositor, so muri
+//! publishes its own semantic tree, as it already does on macOS/Windows.
 //!
-//! The native dbusmenu presenter ([`super::sni`]) is accessible over AT-SPI **for
-//! free**: the SNI host draws a real native menu, so Orca walks it with no work
-//! from muri. The moment muri draws its *own* styled popup (the X11 or Wayland
-//! custom presenter), that free accessibility is gone — the compositor sees only
-//! an opaque surface of pixels. To stay accessible, muri publishes a semantic tree
-//! itself, exactly as it already does on macOS/Windows via `accesskit`.
+//! `accesskit_unix` implements AT-SPI2 over D-Bus (via `zbus`), not the display
+//! protocol, so the adapter is identical under X11 and Wayland and reuses
+//! [`crate::a11y::accesskit::tree_update`]. **Wayland caveat:**
+//! `Adapter::set_root_window_bounds()` is X11-only, so absolute-screen AT
+//! hit-testing isn't exact there — roles/text/focus/actions still work; muri
+//! never calls it.
 //!
-//! ## How it works (research doc §13)
-//!
-//! `accesskit_unix` implements the AT-SPI2 D-Bus interfaces via `zbus`. Crucially
-//! **AT-SPI2 rides D-Bus, not the display protocol**, so the adapter is identical
-//! under X11 and Wayland and never touches the compositor — it only needs a logical
-//! `Window`/`Menu`-role node plus the menu items as `Role::MenuItem` /
-//! `Role::MenuItemCheckBox`, and the app reporting focus. muri already builds this
-//! exact tree for the macOS/Windows self-drawn menus behind the `a11y` feature
-//! ([`crate::a11y`]); the Unix adapter reuses [`crate::a11y::accesskit::tree_update`].
-//!
-//! **Known Wayland caveat:** `Adapter::set_root_window_bounds()` is X11-only (a
-//! Wayland client can't read its window position), so absolute-screen AT
-//! hit-testing won't be exact on Wayland — roles, text, focus, and actions all
-//! still work. muri never calls it (the popup carries no reliable screen rect on
-//! either backend), which is the documented, bounded cost of the styled path.
-//!
-//! ## Status
-//!
-//! Fully wired: [`PopupA11y::attach`] creates an `accesskit_unix::Adapter` seeded
-//! with the popup's menu tree, and [`PopupA11y::focus_row`] /
-//! [`PopupA11y::set_focused`] push focus/activation updates. The adapter lazily
-//! no-ops until a real AT-SPI bus + assistive technology (Orca) is listening —
-//! `DEVICE-VERIFY(0.11.1)`: the live bus handshake + Orca announcement can only be
-//! confirmed on a real Linux session. When the `a11y` feature is off the whole type
-//! degrades to inert no-ops so the popups run without accessibility rather than not
-//! at all.
+//! Fully wired: [`PopupA11y::attach`]/`focus_row`/`set_focused` push tree and
+//! focus updates; the adapter lazily no-ops until a real AT (Orca) is listening
+//! (`DEVICE-VERIFY(0.11.1)`). With the `a11y` feature off the type degrades to
+//! inert no-ops.
 
 use crate::menu::Menu;
 
 /// The AT-SPI action handler for a popup. AccessKit action requests (e.g. a screen
 /// reader's "click"/"focus") arrive here on the adapter's own thread.
 ///
-/// DEVICE-VERIFY(0.11.1): AT-driven *activation* would need to hop the request back
-/// onto the popup's event-loop thread to fire the row (the self-drawn loops are
-/// single-threaded and own the dispatch closure). Focus/label/state announcement —
-/// the bulk of screen-reader value — works through the pushed `TreeUpdate`s without
-/// it, so the handler is a no-op for now.
+/// DEVICE-VERIFY(0.11.1): AT-driven *activation* would need to hop the request
+/// back onto the popup's single-threaded event loop to fire the row. Focus/
+/// label/state announcement — the bulk of screen-reader value — works through
+/// the pushed `TreeUpdate`s without it, so the handler is a no-op for now.
 #[cfg(feature = "a11y")]
 struct PopupActions;
 

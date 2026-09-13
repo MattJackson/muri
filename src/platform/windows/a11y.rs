@@ -3,21 +3,16 @@
 //! Automation for NVDA + Narrator).
 //!
 //! `accesskit_windows::SubclassingAdapter` subclasses a popup's `HWND` to answer
-//! `WM_GETOBJECT` from the already-built [`crate::a11y`] tree. Each panel owns its
-//! own adapter and a small snapshot (the menu it renders + the current
-//! selection); the run loop refreshes the snapshot and pushes a `TreeUpdate`
-//! whenever focus, the open flyout, or the menu content changes — exactly as the
-//! macOS backend does with `accesskit_macos`.
+//! `WM_GETOBJECT` from the already-built [`crate::a11y`] tree. Each panel owns
+//! its own adapter and a small snapshot; the run loop pushes a `TreeUpdate`
+//! whenever focus, the open flyout, or menu content changes.
 //!
-//! The adapter's action handler never touches the shared `AppState`: it enqueues
-//! a UIA action so Focus/Click requests are applied on the pump-thread drain like
-//! every other input. Unlike `accesskit_macos` (which guarantees its action
-//! handler runs on the main thread), `accesskit_windows` may invoke `do_action`
-//! on a *foreign* UIA thread, so the enqueue path here is cross-thread-safe: it
-//! pushes into a process-wide `Mutex` inbox and wakes the pump with a
-//! `PostMessageW` (documented thread-safe) to the owner `HWND` stored in a
-//! thread-safe static — never via the pump thread's thread-local inbox, which is
-//! empty on a foreign thread (see [`super::push_a11y_action`]).
+//! The action handler never touches `AppState` directly: `accesskit_windows` may
+//! invoke `do_action` on a *foreign* UIA thread (unlike `accesskit_macos`, which
+//! is main-thread-only), so it enqueues into a process-wide `Mutex` inbox and
+//! wakes the pump via `PostMessageW` to a thread-safe owner `HWND` — never the
+//! pump thread's thread-local inbox, which is empty on a foreign thread (see
+//! [`super::push_a11y_action`]).
 
 use std::cell::RefCell;
 use std::rc::Rc;

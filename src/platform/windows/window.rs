@@ -3,20 +3,17 @@
 //! Each popup and flyout is a borderless `WS_POPUP` window with the extended
 //! styles that make it behave like a native menu surface:
 //!
-//! - `WS_EX_NOACTIVATE` — shown and clicked without stealing foreground
-//!   activation from the user's app (the Windows equivalent of macOS's
-//!   non-activating panel), so `PredefinedMenuItem` edit actions keep targeting
-//!   the previously focused window.
+//! - `WS_EX_NOACTIVATE` — shown/clicked without stealing foreground activation
+//!   (macOS's non-activating panel), so edit actions keep targeting the
+//!   previously focused window.
 //! - `WS_EX_TOOLWINDOW` — kept out of the Alt-Tab list and the taskbar.
 //! - `WS_EX_LAYERED` — enables the per-pixel-alpha [`present`](super::present)
-//!   blit so the rounded corners and the acrylic-see-through body work.
+//!   blit so rounded corners and the acrylic body work.
 //! - `WS_EX_TOPMOST` — floats above the foreground app like a real menu.
 //!
-//! On Windows 11 the window also requests the transient-window **acrylic system
-//! backdrop** (`DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW`), the exact
-//! menu/flyout material (decision #6); where unavailable the OS simply ignores it
-//! and the layered blit still shows the (opaque-or-tinted) panel the drawer
-//! painted.
+//! On Windows 11 the window also requests the transient-window acrylic system
+//! backdrop (decision #6); where unavailable the OS ignores it and the layered
+//! blit still shows the drawer's fallback fill.
 
 use std::ptr::null_mut;
 

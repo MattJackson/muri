@@ -1,22 +1,17 @@
 //! Native panel construction and the AppKit responder subclasses.
 //!
-//! Each popup/flyout is a borderless, non-activating [`NSPanel`] (spec 20 §2):
-//! `Borderless | NonactivatingPanel` style, floating + `becomesKeyOnlyIfNeeded`
-//! so it can take keyboard focus for menu navigation **without deactivating the
-//! user's foreground app**, at the pop-up-menu window level so it floats above
-//! everything. Its content view depends on appearance (#79): a **light** menu
-//! hosts the [`MuriView`] inside an `NSGlassEffectView` (Liquid Glass), which
-//! matches a native light `NSMenu`; a **dark** menu (and any pre-Tahoe host)
-//! hosts the [`MuriView`] **directly** on the transparent panel and lets muri
-//! paint its own semi-transparent dark background — the content-adaptive OS
-//! materials lighten the backdrop to a neutral grey floor and can't reach a
-//! native dark menu's dark/tinted/translucent look. Either way the raster pixmap
-//! is blitted into the [`MuriView`] (see [`super::present`]).
+//! Each popup/flyout is a borderless, non-activating [`NSPanel`] (spec 20 §2),
+//! floating + `becomesKeyOnlyIfNeeded` so it can take keyboard focus **without
+//! deactivating the user's foreground app**. Its content view depends on
+//! appearance (#79): a light menu hosts [`MuriView`] inside an
+//! `NSGlassEffectView`; a dark menu (or pre-Tahoe host) hosts it directly on
+//! the transparent panel with muri's own semi-transparent fill, since the OS
+//! materials can't reach a native dark menu's look. Either way the raster
+//! pixmap is blitted into the [`MuriView`] (see [`super::present`]).
 //!
-//! The responder subclasses ([`MuriView`], [`MuriWindowDelegate`]) never touch
-//! the shared [`super::AppState`] directly: every callback enqueues a
-//! [`super::UiEvent`] and asks for a main-thread drain, so all mutation happens
-//! in one place, never re-entrantly inside an AppKit event dispatch.
+//! The responder subclasses never touch [`super::AppState`] directly: every
+//! callback enqueues a [`super::UiEvent`] and asks for a main-thread drain, so
+//! mutation never happens re-entrantly inside an AppKit dispatch.
 
 #![allow(non_snake_case)]
 
@@ -66,14 +61,11 @@ define_class!(
             true
         }
 
-        // The popup is a `NonactivatingPanel` with `becomesKeyOnlyIfNeeded(true)`,
-        // so it becomes key only if its first responder says it's needed. Return
-        // true so `makeKeyAndOrderFront` actually makes the panel key **without
-        // activating the app** — which revives `windowDidResignKey`, the signal
-        // that dismisses the menu when focus is lost to Spotlight, an in-app
-        // search field, another app, or another (OEM) menu (#17). Flyouts use
-        // `orderFrontRegardless` (they never take key), so opening a submenu does
-        // not resign the popup — no self-dismiss race. DEVICE-VERIFY.
+        // `becomesKeyOnlyIfNeeded(true)` needs this true so `makeKeyAndOrderFront`
+        // makes the panel key **without activating the app**, reviving
+        // `windowDidResignKey` — the signal that dismisses the menu on focus loss
+        // (#17). Flyouts use `orderFrontRegardless` (never key), so opening a
+        // submenu can't resign the popup. DEVICE-VERIFY.
         #[unsafe(method(needsPanelToBecomeKey))]
         fn needs_panel_to_become_key(&self) -> bool {
             true
@@ -109,13 +101,10 @@ define_class!(
 
         #[unsafe(method(cursorUpdate:))]
         fn cursor_update(&self, _event: &objc2_app_kit::NSEvent) {
-            // `resetCursorRects` is honored only while the panel is KEY, and the
-            // NonactivatingPanel isn't key the instant it opens; `mouseMoved:`
-            // only fires on movement. So a popup opened under a *stationary*
-            // pointer kept whatever cursor the view underneath last set — the
-            // text I-beam (#63). `cursorUpdate:` fires from the tracking area's
-            // `CursorUpdate` option independent of key state and movement, so
-            // forcing the arrow here closes that gap. Keep the other handlers.
+            // `resetCursorRects` only fires while key, and `mouseMoved:` only on
+            // movement, so a popup opened under a stationary pointer kept the
+            // I-beam (#63). `cursorUpdate:` fires independent of key/movement via
+            // the tracking area's `CursorUpdate` option, closing that gap.
             NSCursor::arrowCursor().set();
             if debug_cursor_enabled() {
                 let key = self.window().map(|w| w.isKeyWindow()).unwrap_or(false);
@@ -289,43 +278,27 @@ pub(super) fn make_panel(
     let view = MuriView::new(mtm, bounds, kind);
     view.setWantsLayer(true);
 
-    // Backdrop by appearance (#72/#79): on a Liquid Glass system (Tahoe) a native
-    // `NSMenu` is drawn on the private `NSGlassView`. The public `NSGlassEffectView`
-    // is the closest API and matches a LIGHT menu closely, so a light menu is hosted
-    // in glass. A DARK menu can't be matched by any public OS material — they are
-    // content-adaptive and lighten the backdrop to a neutral grey floor, never
-    // reaching native's dark/tinted/translucent look (`tintColor` is a subtle color
-    // wash, not a darkness lever; a black overlay just makes it opaque). So a dark
-    // menu (and any pre-Tahoe host) uses NO OS material: the raster view is hosted
-    // directly on the transparent panel and muri paints its own semi-transparent
-    // dark fill (`mac.rs` theme()) straight over the desktop. Detecting glass by
-    // class-presence (not a hardcoded OS version) tracks whatever the OS provides.
+    // Backdrop by appearance (#72/#79): on Liquid Glass (Tahoe), `NSGlassEffectView`
+    // matches a LIGHT native menu closely, so light menus host in glass. A DARK
+    // menu can't be matched by any public OS material — they're content-adaptive
+    // and lighten to a neutral grey floor — so it (and any pre-Tahoe host) uses
+    // no OS material: the raster view sits directly on the transparent panel with
+    // muri's own semi-transparent fill. Glass detection is by class-presence, not
+    // a hardcoded OS version.
     if glass_backdrop_available() && !super::system_is_dark() {
-        // Light Liquid-Glass menu: the public `NSGlassEffectView` matches the
-        // native light `NSMenu` closely (the dark case, which it reads far too
-        // light for, is routed to the vibrancy branch above — #72). Glass rounds
-        // itself natively, so no layer mask is needed; the hosted raster paints a
-        // fully transparent background on the live System path (#64), so the glass
-        // is the surface.
+        // Glass rounds itself natively (no layer mask needed); the hosted raster
+        // paints a fully transparent background on the live System path (#64).
         let glass: Retained<NSGlassEffectView> =
             NSGlassEffectView::initWithFrame(mtm.alloc(), bounds);
         glass.setCornerRadius(corner_radius as f64);
         glass.setContentView(Some(&view));
         panel.setContentView(Some(&glass));
     } else {
-        // DARK menu (and any pre-Tahoe host): NO OS material backdrop. The public
-        // materials (`Material::Menu`, `NSGlassEffectView`) are content-adaptive
-        // and lighten the backdrop to a neutral grey floor, so a native dark
-        // `NSMenu`'s dark/tinted/translucent look is unreachable through them — the
-        // menu reads as a flat opaque slab (#79). Instead the raster view is hosted
-        // DIRECTLY on the transparent panel (`setOpaque:false` + `clearColor`
-        // above), and muri paints its own SEMI-TRANSPARENT dark background
-        // (`mac.rs` theme()), which composites straight over the desktop — dark
-        // over dark, lifting over light, tinted by the content behind it — exactly
-        // like native. The view's layer is rounded + non-opaque so the desktop
-        // shows through the fill's alpha. (Trades the OS blur for predictable,
-        // fully-owned pixels; the darkness/transparency/tint is what reads as
-        // native, and the blur can't be had without the neutral floor.)
+        // DARK menu (and any pre-Tahoe host): the raster view is hosted DIRECTLY
+        // on the transparent panel and muri paints its own semi-transparent dark
+        // background (`mac.rs` theme()), compositing straight over the desktop
+        // like native (#79). The layer is rounded + non-opaque so the desktop
+        // shows through the fill's alpha.
         if let Some(layer) = view.layer() {
             layer.setCornerRadius(corner_radius as f64);
             layer.setMasksToBounds(true);

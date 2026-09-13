@@ -1,31 +1,25 @@
 //! Pure keyboard-navigation state machine for the menu and its N-level flyout stack.
 //!
 //! muri owns keyboard navigation directly (independent of any accessibility
-//! backend, per the design): arrow keys move the highlight, Right/Left open and
-//! close the flyout, Enter/Space activate, Esc pops one level, and a typed
-//! character jumps to the next matching row (type-ahead). Keeping the logic here
-//! — free of any window, event loop, or platform call — makes it exhaustively
-//! unit-testable; the live backend ([`crate::platform`]) only translates its platform
-//! key events into [`NavKey`]s and applies the returned [`NavAction`].
+//! backend): arrow keys move the highlight, Right/Left open and close the
+//! flyout, Enter/Space activate, Esc pops one level, and a typed character
+//! jumps to the next matching row (type-ahead). Kept free of any window, event
+//! loop, or platform call so it's exhaustively unit-testable; the live backend
+//! ([`crate::platform`]) only translates key events into [`NavKey`]s and
+//! applies the returned [`NavAction`].
 //!
 //! ## Focus model
 //!
-//! Navigation state is a [`MenuFocus`]: the selected **top-level** item index and a
-//! **stack** of open flyout levels ([`FlyoutFocus`]), one frame per open submenu
-//! (decision #8, N-level nested submenus — spec 40 §5). Each frame names the
-//! `parent` row it opened from (an index into the menu one level up) and the
-//! selected `child` within that level. An empty stack means no flyout is open.
+//! Navigation state is a [`MenuFocus`]: the selected **top-level** item index
+//! and a **stack** of open flyout levels ([`FlyoutFocus`]), one frame per open
+//! submenu (decision #8, N-level nested submenus — spec 40 §5), mirroring the
+//! live backend's flyout **window** stack so keyboard and mouse selection stay
+//! consistent ([`crate::flyout::next_flyout`]). `Right`/`Activate` on a submenu
+//! row pushes a deeper level; `Left`/`Escape` pops one, closing the whole stack
+//! once popped past the top.
 //!
-//! This mirrors the live macOS backend's flyout **window** stack exactly (the same
-//! one the mouse hover-stack drives — [`crate::flyout::next_flyout`]), so keyboard
-//! and mouse selection stay consistent. `Right`/`Activate` on a submenu row —
-//! whether top-level or already inside a flyout — **pushes** a deeper level;
-//! `Left`/`Escape` **pops** one level, closing the whole stack once popped past the
-//! top.
-//!
-//! Selection wraps, and skips non-focusable items (separators, section headers,
-//! disabled rows, and inert info rows — everything [`Item::is_interactive`] marks
-//! `false`).
+//! Selection wraps, and skips non-focusable items (everything
+//! [`Item::is_interactive`] marks `false`).
 
 use crate::menu::{Item, Menu, MenuId};
 
@@ -177,9 +171,8 @@ fn handle_in_flyout(menu: &Menu, focus: &mut MenuFocus, key: NavKey) -> NavActio
         Ok(level) => level,
         Err(valid) => {
             // A parent up the stack is no longer a submenu (menu swapped
-            // underneath us): drop the stale sub-stack down to the deepest live
-            // level. If that empties the stack, restore top-level focus to the
-            // top-level row the stack originally opened from.
+            // underneath us): drop the stale sub-stack to the deepest live level,
+            // restoring top-level focus if that empties the stack.
             let top_parent = focus.flyout.first().map(|f| f.parent);
             focus.flyout.truncate(valid);
             if focus.flyout.is_empty() {

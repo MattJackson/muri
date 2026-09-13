@@ -2,13 +2,12 @@
 //! per-popup [`MenuOptions`], and the pure resolution of a semantic [`Color`]
 //! into a concrete [`Rgba`].
 //!
-//! Semantic colors (`Label`, `Accent`, `SystemRed`, …) are resolved against the
-//! active theme at draw time. A [`ThemeSource`] chooses the look: `System(..)`
-//! matches the host OS (and alone receives the backend's live accent/color/font
-//! injection), `MacOs`/`Windows`/`Gnome` force a specific platform look on any
-//! host, `Preset` is a built-in skin, and `Custom` is fully hand-built. This pure
-//! layer resolves a source to a concrete [`Theme`] against fixed inputs and is
-//! fully unit-testable without any GUI.
+//! A [`ThemeSource`] chooses the look: `System(..)` matches the host OS (and
+//! alone receives the backend's live accent/color/font injection),
+//! `MacOs`/`Windows`/`Gnome` force a specific platform look on any host,
+//! `Preset` is a built-in skin, and `Custom` is fully hand-built. This pure
+//! layer resolves a source to a concrete [`Theme`], fully unit-testable
+//! without any GUI.
 
 use crate::geometry::Insets;
 use crate::style::{Color, Font, Rgba, Weight};
@@ -30,20 +29,13 @@ pub enum OsFamily {
 impl OsFamily {
     /// The target OS's real UI font family names, most-preferred first.
     ///
-    /// This is a **target** face list, not a host-resolution list: it names
-    /// what the *forced* platform look (issue #54) should actually render in
-    /// — Segoe UI for Windows, SF Pro (or the private `.AppleSystemUIFont`) for
-    /// macOS, Cantarell/Ubuntu for GNOME — regardless of which OS muri is
-    /// currently running on.
-    ///
-    /// Segoe UI and SF Pro are proprietary, not redistributable, and not
-    /// installed on every host, so this list is only ever *tried first*
-    /// against whatever fonts the host actually has (see
+    /// This is a **target** face list, not a host-resolution list: it names what
+    /// the *forced* platform look (issue #54) should render in, regardless of
+    /// which OS muri is currently running on. Segoe UI/SF Pro are proprietary and
+    /// not always installed, so this is only *tried first* (see
     /// [`crate::render::RasterDrawer::with_forced_theme`]); when absent, the
     /// renderer falls back to [`OsFamily::fallback_font_families`] rather than
-    /// silently substituting the host's own native UI font. Pixel-perfect
-    /// parity therefore requires the real target face to be installed; muri's
-    /// job is to never lie about it by drawing the wrong OS's font instead.
+    /// silently substituting the host's own native UI font.
     pub fn ui_font_families(&self) -> &'static [&'static str] {
         match self {
             OsFamily::MacOs => &[
@@ -57,20 +49,15 @@ impl OsFamily {
         }
     }
 
-    /// Free, freely-redistributable-or-broadly-preinstalled families to try, in
-    /// order, when none of [`ui_font_families`](OsFamily::ui_font_families) is
-    /// installed on the host — used only by a **forced** theme, which must
-    /// never fall back to the host's own native UI font (that would silently
-    /// reproduce issue #54: a Windows-forced menu rendering in SF Pro on a
-    /// Mac).
+    /// Free, broadly-preinstalled families to try when none of
+    /// [`ui_font_families`](OsFamily::ui_font_families) is installed — used only
+    /// by a **forced** theme, which must never fall back to the host's own
+    /// native UI font (that would silently reproduce issue #54).
     ///
-    /// Honesty note: none of these are metrically identical to Segoe UI or SF
-    /// Pro — muri does not claim Segoe/SF metrics it can't achieve. GNOME's
-    /// own Cantarell/Ubuntu are freely available and already listed in
-    /// [`ui_font_families`](OsFamily::ui_font_families) for the GNOME case, so
-    /// only macOS/Windows need a distinct, more broadly-available fallback
-    /// here (DejaVu Sans / Liberation Sans, both common on Linux and often
-    /// present wherever muri's own headless fonts are vendored from).
+    /// None of these are metrically identical to Segoe UI or SF Pro; muri does
+    /// not claim metrics it can't achieve. GNOME's own Cantarell/Ubuntu are
+    /// already listed in [`ui_font_families`](OsFamily::ui_font_families), so
+    /// only macOS/Windows need a distinct fallback here.
     pub fn fallback_font_families(&self) -> &'static [&'static str] {
         match self {
             OsFamily::MacOs => &["DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial"],
@@ -224,17 +211,15 @@ impl ThemeSource {
 
     /// The [`OsFamily`] this source **forces**, if any — `Some` only for
     /// [`MacOs`](ThemeSource::MacOs) / [`Windows`](ThemeSource::Windows) /
-    /// [`Gnome`](ThemeSource::Gnome); `None` for `System`/`Preset`/`Custom`,
-    /// none of which force a specific platform look.
+    /// [`Gnome`](ThemeSource::Gnome); `None` for `System`/`Preset`/`Custom`.
     ///
     /// This is the seam a platform backend uses to pick the right drawer
     /// constructor (issue #54): when `Some(family)`, the popup must build its
-    /// [`crate::render::RasterDrawer`] with
+    /// drawer with
     /// [`RasterDrawer::with_forced_theme`](crate::render::RasterDrawer::with_forced_theme)
-    /// (which pins the *target* OS's UI font family, never the host's) instead
-    /// of [`RasterDrawer::new_native`](crate::render::RasterDrawer::new_native)
-    /// (which pins the *host's* native menu font — correct only for
-    /// `System(..)`).
+    /// (pins the *target* OS's font) instead of
+    /// [`RasterDrawer::new_native`](crate::render::RasterDrawer::new_native)
+    /// (pins the *host's* font — correct only for `System(..)`).
     pub fn forced_family(&self) -> Option<OsFamily> {
         match self {
             ThemeSource::MacOs(_) => Some(OsFamily::MacOs),
@@ -311,11 +296,9 @@ const ACCENT_FALLBACK: Rgba = Rgba::opaque(0, 122, 255);
 
 // -- macOS `NSMenu` (Big Sur+) geometry references (#57) ----------------------
 //
-// muri's macOS rows previously read too tall / loose versus a native `NSMenu`.
-// These name the Big Sur+ menu metrics the [`Theme::macos`] preset targets, each
-// commented with its native reference. Values that still need a pixel-accurate
-// side-by-side capture to confirm are flagged `DEVICE-VERIFY(0.10.8)`. All are
-// public [`Theme`] fields at the end, so a consumer can still override them.
+// Named Big Sur+ menu metrics the [`Theme::macos`] preset targets (rows
+// previously read too tall/loose). Values still needing a pixel-accurate
+// capture are flagged `DEVICE-VERIFY(0.10.8)`.
 
 /// Standard `NSMenu` item height in logical points. The core "rows too tall" fix
 /// (#57). Native reference: AppKit's standard menu item height (~22pt on Big Sur+).
@@ -347,25 +330,21 @@ const MACOS_COLUMN_GAP: f32 = 8.0;
 
 /// Popup corner radius in logical points for the forced/offscreen `Theme::macos`
 /// preset. Native reference: the Big Sur..Sequoia `NSMenu` rounded-corner radius
-/// (~6pt; design-community measurements put it at ~6–9pt). `pub(crate)` so the
-/// macOS backend's live version-gated read (`read_system_corner_radius` in
-/// `src/platform/mac.rs`) can reuse it as the pre-Tahoe value while bumping the
-/// radius on Tahoe (#67), where Apple's Liquid Glass redesign enlarged it. There
-/// is no public API for the live value and no industry-standard constant (nearly
-/// every toolkit delegates to a real `NSMenu`), so this stays a DEVICE-VERIFY
-/// estimate. DEVICE-VERIFY(0.10.8).
+/// (~6pt). `pub(crate)` so the macOS backend's live version-gated read
+/// (`read_system_corner_radius` in `src/platform/mac.rs`) can reuse it as the
+/// pre-Tahoe value while bumping the radius on Tahoe (#67), where Apple's
+/// Liquid Glass redesign enlarged it. No public API exists for the live value,
+/// so this stays a DEVICE-VERIFY estimate. DEVICE-VERIFY(0.10.8).
 pub(crate) const MACOS_CORNER_RADIUS: f32 = 6.0;
 
 /// Tracking (letter-spacing) as a fraction of the point size applied to macOS
 /// San Francisco UI text tracking, in fraction-of-em per point (#42/#57/#66).
 ///
 /// Device-verified against a live `NSMenu` on Tahoe (#66): a native menu adds
-/// **no** extra tracking beyond the SF face's own advances — shaped metrics
-/// already match native inter-letter spacing. An earlier conservative negative
-/// value (`-0.012`) overcorrected on the live path (adjacent letters touched),
-/// so this is the single source of truth for **all** paths at `0.0`: the forced
-/// [`Theme::macos`] preset, its offscreen goldens, and the live-system read path
-/// in `platform::mac` (via [`macos_sf_tracking`]) now all agree with native.
+/// **no** extra tracking beyond the SF face's own advances. An earlier negative
+/// value (`-0.012`) overcorrected (adjacent letters touched on the live path),
+/// so `0.0` is now the single source of truth for the forced preset, its
+/// offscreen goldens, and the live-system read path ([`macos_sf_tracking`]).
 pub(crate) const MACOS_SF_TRACKING_FRACTION: f32 = 0.0;
 
 /// Extra tracking in logical points for macOS SF UI text at `size` points.
@@ -419,11 +398,8 @@ impl Theme {
     /// The platform present path composites the raster surface over a native
     /// effect backdrop (`NSVisualEffectView` on macOS, DWM acrylic on Windows)
     /// using per-pixel alpha (spec `10-rendering-layout.md` §11, locked decision
-    /// #6). Setting `background` to a reduced-alpha [`Color::Rgba`] — rather
-    /// than the opaque literal `light()` uses — is what lets that backdrop blur
-    /// through the panel; every other field stays the same opaque/semantic
-    /// value as `light()`. The alpha here is a fixed **~82%** (`209 / 255`), a
-    /// reasonable approximation of the macOS menu vibrancy material.
+    /// #6); every other field stays the same as `light()`. The alpha here is a
+    /// fixed **~82%** (`209 / 255`), approximating the macOS vibrancy material.
     pub fn native() -> Self {
         Theme {
             background: Color::Rgba(246, 246, 246, 209),
@@ -462,19 +438,13 @@ impl Theme {
                 Color::Rgba(246, 246, 246, 209)
             },
             corner_radius: MACOS_CORNER_RADIUS,
-            // Matched to the Big Sur+ `NSMenu` rhythm via the named
-            // `MACOS_*` reference constants above (each documents its native
-            // source): ~22pt item height, ~14pt leading inset, ~4pt vertical
-            // inset, ~8pt inter-column gap, 13pt SF. #57: earlier builds read
-            // looser (rows too tall / gaps wide); these are tighter. All are
-            // public `Theme` fields — override for exact pixel matching.
+            // Matched to the Big Sur+ `NSMenu` rhythm via the named `MACOS_*`
+            // reference constants above (#57: earlier builds read too loose).
             row_height: MACOS_ROW_HEIGHT,
             padding: Insets::symmetric(MACOS_LEADING_INSET, MACOS_VERTICAL_INSET),
             column_gap: MACOS_COLUMN_GAP,
-            // Bake SF tracking into the preset so a FORCED macOS theme carries it
-            // on any host (not only when the live-system font is read). The
-            // System path in `platform::mac` recomputes the same value for the
-            // live menu size (assign, not add) — no double application (#57).
+            // Bake SF tracking into the preset so a FORCED theme carries it on
+            // any host; `platform::mac` overwrites (not adds) for the live size.
             row_font: Font::system(MACOS_MENU_FONT_SIZE, Weight::Regular)
                 .with_letter_spacing(macos_sf_tracking(MACOS_MENU_FONT_SIZE))
                 .with_optical_size(MACOS_MENU_FONT_SIZE),
@@ -505,10 +475,8 @@ impl Theme {
             row_height: 28.0,
             padding: Insets::symmetric(6.0, 4.0),
             column_gap: 12.0,
-            // Segoe UI at 9pt is the Win11 menu default; the live OS point size
-            // overrides this, but a sensible base for the headless/fallback path.
-            // Segoe UI uses metrics-only spacing (no tracking), set explicitly so
-            // a forced Windows theme never inherits macOS SF tracking.
+            // Sensible headless/fallback base; live OS point size overrides this.
+            // Set tracking explicitly so a forced theme never inherits SF tracking.
             row_font: Font::system(14.0, Weight::Regular).with_letter_spacing(SEGOE_UI_TRACKING),
             header_font: Font::system(14.0, Weight::Bold).with_letter_spacing(SEGOE_UI_TRACKING),
             ..base

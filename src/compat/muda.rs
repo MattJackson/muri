@@ -5,16 +5,13 @@
 //!
 //! This facade is a **pure, bidirectional `muda` drop-in** — conceptually two
 //! `sed` scripts, `s/muda/muri/` **and** `s/muri/muda/`. It mirrors muda's public
-//! API **exactly — no more, no less**: every symbol here also exists on upstream
-//! `muda`, so an app can move *onto* muri by redirecting its imports and back
-//! *off* muri the same way, both with zero code changes. **The facade carries no
-//! muri-only customization.** Bold rows, per-run / value colors, active markers,
-//! leading-icon submenus, forced themes, `MenuOptions`, offscreen render, and
-//! liveness/spawn-error introspection are **not** on this surface; the moment a
-//! consumer wants any of them they have left compat and must use the **native**
-//! muri API ([`crate::menu`], [`crate::Tray`], [`crate::ContextMenu`],
-//! [`crate::MenuOptions`]). Compat is the on-ramp; native is where customization
-//! lives.
+//! API **exactly — no more, no less**, so an app can move *onto* muri by
+//! redirecting its imports and back *off* the same way, both with zero code
+//! changes. **The facade carries no muri-only customization** (bold rows,
+//! per-run/value colors, forced themes, `MenuOptions`, offscreen render,
+//! liveness/spawn-error introspection); a consumer that wants any of that has
+//! left compat for the **native** muri API ([`crate::menu`], [`crate::Tray`],
+//! [`crate::ContextMenu`], [`crate::MenuOptions`]).
 //!
 //! ## Compat symbol ↔ upstream muda symbol (the freeze, both ways)
 //!
@@ -39,28 +36,21 @@
 //!
 //! - The platform surface methods (`init_for_nsapp`, `init_for_hwnd`,
 //!   `show_context_menu_for_*`, …) are exposed on **every** target rather than
-//!   `#[cfg(target_os)]`-gated as muda gates them. muri routes all `target_os`
-//!   branching through its `Platform` seam (ADR-0002 / the `strict_cfg` test), so
-//!   the facade cannot scatter target gates; the extra methods are harmless.
+//!   `#[cfg(target_os)]`-gated as muda gates them, since muri routes all
+//!   `target_os` branching through its `Platform` seam (ADR-0002 / `strict_cfg`).
 //! - `Position` is a small facade type, not the real `dpi::Position`; only the
-//!   `None` (current-cursor) form is exercised by the worked migration (spec
-//!   `02` §6). This is best-effort until muri pins muda's `dpi` version.
-//! - `IconMenuItem` built from raw RGBA renders its leading icon in the muri
-//!   custom surface: the RGBA is encoded to PNG and carried as an
-//!   [`Icon::Png`](crate::menu::Icon::Png) — the same bridge the tray icon uses
-//!   (issue #9). An [`Icon::from_path`] icon decodes the PNG file to RGBA and
-//!   travels the same path. A `NativeIcon` maps to
-//!   [`Icon::Symbol`](crate::menu::Icon::Symbol).
+//!   `None` (current-cursor) form is exercised (spec `02` §6), best-effort until
+//!   muri pins muda's `dpi` version.
+//! - `IconMenuItem` built from raw RGBA (or [`Icon::from_path`]) renders its
+//!   leading icon via the same RGBA→PNG bridge the tray icon uses (issue #9); a
+//!   `NativeIcon` maps to [`Icon::Symbol`](crate::menu::Icon::Symbol).
 //! - `Accelerator` is displayed only (spec `02` §5, divergence D5); the facade
 //!   parses a useful subset of muda's `Code`/`Modifiers`.
 
-// The ONLY `unsafe` in this facade is the `unsafe fn` *signature* on the Windows
-// (`init_for_hwnd`, `show_context_menu_for_hwnd`) and macOS
-// (`show_context_menu_for_nsview`) surface methods, preserved verbatim so muda
-// callers that wrap them in `unsafe { … }` compile unchanged (spec `02` §6). No
-// `unsafe` *operations* are performed anywhere in this module — it is entirely
-// safe code. The crate-wide `#![deny(unsafe_code)]` stays intact; this localized
-// allow only permits the parity markers.
+// SAFETY: The only `unsafe` here is the `unsafe fn` *signature* on the Windows/
+// macOS surface methods, preserved verbatim so muda callers wrapping them in
+// `unsafe { … }` compile unchanged (spec `02` §6). No `unsafe` operation is
+// performed anywhere in this module; this allow only permits the parity markers.
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
@@ -171,15 +161,11 @@ impl std::error::Error for BadIcon {}
 /// stringified (`"1"`, `"2"`, `"3"`, …).
 ///
 /// **Documented divergence — ids are NOT bit-identical to muda's.** This is
-/// muri's *own* opaque sequence, not a reproduction of muda's numeric values.
-/// Real muda 0.19.3 starts its Windows counter at 1000 and, on macOS/GTK,
-/// consumes the counter *twice* per `Menu`/`Submenu` (once for the id, once for
-/// an internal handle tag), so muda's auto-id stream skips numbers; muri's clean
-/// `1, 2, 3, …` deliberately diverges rather than mimic that fragile internal
-/// double-counter. Apps must treat auto-generated ids as opaque and compare
-/// against [`IsMenuItem::id`] / the item's own `id()` — never against hardcoded
-/// muda numbers. The only contract the facade guarantees is that auto ids are
-/// **unique and strictly increasing** within a process.
+/// muri's own opaque sequence, not a reproduction of muda's numeric values
+/// (real muda's counter skips numbers due to internal double-counting on
+/// macOS/GTK). Apps must treat auto ids as opaque and compare against
+/// [`IsMenuItem::id`] rather than hardcoded muda numbers; the only guarantee is
+/// that ids are unique and strictly increasing within a process.
 fn next_auto_id() -> MenuId {
     static COUNTER: AtomicU32 = AtomicU32::new(1);
     MenuId(COUNTER.fetch_add(1, Ordering::Relaxed).to_string())
@@ -214,20 +200,17 @@ impl Icon {
     /// Build an icon from raw RGBA bytes, erroring if the length does not match
     /// `width * height * 4` (mirrors muda's `Icon::from_rgba`).
     pub fn from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> std::result::Result<Self, BadIcon> {
-        // Reject zero-area icons up front: `0x0` would otherwise validate (its
-        // expected length is 0), then be silently dropped downstream because the
-        // encoder (`render::encode_rgba_png`) rejects a zero dimension — a
-        // degenerate icon that reports success at every step yet never draws.
+        // Reject zero-area icons up front: `0x0` would otherwise validate (expected
+        // length 0) then get silently dropped downstream by the encoder, which
+        // rejects a zero dimension — success at every step, yet it never draws.
         if width == 0 || height == 0 {
             return Err(BadIcon(format!(
                 "icon dimensions must be non-zero, got {width}x{height}"
             )));
         }
-        // Checked arithmetic: `width`/`height` may come from untrusted image
-        // metadata, and `w * h * 4` overflows `usize` for pathological dimensions
-        // (e.g. u32::MAX x u32::MAX) — which panics under the default debug
-        // overflow checks *before* the length guard runs, and silently wraps to a
-        // wrong `expected` in release. Overflow is itself a rejected icon.
+        // Checked arithmetic: dimensions may come from untrusted metadata, and
+        // `w * h * 4` can overflow `usize`, panicking in debug or wrapping in
+        // release before the length guard runs. Overflow is itself a rejection.
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4));
@@ -252,10 +235,9 @@ impl Icon {
     ///
     /// The file is decoded to straight-alpha RGBA and stored like
     /// [`from_rgba`](Icon::from_rgba). **Documented divergence:** muri decodes
-    /// **PNG** files only (its native decoder), and the optional `size`
-    /// (muda resizes to it) is accepted for signature parity but not applied —
-    /// the icon keeps its decoded dimensions. Both are best-effort, consistent
-    /// with the rest of this facade's icon story.
+    /// **PNG** files only, and the optional `size` (muda resizes to it) is
+    /// accepted for signature parity but not applied — the icon keeps its
+    /// decoded dimensions.
     pub fn from_path(
         path: impl AsRef<std::path::Path>,
         _size: Option<(u32, u32)>,
@@ -362,12 +344,10 @@ impl MenuItemKind {
             }
             MenuItemKind::Check(i) => {
                 let s = i.inner.borrow();
-                // The checkbox state drives the leading checkmark (#12). Set the
-                // row's `checked` state explicitly so an UNchecked check-item is
-                // `Some(false)` — not `None` — keeping the shared check-gutter
-                // reservation and the AccessKit `MenuItemCheckBox` role that a
-                // plain `MenuItem` (`checked == None`) must not get. `apply_label`
-                // only sets `Some(true)` for a checked item, hence the override (#F6).
+                // The checkbox state drives the leading checkmark (#12). Explicitly
+                // set `checked` so an unchecked item is `Some(false)`, not `None`,
+                // keeping the check-gutter and AccessKit checkbox role a plain
+                // `MenuItem` must not get (#F6).
                 let row = apply_label(
                     MuriRow::new(s.id.clone()).enabled(s.enabled),
                     &s.text,
@@ -385,14 +365,10 @@ impl MenuItemKind {
                 );
                 match &s.icon {
                     // A raw-RGBA icon is encoded to PNG and rendered as the row's
-                    // leading image — the same bridge the tray icon uses
-                    // (`encode_rgba_png` → `Icon::Png`), so a provider logo on a
-                    // header row draws (issue #9).
+                    // leading image, the same bridge the tray icon uses (issue #9).
                     Some(IconSource::Rgba(icon)) => {
-                        // Cached encode: `to_muri` re-runs on every `set_menu`, so
-                        // encoding an unchanged logo each tick would waste CPU and
-                        // defeat the render decode cache. The cache returns a stable
-                        // Arc for identical RGBA.
+                        // Cached: `to_muri` re-runs on every `set_menu`, so this
+                        // avoids re-encoding an unchanged logo each tick.
                         if let Some(png) =
                             super::encode_rgba_cached(&icon.rgba, icon.width, icon.height)
                         {
@@ -1203,7 +1179,9 @@ pub trait ContextMenu {
     /// muri and is best-effort (divergence D3/D4).
     fn init_for_gtk_window(&self) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on macOS.
+    /// Show as a transient context menu at `position` (or the live mouse cursor
+    /// when `None`, falling back to the screen origin where the platform can't
+    /// report the pointer, e.g. Wayland) on macOS.
     ///
     /// # Safety
     /// `nsview` must be a valid `NSView` pointer. (Signature parity with muda.)
@@ -1213,7 +1191,9 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on Windows.
+    /// Show as a transient context menu at `position` (or the live mouse cursor
+    /// when `None`, falling back to the screen origin where the platform can't
+    /// report the pointer, e.g. Wayland) on Windows.
     ///
     /// # Safety
     /// `hwnd` must be a valid window handle. (Signature parity with muda.)
@@ -1223,11 +1203,11 @@ pub trait ContextMenu {
         position: Option<Position>,
     ) -> Result<()>;
 
-    /// Show as a transient context menu at `position` (or, when `None`, the live mouse cursor — falling back to the screen origin only where the platform cannot report the pointer, e.g. Wayland) on Linux.
-    /// muri takes an **opaque** `*mut c_void` GTK window handle (muda takes an
-    /// `&impl IsA<gtk::Widget>`) so the facade needs no GTK dependency yet keeps
-    /// muda's call arity — a migrating GTK consumer's positional argument still
-    /// compiles (#31).
+    /// Show as a transient context menu at `position` (or the live mouse cursor
+    /// when `None`, falling back to the screen origin where the platform can't
+    /// report the pointer, e.g. Wayland) on Linux. muri takes an **opaque**
+    /// `*mut c_void` GTK window handle (muda takes `&impl IsA<gtk::Widget>`) so
+    /// the facade needs no GTK dependency yet keeps muda's call arity (#31).
     fn show_context_menu_for_gtk_window(
         &self,
         gtk_window: *mut c_void,
@@ -1468,12 +1448,9 @@ mod tests {
 
     #[test]
     fn menu_id_auto_generation_is_monotonic_and_unique() {
-        // The counter is process-global and shared with every other test running
-        // in parallel, so a `nb == na + 1` assertion is flaky (another test can
-        // advance the counter in between). Assert the invariant the facade
-        // actually guarantees — auto ids are strictly increasing and unique — not
-        // muda's exact numeric sequence (which the facade deliberately does not
-        // reproduce; see `next_auto_id`).
+        // The counter is process-global and shared with parallel tests, so
+        // `nb == na + 1` would be flaky. Assert the actual guarantee — strictly
+        // increasing and unique — not muda's exact numeric sequence.
         let a = MenuItem::new("A", true, None);
         let b = MenuItem::new("B", true, None);
         let na: u32 = a.id().0.parse().expect("auto id is an integer");

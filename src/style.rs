@@ -153,13 +153,11 @@ pub struct Font {
     /// Negative tightens, positive loosens.
     pub letter_spacing: f32,
     /// Optical size (`opsz` axis) to instance the face at, in logical points, or
-    /// `None` to leave the face at its default optical master. A variable UI font
-    /// (San Francisco, Segoe UI Variable) carries an `opsz` axis whose masters are
-    /// tuned per size; the value is clamped into the face's own `opsz` range. macOS
-    /// SFNS defaults to the condensed *Display* master (`opsz` default 28), so a
-    /// 13pt menu left at the default renders narrower/"squished" than native — the
-    /// `System` theme sets this to the menu point size so CoreText's *Text* master
-    /// (clamped to `opsz` 17) is used instead (#77). `None` keeps prior behavior.
+    /// `None` to leave the face at its default optical master (clamped into the
+    /// face's own `opsz` range). macOS SFNS defaults to the condensed *Display*
+    /// master, which renders narrower/"squished" than native at menu sizes — the
+    /// `System` theme sets this to the menu point size so CoreText picks the
+    /// *Text* master instead (#77). `None` keeps prior behavior.
     pub optical_size: Option<f32>,
 }
 

@@ -6,20 +6,17 @@
 //! (`use muda::…` → `use muri::compat::muda::…`,
 //! `use tray_icon::…` → `use muri::compat::tray_icon::…`) and compile. Every
 //! facade type maps **onto muri's native model** ([`crate::menu`],
-//! [`crate::Tray`], [`crate::ContextMenu`]); the facade does **not** depend on the
-//! real `muda` / `tray-icon` crates (locked decision #5). Events are emitted by
-//! muri itself and projected onto the process-global channel in [`crate::event`],
-//! which both the native and facade doors read.
+//! [`crate::Tray`], [`crate::ContextMenu`]); it does **not** depend on the real
+//! `muda` / `tray-icon` crates (locked decision #5). Events are emitted by muri
+//! itself and projected onto the process-global channel in [`crate::event`].
 //!
 //! ## Scope of this (M3) implementation
 //!
-//! The routing decision, the item-type translation onto muri's `Item`/`Row`
-//! tree, muda's `MenuId` auto-generation counter semantics, and the unified
-//! `MenuEvent` channel are all implemented and unit-tested here (spec `50` §2.6).
-//! Actual native menu-bar materialization (`NSMenu`/`HMENU`/GTK) and live custom
-//! surface display route through muri's platform backends, which land per the
-//! milestone ladder; the facade tags the surface mode and builds the muri
-//! surface, and is honest about the documented divergences (D1–D9, spec `02` §9).
+//! The routing decision, item-type translation onto muri's `Item`/`Row` tree,
+//! muda's `MenuId` auto-generation semantics, and the unified `MenuEvent`
+//! channel are implemented and unit-tested here (spec `50` §2.6). Actual native
+//! menu-bar materialization lands per the milestone ladder; the facade is
+//! honest about the documented divergences (D1–D9, spec `02` §9).
 
 pub mod muda;
 pub mod tray_icon;
@@ -40,14 +37,12 @@ fn encode_cache() -> &'static Mutex<Vec<(u32, u32, u64, Arc<[u8]>)>> {
 /// Encode raw straight-alpha RGBA to PNG, returning a **stable** `Arc` for
 /// identical `(width, height, bytes)` from a small bounded cache.
 ///
-/// The muda/tray-icon translation (`IconMenuItem` → `to_muri`, tray `icon_to_muri`)
-/// re-runs on every `set_menu` / `set_icon`, so encoding an unchanged logo each
-/// time both wastes CPU (PNG compression on a hot rebuild path) and defeats the
-/// render layer's `Arc`-pointer decode cache — a fresh `Vec` becomes a fresh
-/// `Arc`, which never matches the previous frame's key. Returning the same `Arc`
-/// for identical pixels fixes both: the encode is done once, and the decode cache
-/// hits on every subsequent frame. Returns `None` for a zero dimension or a
-/// length mismatch (delegating to [`crate::render::encode_rgba_png`]).
+/// The muda/tray-icon translation re-runs on every `set_menu` / `set_icon`, so
+/// encoding an unchanged logo each time wastes CPU and defeats the render
+/// layer's `Arc`-pointer decode cache (a fresh `Vec` makes a fresh `Arc` that
+/// never matches the previous frame's key). Returning the same `Arc` for
+/// identical pixels fixes both. Returns `None` for a zero dimension or a length
+/// mismatch (delegating to [`crate::render::encode_rgba_png`]).
 pub(crate) fn encode_rgba_cached(rgba: &[u8], width: u32, height: u32) -> Option<Arc<[u8]>> {
     let key = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

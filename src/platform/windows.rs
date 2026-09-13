@@ -1,43 +1,32 @@
 //! Windows backend: a `Shell_NotifyIcon` tray anchor plus a native, borderless,
 //! non-activating layered popup + flyout driven directly by a Win32 message pump
-//! (no winit / softbuffer).
-//!
-//! The message-only owner window hosts the notification icon and receives its
-//! `WM_TRAY_CALLBACK`. On a left-click the popup opens as a
+//! (no winit / softbuffer). The popup is a
 //! `WS_POPUP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED` window (see
-//! the `window` submodule) whose per-pixel-alpha content is blitted with
-//! `UpdateLayeredWindow` over an acrylic system backdrop (see `present`).
-//! Submenu rows open a second such window (a flyout).
+//! `window`) blitted with `UpdateLayeredWindow` over an acrylic backdrop (see
+//! `present`); submenu rows open a second such window (a flyout).
 //!
 //! ## Event model
 //!
-//! One thread owns the message pump ([`GetMessageW`]/[`TranslateMessage`]/
-//! [`DispatchMessageW`]). Every callback — the tray `wnd_proc`, the global
-//! `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks, and a [`TrayHandle`](crate::TrayHandle)
-//! from another thread — is tiny: it *enqueues* a `UiEvent` and posts a
-//! `WM_MURI_DRAIN` to the owner window. A single drain (dispatched by the pump)
-//! is the only place that mutates `AppState`, so windows are never created or
-//! destroyed re-entrantly inside a hook or a synchronous message send. This is
-//! the exact shape the macOS backend runs, with GCD's main-queue drain replaced
-//! by a posted window message.
+//! One thread owns the message pump. Every callback — the tray `wnd_proc`, the
+//! global `WH_MOUSE_LL`/`WH_KEYBOARD_LL` hooks, and a
+//! [`TrayHandle`](crate::TrayHandle) from another thread — just enqueues a
+//! `UiEvent` and posts `WM_MURI_DRAIN`; only the drain mutates `AppState`, so
+//! windows are never created/destroyed re-entrantly inside a hook or a
+//! synchronous message send. Mirrors the macOS backend's GCD main-queue drain.
 //!
 //! ## Outside-click dismiss (spec 21 §2)
 //!
-//! A `WS_EX_NOACTIVATE` popup never holds focus, so `Focused(false)` is not a
-//! usable dismiss signal. Instead a global `WH_MOUSE_LL` hook — installed *only*
-//! while a popup is open, removed the instant it closes — marshals every
-//! system-wide mouse-down point to the drain, which dismisses the stack when the
-//! point falls outside **every** open muri window (the point-in-any-window rule).
-//! `WM_ACTIVATEAPP` deactivation dismisses too, catching keyboard app-switches.
+//! A `WS_EX_NOACTIVATE` popup never holds focus, so a global `WH_MOUSE_LL` hook
+//! (installed only while a popup is open) marshals system-wide mouse-down points
+//! to the drain, which dismisses the stack when a point falls outside every open
+//! muri window. `WM_ACTIVATEAPP` deactivation dismisses too, for keyboard
+//! app-switches.
 //!
 //! ## Device-verified behaviors
 //!
-//! Outside-click dismissal, keyboard nav into the non-activating popup, the
-//! acrylic backdrop, per-monitor DPI, and NVDA/Narrator traversal need a real
-//! Windows display + assistive tech; those spots are marked
-//! `DEVICE-VERIFY(0.9.0)`. The architecture (native layered no-activate window,
-//! layered blit present, per-window UIA adapter, hook-driven dismiss) is complete
-//! and compiles for `x86_64-pc-windows-msvc`.
+//! Outside-click dismissal, keyboard nav, the acrylic backdrop, per-monitor DPI,
+//! and NVDA/Narrator traversal need a real Windows display + assistive tech;
+//! those spots are marked `DEVICE-VERIFY(0.9.0)`.
 
 #![allow(unsafe_code)]
 
@@ -653,12 +642,9 @@ impl WinGeometry {
     /// anchor geometry for a pointer/rect-anchored [`ContextMenu`](crate::ContextMenu)
     /// / [`Popup`](crate::Popup) that has no tray icon (spec 21 §3).
     ///
-    // DEVICE-VERIFY(0.9.0): multi-monitor point resolution. The first
-    // logical->physical conversion uses the *system* DPI to find the monitor, then
-    // snaps to that monitor's effective DPI; a secondary display with a different
-    // scale needs a real multi-monitor box to confirm the anchor lands on (and
-    // flips against) the right monitor — the same fragility the macOS `for_rect`
-    // carries.
+    // DEVICE-VERIFY(0.9.0): multi-monitor point resolution (find monitor at
+    // system DPI, then snap to its effective DPI) needs a real multi-monitor box
+    // to confirm the anchor lands on the right monitor.
     fn for_rect(rect: LogicalRect) -> Option<WinGeometry> {
         let sys_dpi = unsafe { GetDpiForSystem() };
         let sys_scale = if sys_dpi == 0 {
@@ -1173,13 +1159,12 @@ struct Flyout {
 /// windows (decision #8), the global hooks that drive dismissal + keyboard nav,
 /// and everything needed to render/anchor them. [`Tray`],
 /// [`ContextMenu`](crate::ContextMenu), and [`Popup`](crate::Popup) all drive one
-/// of these; they differ only in how the anchor rectangle is obtained
-/// ([`Anchor`]) — spec 21 §3. This is the Windows analogue of the macOS
-/// `PopupSession`.
+/// of these, differing only in how the anchor rectangle is obtained
+/// ([`Anchor`]) — spec 21 §3. Windows analogue of the macOS `PopupSession`.
 ///
-/// The click handler is stored as a `Box<dyn Fn + 'a>`: the tray uses a `'static`
-/// handler owned for the whole run loop; a context menu borrows the caller's
-/// handler for the duration of its blocking `open_at` / `anchored_to` call.
+/// The click handler is a `Box<dyn Fn + 'a>`: the tray uses a `'static` handler
+/// owned for the run loop; a context menu borrows the caller's handler for its
+/// blocking `open_at` / `anchored_to` call.
 struct PopupSession<'a> {
     /// This session's unique id (#33), allocated by [`next_session_id`]. Tags
     /// every window this session opens ([`packed_tag`]) and every [`UiEvent`]
@@ -1720,14 +1705,11 @@ impl PopupSession<'_> {
         if point_in_any(&rects, x, y) {
             return;
         }
-        // A mouse-down on the tray icon itself is a toggle handled by the paired
-        // `WM_TRAY_CALLBACK` (button-up): dismissing here would close-then-reopen
-        // (flicker) so a tray click could never close an open popup. Hit-test the
-        // icon's *reliable* rect (never the cursor fallback), so a spurious rect
-        // can't swallow a genuine outside-click dismiss. When the rect is
-        // unavailable (icon in the overflow flyout) we fall through and dismiss —
-        // in that layout the icon isn't directly clickable while a popup is open
-        // anyway (opening the overflow flyout is itself the dismissing click).
+        // A mouse-down on the tray icon is a toggle handled by the paired
+        // `WM_TRAY_CALLBACK`: dismissing here too would close-then-reopen
+        // (flicker). Use the icon's reliable rect only (never the cursor
+        // fallback); if unavailable (icon in the overflow flyout) fall through
+        // and dismiss, since that icon isn't directly clickable anyway.
         if let Anchor::Tray(a) = &self.anchor {
             if let Some(r) = a.icon_rect_physical() {
                 if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
@@ -2085,19 +2067,13 @@ impl AppState {
 }
 
 /// Descend `menu` through the submenu-row indices in `stack` (the open flyout
-/// parents, shallowest first), **borrowing** the menu at that depth — the menu
-/// whose rows the deepest open flyout selects among. Returns `None` if some index
-/// along the way is not a submenu (e.g. the menu was swapped underneath an open
-/// flyout).
+/// parents, shallowest first), **borrowing** the menu at that depth. Returns
+/// `None` if some index along the way is not a submenu.
 ///
-/// A thin `&[usize]` wrapper over [`crate::menu::descend`], so the N-level
-/// submenu resolution that [`PopupSession::menu_at_level`] (and hence the click /
-/// keyboard dispatch paths) relies on is unit-testable without creating real
-/// windows. Borrows rather than clones, so it is free on the redraw hot path.
-///
-/// The live paths call [`PopupSession::menu_at_level`]/[`crate::menu::descend`]
-/// directly (borrowing disjoint fields of `self`); this wrapper exists for the
-/// slice-based unit tests, hence `#[cfg(test)]`.
+/// A thin `&[usize]` wrapper over [`crate::menu::descend`], letting the N-level
+/// submenu resolution [`PopupSession::menu_at_level`] relies on be unit-tested
+/// without creating real windows; live paths call `menu_at_level`/`descend`
+/// directly. Hence `#[cfg(test)]`.
 #[cfg(test)]
 fn menu_at_stack<'a>(menu: &'a Menu, stack: &[usize]) -> Option<&'a Menu> {
     crate::menu::descend(menu, stack.iter().copied())
@@ -2141,12 +2117,6 @@ fn register_popup_class(hinstance: windows_sys::Win32::Foundation::HINSTANCE, cl
 // System appearance
 // =============================================================================
 
-/// Query whether the system uses a dark app theme (`AppsUseLightTheme == 0` under
-/// `HKCU`), defaulting to light if the value can't be read.
-/// The live Windows accent color via `DwmGetColorizationColor` (the DWM
-/// colorization/accent color, `0xAARRGGBB`), or `None` if DWM composition is
-/// off. Injected into `Color::Accent` so the selection/checkmark follows the
-/// user's Windows accent (#14).
 /// Read the Windows menu font (`SPI_GETNONCLIENTMETRICS` → `lfMenuFont`, normally
 /// Segoe UI) as a [`SystemFont`](crate::platform::SystemFont). Free function so
 /// both the [`Platform`] impl and the popup `theme()` can call it.
@@ -2193,6 +2163,9 @@ fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
     }
 }
 
+/// The live Windows accent color via `DwmGetColorizationColor`
+/// (`0xAARRGGBB`), or `None` if DWM composition is off. Injected into
+/// `Color::Accent` so the selection/checkmark follows the user's accent (#14).
 fn system_accent() -> Option<(u8, u8, u8, u8)> {
     use windows_sys::Win32::Graphics::Dwm::DwmGetColorizationColor;
     unsafe {
@@ -2210,6 +2183,8 @@ fn system_accent() -> Option<(u8, u8, u8, u8)> {
     }
 }
 
+/// Whether the system uses a dark app theme (`AppsUseLightTheme == 0` under
+/// `HKCU`), defaulting to light if the value can't be read.
 fn system_is_dark() -> bool {
     read_personalize_dword("AppsUseLightTheme", 1) == 0
 }
@@ -2474,11 +2449,9 @@ fn push_drain(owner: HWND) {
 /// [`Popup`](crate::Popup) session to completion (spec 21 §3): open the styled
 /// popup at `anchor`, then pump the Win32 message loop — draining muri UI events
 /// after each dispatched message — until the whole stack dismisses. Reuses the
-/// shared [`PopupSession`]; the only difference from the tray is that the anchor is
-/// a fixed rect, the handler is borrowed for the call rather than owned for a run
-/// loop, and there is no persistent owner window / [`MAIN_APP`] / command inbox —
-/// the pump drains `EVENTS` directly on the caller's stack. This is the Windows
-/// analogue of the macOS `run_popup_session`.
+/// shared [`PopupSession`], but the anchor is a fixed rect, the handler is
+/// borrowed for the call, and there is no persistent owner window / [`MAIN_APP`]
+/// — the pump drains `EVENTS` directly on the caller's stack.
 fn run_popup_session(
     menu: Menu,
     options: MenuOptions,
@@ -2526,13 +2499,10 @@ fn run_popup_session(
     #[cfg(feature = "a11y")]
     let prev_a11y_owner = A11Y_OWNER.swap(popup_hwnd as isize, Ordering::SeqCst);
 
-    // DEVICE-VERIFY(0.9.0): scoped modal pump. Unlike the tray, this drives the
-    // popup with a bounded `GetMessageW` loop (no persistent owner window, no
-    // `MAIN_APP`, no command inbox) so `open_at` / `anchored_to` blocks on the
-    // caller's stack and returns when the menu dismisses. Callbacks still enqueue
-    // into the shared `EVENTS` inbox, which we drain after each dispatched message;
-    // that the `WS_EX_NOACTIVATE` popup + global hooks deliver these events as
-    // expected can only be confirmed on a real Windows display.
+    // DEVICE-VERIFY(0.9.0): scoped modal pump — a bounded `GetMessageW` loop (no
+    // persistent owner window/`MAIN_APP`) so `open_at`/`anchored_to` blocks and
+    // returns when the menu dismisses. That the `WS_EX_NOACTIVATE` popup +
+    // global hooks deliver events as expected needs a real Windows display.
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
         while session.popup.is_some() {
@@ -2682,10 +2652,8 @@ mod tests {
         assert_eq!(buf[127], 0);
     }
 
-    // FIX 1 (correctness): a 2-level-nested menu must open the nested flyout and
-    // dispatch the *deep leaf* id — not the submenu row's id, and not resolved
-    // against the top-level menu. We prove the N-level resolution the fixed click
-    // and keyboard paths rely on, without creating real windows.
+    // FIX 1 (correctness): a 2-level-nested menu must dispatch the *deep leaf*
+    // id, not the submenu row's id resolved against the top-level menu.
     #[test]
     fn nested_submenu_opens_deep_flyout_and_dispatches_deep_leaf() {
         use crate::menu::Row;

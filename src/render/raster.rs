@@ -5,24 +5,18 @@
 //! straight-alpha bitmap blits — so it does not need a general-purpose 2D crate
 //! (`tiny-skia`) behind it. This module owns:
 //!
-//! * [`Framebuffer`] — an owned, **premultiplied-RGBA** pixel buffer (byte order
-//!   `R, G, B, A`, row-major). Premultiplied because that is what both live
-//!   present paths want (macOS `CGImage` `PremultipliedLast`, Windows
-//!   `UpdateLayeredWindow` premultiplied BGRA) and what alpha compositing over it
-//!   produces.
+//! * [`Framebuffer`] — an owned, **premultiplied-RGBA** pixel buffer, since
+//!   that is what both live present paths want (macOS `CGImage`
+//!   `PremultipliedLast`, Windows `UpdateLayeredWindow` premultiplied BGRA).
 //! * The primitives [`fill_round_rect`], [`fill_rect`], and [`blend_pixel`],
-//!   plus PNG [`decode_png`] / [`Framebuffer::encode_png`] built on the lean
-//!   `png` crate (the same codec `tiny-skia` used internally, now depended on
-//!   directly so `tiny-skia`'s own crates drop out of the tree).
+//!   plus PNG [`decode_png`] / [`Framebuffer::encode_png`] on the lean `png`
+//!   crate, so `tiny-skia`'s own crates drop out of the tree.
 //!
-//! Anti-aliasing uses an analytic rounded-box **signed distance field**: a
-//! pixel's coverage is `clamp(0.5 - sdf, 0, 1)`, giving a ~1px edge band and
-//! pixel-crisp axis-aligned edges (a pixel center exactly on an edge lands at
-//! full/zero coverage). Every blit — AA fills, glyph masks, and image/icon blits
-//! — funnels through [`blend_pixel`], which composites the `over` operator in
-//! **linear light** (gamma-correct), so anti-aliased edges match a native
-//! CoreText/Quartz menu's weight rather than the heavier look naive sRGB-space
-//! blending produced (#42).
+//! Anti-aliasing uses an analytic rounded-box **signed distance field**
+//! (`clamp(0.5 - sdf, 0, 1)` coverage). Every blit funnels through
+//! [`blend_pixel`], which composites `over` in **linear light** (gamma-correct)
+//! so AA edges match a native CoreText/Quartz menu's weight rather than the
+//! heavier look naive sRGB-space blending produced (#42).
 
 use crate::geometry::LogicalRect;
 use crate::style::Rgba;
@@ -185,12 +179,10 @@ impl Framebuffer {
 /// bytes. Returns `None` when the dimensions are zero or `rgba.len()` does not
 /// equal `width * height * 4`.
 ///
-/// This is the bridge that lets the compat facade's raw-RGBA tray icon
-/// ([`Icon::from_rgba`](crate::compat::muda::Icon::from_rgba)) reach muri's
-/// encoded-bytes [`Icon::Png`](crate::menu::Icon::Png): the Linux SNI backend
-/// (`icon_pixmap`) and the macOS/Windows image paths all consume encoded bytes,
-/// so without this the facade icon never reaches the drawn tray and, on GNOME,
-/// the appindicator extension drops an item with an empty pixmap.
+/// This bridges the compat facade's raw-RGBA tray icon
+/// ([`Icon::from_rgba`](crate::compat::muda::Icon::from_rgba)) to muri's
+/// encoded-bytes [`Icon::Png`](crate::menu::Icon::Png), since every present
+/// path (Linux SNI, macOS/Windows) consumes encoded bytes, not raw RGBA.
 pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
@@ -259,13 +251,11 @@ fn linear_to_srgb_u8(l: f32) -> u8 {
 /// Font-smoothing coverage exponent applied to **light-on-dark** glyph pixels
 /// (#71). `> 1` thins the anti-aliased edge coverage.
 ///
-/// Gamma-correct linear-light AA compositing (see [`blend_pixel`]) is
-/// polarity-*symmetric*, but macOS text rendering is not: CoreText/Quartz apply a
-/// luminance-dependent font smoothing (stem-darkening tuned per fg/bg) so glyph
-/// weight looks consistent in both polarities. A single fixed linear blend fixes
-/// dark-on-light (the #42 fix) but *overshoots* light-on-dark — the linear
-/// round-trip lifts AA edge coverage on a dark background, fattening strokes until
-/// neighbouring letters merge. Thinning the coverage of light-on-dark glyph pixels
+/// Gamma-correct linear-light AA compositing ([`blend_pixel`]) is
+/// polarity-*symmetric*, but macOS text rendering is not: CoreText/Quartz apply
+/// luminance-dependent font smoothing so glyph weight looks consistent in both
+/// polarities. A fixed linear blend fixes dark-on-light (#42) but *overshoots*
+/// light-on-dark, fattening strokes until neighbouring letters merge; thinning
 /// restores per-letter separation to match a native `NSMenu`.
 ///
 /// DEVICE-VERIFY(0.12.2): tune against a native `NSMenu` (the "8 separated ink
@@ -293,16 +283,13 @@ fn luma_scaled(r: u8, g: u8, b: u8) -> u32 {
 }
 
 /// Polarity-aware font-smoothing of a glyph mask's coverage `cov` for the pixel
-/// at byte offset `off` (#71). When the foreground `fg` is **lighter** than the
-/// destination pixel beneath it (light-on-dark), the coverage is thinned by
-/// [`TEXT_SMOOTHING_GAMMA`] so the AA edges don't overshoot vs macOS smoothing;
-/// otherwise (dark-on-light) the coverage is returned unchanged, since the linear
-/// blend already matches native there. Applied only to glyph masks — solid fills,
-/// separators, and icons keep the plain linear blend.
+/// at byte offset `off` (#71): when foreground `fg` is **lighter** than the
+/// destination beneath it, coverage is thinned by [`TEXT_SMOOTHING_GAMMA`] so AA
+/// edges don't overshoot vs macOS smoothing; otherwise it is unchanged. Applied
+/// only to glyph masks — fills, separators, and icons keep the plain linear blend.
 #[inline]
-/// Convenience wrapper that computes the foreground luma inline. The hot glyph
-/// blit uses [`smooth_glyph_coverage_fg_lum`] with the luma hoisted out of its
-/// per-pixel loop; this form is kept for tests that check a single pixel.
+/// Test-only convenience wrapper computing the foreground luma inline; the hot
+/// glyph blit uses [`smooth_glyph_coverage_fg_lum`] with the luma hoisted out.
 #[cfg(test)]
 pub(crate) fn smooth_glyph_coverage(cov: u8, fg: Rgba, dst: &[u8], off: usize) -> u8 {
     smooth_glyph_coverage_fg_lum(cov, fg_luma(fg), dst, off)
@@ -335,14 +322,11 @@ pub(crate) fn smooth_glyph_coverage_fg_lum(cov: u8, fg_lum: u32, dst: &[u8], off
 /// the `over` compositing is done in linear light, not directly on the sRGB-
 /// encoded bytes (#42).
 ///
-/// Naive sRGB-space blending (`dst = src*a + dst*(1-a)` on the encoded bytes)
-/// leaves anti-aliased edge pixels too dark — dark-on-light text renders visibly
-/// heavier/thicker than a native CoreText/Quartz menu, which composites in linear
-/// light. This linearizes both operands (unpremultiplying the premultiplied
-/// destination first), blends in linear premultiplied space, then re-encodes to
-/// premultiplied sRGB storage — so AA text/edges match the native weight. Applies
-/// to every blit that funnels through here (glyph masks, rounded-rect fills,
-/// hairline separators, image/icon blits).
+/// Naive sRGB-space blending leaves AA edge pixels too dark — dark-on-light text
+/// renders heavier than a native CoreText/Quartz menu, which composites in
+/// linear light. This linearizes both operands, blends in linear premultiplied
+/// space, then re-encodes to premultiplied sRGB storage. Applies to every blit
+/// that funnels through here (glyph masks, fills, separators, image/icon blits).
 #[inline]
 pub(crate) fn blend_pixel(dst: &mut [u8], off: usize, src: Rgba, a: u8) {
     if a == 0 {
@@ -359,12 +343,9 @@ pub(crate) fn blend_pixel(dst: &mut [u8], off: usize, src: Rgba, a: u8) {
         return;
     }
     if dst[off + 3] == 255 {
-        // Opaque destination (`da == 1`): unpremultiplying the destination is a
-        // no-op, the composited alpha is exactly 1, and re-premultiplying by it is
-        // a no-op — so the general branch's per-channel divide/round/re-premultiply
-        // and the alpha recompute all collapse to identities. Composite directly in
-        // linear light; bit-identical to the branch below when `da == 255`. This is
-        // the common "AA glyph / icon over an opaque menu background" path.
+        // Opaque destination (`da == 1`): the general branch's divide/re-premultiply
+        // steps all collapse to identities, so composite directly in linear light —
+        // bit-identical to the branch below, and the common opaque-background path.
         let lut = &*SRGB_TO_LINEAR;
         let sa = a as f32 / 255.0;
         let inv = 1.0 - sa;
@@ -503,10 +484,9 @@ const MAX_ICON_PIXELS: u64 = 2048 * 2048;
 /// `(rgba, width, height)` or `None` for non-PNG / undecodable bytes. Palette,
 /// grayscale, and 16-bit inputs are normalized to 8-bit RGBA.
 ///
-/// Dimensions are validated against internal per-dimension and total-pixel
-/// caps (4096px per side; 2048×2048 pixels total) straight from the IHDR-derived
-/// [`png::Info`] (`reader.info()`) *before* any pixel buffer is allocated, so
-/// oversized/malicious inputs are rejected cheaply.
+/// Dimensions are validated against internal size caps from the IHDR-derived
+/// [`png::Info`] *before* any pixel buffer is allocated, so oversized/malicious
+/// inputs are rejected cheaply.
 pub fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = png::Decoder::new(bytes);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -606,10 +586,8 @@ mod tests {
 
     #[test]
     fn blend_is_gamma_correct_not_naive_srgb() {
-        // Black text at 50% coverage over an opaque white background. Gamma-
-        // correct compositing (linear-light) lands near sRGB 188 — the encoding of
-        // linear 0.5 — NOT the naive sRGB-space midpoint 128 that made AA text
-        // read heavier than native CoreText (#42).
+        // Black text at 50% coverage over opaque white: gamma-correct
+        // compositing lands near sRGB 188, not the naive midpoint 128 (#42).
         let mut dst = [255u8, 255, 255, 255];
         blend_pixel(&mut dst, 0, Rgba::new(0, 0, 0, 255), 127);
         assert!(
@@ -636,12 +614,10 @@ mod tests {
 
     #[test]
     fn blend_opaque_dst_fast_path_matches_reference_unpremultiply() {
-        // The opaque-destination fast path must be bit-identical to the full
-        // gamma-correct general branch (which unpremultiplies the destination by
-        // `da`). Replicate that general math independently and sweep src colors ×
-        // coverage over opaque backgrounds; any divergence (e.g. from `out_a` not
-        // collapsing to exactly 1.0) would silently shift AA text/icon pixels and
-        // move goldens, so this asserts zero difference across the whole range.
+        // The opaque-destination fast path must be bit-identical to the general
+        // branch; replicate that math independently and sweep src × coverage over
+        // opaque backgrounds so any divergence would be caught, not silently
+        // shift AA pixels and move goldens.
         fn reference_general(dst: [u8; 4], src: Rgba, a: u8) -> [u8; 4] {
             if a == 0 {
                 return dst;
@@ -746,19 +722,16 @@ mod tests {
 
     #[test]
     fn decode_png_rejects_oversize_dimensions_before_allocating() {
-        // Well past MAX_ICON_DIM; a naive `vec![0u8; w*h*4]` here would be a
-        // multi-GB allocation (60_000² × 4 ≈ 14.4 GB) — the DoS this cap
-        // exists to prevent.
+        // Well past MAX_ICON_DIM; a naive alloc here would be ~14.4 GB — the
+        // DoS this cap exists to prevent.
         let bytes = png_header_with_dims(60_000, 60_000);
         assert!(decode_png(&bytes).is_none());
     }
 
     #[test]
     fn decode_png_rejects_a_square_image_over_the_pixel_cap_but_under_the_dim_cap() {
-        // 3000x3000 is under MAX_ICON_DIM (4096) individually, but its pixel
-        // count (9M) is well over MAX_ICON_PIXELS (2048² = ~4.2M) — this only
-        // gets caught by the *pixel* cap, proving it's a real, independent
-        // check and not just shadowed by the per-dimension one.
+        // 3000x3000 is under MAX_ICON_DIM individually but over MAX_ICON_PIXELS —
+        // caught only by the *pixel* cap, proving it's a real, independent check.
         let bytes = png_header_with_dims(3000, 3000);
         const { assert!((3000u64 * 3000) <= MAX_ICON_DIM as u64 * MAX_ICON_DIM as u64) };
         const { assert!((3000u64 * 3000) > MAX_ICON_PIXELS) };

@@ -1,29 +1,24 @@
 //! macOS backend: `NSStatusItem` tray anchor plus a native, non-activating
 //! `NSPanel` popup driven directly by `NSApplication` (no winit / softbuffer).
-//!
-//! The status item's button is both the click target and the anchor rect. On
-//! click the popup opens as a borderless `NSPanel` (see the `window` submodule)
-//! whose content view hosts an `NSVisualEffectView` vibrancy backdrop under a
-//! `CALayer` that the shared raster [`Framebuffer`](crate::render::Framebuffer)
-//! is blitted to (see the
-//! `present` submodule). Submenu rows open a second such panel (a flyout).
+//! The status item's button is the click target and anchor rect; on click the
+//! popup opens as a borderless `NSPanel` (`window` submodule) whose content
+//! view hosts a vibrancy backdrop under a `CALayer` the shared raster
+//! [`Framebuffer`](crate::render::Framebuffer) is blitted to (`present`
+//! submodule). Submenu rows open a second such panel (a flyout).
 //!
 //! ## Event model
 //!
-//! The app runs a native `NSApplication` run loop. Every AppKit callback (tray
-//! click, mouse, keyboard, key-window changes, AccessKit actions) is tiny: it
-//! translates the event and *enqueues* a `UiEvent`, then asks for a main-thread
-//! drain via GCD. A single drain is the only place that mutates state, so
-//! windows are never created or destroyed re-entrantly inside an AppKit event
-//! dispatch. A [`TrayHandle`](crate::TrayHandle) posts its commands through the
-//! same drain from any thread.
+//! Every AppKit callback translates the event and *enqueues* a `UiEvent`, then
+//! asks for a main-thread drain via GCD. A single drain is the only place that
+//! mutates state, so windows are never created/destroyed re-entrantly inside an
+//! AppKit dispatch. A [`TrayHandle`](crate::TrayHandle) posts commands through
+//! the same drain from any thread.
 //!
 //! ## Device-verified behaviors
 //!
-//! Focus-driven dismissal, keyboard nav on the key panel, VoiceOver traversal,
-//! and vibrancy appearance require a real display + assistive tech; those spots
-//! are marked `DEVICE-VERIFY(0.9.0)`. The architecture (native non-activating
-//! panel, CALayer present, per-window a11y adapter) is complete and compiles.
+//! Focus-driven dismissal, keyboard nav, VoiceOver traversal, and vibrancy
+//! require a real display + assistive tech; those spots are marked
+//! `DEVICE-VERIFY(0.9.0)`.
 
 #![allow(unsafe_code)]
 
@@ -84,12 +79,9 @@ extern "C" {
     );
 }
 
-// CoreText FFI for resolving the real on-disk file behind the system UI font.
-// `NSFont*` is toll-free bridged to `CTFontRef`, and the `CFURL` returned for
-// `kCTFontURLAttribute` is toll-free bridged to `NSURL` — so we can hand fontdb
-// the actual SF NS file (`/System/Library/Fonts/…`) instead of a family name it
-// cannot load (SF Pro lives in a protected file), which otherwise falls back to
-// the bundled UI face. CoreText is linked explicitly so the symbols resolve.
+// CoreText FFI for resolving the real on-disk file behind the system UI font:
+// `NSFont*` is toll-free bridged to `CTFontRef`, so we can hand fontdb the
+// actual SF file instead of a family name it can't load (SF Pro is protected).
 #[link(name = "CoreText", kind = "framework")]
 extern "C" {
     /// `CTFontCopyAttribute(font, attribute)` → a `+1` `CFTypeRef` (or NULL).
@@ -275,20 +267,12 @@ impl TrayTarget {
 
 define_class!(
     // Notification sink for the two "some other menu is taking over" signals:
-    // `NSMenuDidBeginTrackingNotification` (any other menu-bar / context menu
-    // began tracking) and `NSApplicationDidResignActiveNotification` (focus went
-    // to another app). Either one enqueues a `Dismiss`, mirroring how AppKit's
-    // menu-tracking guarantees exactly one open menu at a time.
-    //
-    // This gives the FORWARD half of OEM mutual-exclusion: when a native (OEM)
-    // menu opens, muri's popup dismisses — so the two are never both up because a
-    // native one appeared. The REVERSE (muri force-closing an *already-open,
-    // foreign-app* native menu when muri's popup opens) is an inherent macOS
-    // limitation, NOT a muri bug: a foreign app's `NSMenu` tracking session can
-    // only be ended by clicking outside it or by that app deactivating, and muri's
-    // popup is a **non-activating** `NSPanel` by design (it must not steal the
-    // user's keyboard focus), so it does neither. There is no public API to cancel
-    // another process's menu tracking. Documented as a known limitation.
+    // `NSMenuDidBeginTrackingNotification` and `NSApplicationDidResignActiveNotification`.
+    // Either enqueues a `Dismiss`, giving the FORWARD half of OEM mutual-exclusion
+    // (a native menu opening dismisses muri's popup). The REVERSE — muri closing an
+    // already-open foreign-app menu — is an inherent macOS limitation: there's no
+    // public API to cancel another process's menu tracking, and muri's popup is a
+    // non-activating `NSPanel` so it can't deactivate that app either.
     #[unsafe(super(NSObject))]
     #[name = "MuriDismissObserver"]
     #[thread_kind = MainThreadOnly]
@@ -328,8 +312,7 @@ impl DismissWatchers {
         let mask = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown;
 
         // Global monitor: fires for mouse-downs delivered to OTHER apps / the
-        // desktop — the clicks `resignKey` never reports. Cannot consume the
-        // event (nor should it); it just reports the point.
+        // desktop — clicks `resignKey` never reports. Just reports the point.
         let global_block = RcBlock::new(|_event: NonNull<NSEvent>| {
             let p = NSEvent::mouseLocation();
             push_event(UiEvent::OutsideClick { x: p.x, y: p.y });
@@ -338,9 +321,8 @@ impl DismissWatchers {
             NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_block);
 
         // Local monitor: fires for mouse-downs headed into our own process. A
-        // click on a panel is hit-tested away by the drain; a click elsewhere
-        // in-app dismisses. The event is returned unchanged so normal delivery
-        // still happens.
+        // click on a panel is hit-tested away by the drain; elsewhere in-app it
+        // dismisses. The event is returned unchanged so delivery still happens.
         let local_block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
             let p = NSEvent::mouseLocation();
             push_event(UiEvent::OutsideClick { x: p.x, y: p.y });
@@ -370,10 +352,9 @@ impl DismissWatchers {
             );
         }
 
-        // A Space switch (three-finger swipe / Mission Control) dismisses the
-        // popup, matching a native `NSMenu` (#69). This notification is posted on
-        // `NSWorkspace`'s OWN notification center, not the default center, so it
-        // needs its own registration (and its own removal in `Drop`).
+        // A Space switch dismisses the popup, matching a native `NSMenu` (#69).
+        // Posted on `NSWorkspace`'s OWN notification center, so it needs its own
+        // registration (and removal in `Drop`).
         // SAFETY: `observer` responds to `muriDismiss:`; the name is a valid
         // `&'static NSNotificationName`.
         unsafe {
@@ -800,18 +781,12 @@ impl PopupSession<'_> {
                 theme.accent = Color::Rgba(r, g, b, a);
             }
             read_system_palette().apply_to(&mut theme);
-            // #73: `NSColor.labelColor` carries alpha 0.85 (secondaryLabel 0.55).
-            // Drawn straight over the see-through glass, a busy/dark desktop bleeds
-            // through the glyph ink, washing the light-mode text out and dropping
-            // its contrast (an apparent "blue tint" was just a dark-blue desktop
-            // behind the translucent glass, not a color bug — the light symptom of
-            // the same glass translucency as #72). A native `NSMenu` draws text
-            // OPAQUE on the menu material, so flatten the translucent text colors
-            // over the material's NEUTRAL color — the resolved preset background,
-            // still set here before the bulk fill is dropped for vibrancy — and
-            // draw them opaque, so the backdrop only shows *between* glyphs like
-            // native. Flattening over the neutral preset background yields a
-            // neutral near-black (~37,37,37), matching native, with no color cast.
+            // #73: `NSColor.labelColor` is translucent (alpha 0.85/0.55), so drawn
+            // straight over the see-through glass a busy/dark desktop bleeds through
+            // and washes out contrast (same glass translucency as #72). A native
+            // `NSMenu` draws text OPAQUE on the menu material, so flatten the
+            // translucent text colors over the resolved preset background and draw
+            // them opaque instead.
             // DEVICE-VERIFY(0.12.2): crisp neutral text on a light menu over any
             // backdrop.
             {
@@ -831,38 +806,27 @@ impl PopupSession<'_> {
             if let Some(font) = cached_system_menu_font() {
                 font.apply_size_to(&mut theme);
             }
-            // Live native menu chrome, read once from a real `NSMenu` and cached
-            // (#67/#68, 0.12.1): the row pitch (~24pt), corner radius (12pt on
-            // Tahoe), and leading text inset (~14pt) are the exact values AppKit
-            // lays a native `NSMenu` out at — read live so muri auto-tracks OS
-            // changes (e.g. a future patch moving Tahoe's corner) instead of a
-            // hardcoded version table, with the version-gated constants as
-            // fallback. The forced `Theme::macos` preset (and its offscreen
-            // goldens) keep their frozen metrics.
+            // Live native menu chrome, cached (#67/#68, 0.12.1): row pitch, corner
+            // radius, and leading inset read from AppKit so muri auto-tracks OS
+            // changes. The forced `Theme::macos` preset (and its goldens) keep
+            // their frozen metrics.
             let metrics = native_menu_metrics();
             theme.row_height = metrics.row_height;
             theme.corner_radius = metrics.corner_radius;
             theme.padding.left = metrics.leading_inset;
             theme.padding.right = metrics.leading_inset;
-            // Live SF tracking (#66): device-verified against a live NSMenu on
-            // Tahoe — native menu text adds no extra tracking beyond the SF face's
-            // own advances. `MACOS_SF_TRACKING_FRACTION` is now 0 for every path
-            // (preset, goldens, live), so this assign is metrics-only and agrees
-            // with the forced preset. Kept explicit to pin intent on the live path.
+            // Live SF tracking (#66): device-verified — native menu text adds no
+            // extra tracking beyond the SF face's own advances. Kept explicit to
+            // pin intent on the live path (agrees with the forced preset).
             theme.row_font.letter_spacing = crate::theme::macos_sf_tracking(theme.row_font.size);
             theme.header_font.letter_spacing =
                 crate::theme::macos_sf_tracking(theme.header_font.size);
             if increase_contrast_enabled() {
-                // OS "Increase Contrast" accessibility setting (#74): a native
-                // `NSMenu` then renders opaque with max-contrast text and stronger
-                // separators. Apply the same treatment — overriding the
-                // vibrancy/glass translucent path — so Increase-Contrast users get
-                // the accessible look. The opaque bulk fill covers the glass
-                // backdrop, matching native's opaque high-contrast menu.
+                // OS "Increase Contrast" (#74): a native `NSMenu` renders opaque
+                // with max-contrast text/separators; apply the same treatment,
+                // overriding the vibrancy/glass path.
                 // DEVICE-VERIFY(0.12.3): compare against a native NSMenu with
-                // Increase Contrast on (SIP-protected, must be toggled in
-                // System Settings). A 1px panel border is a further native tell,
-                // deferred until `Theme` grows a border field.
+                // Increase Contrast on (SIP-protected setting).
                 theme.make_opaque();
                 let dark = system_is_dark();
                 theme.label = if dark {
@@ -883,16 +847,12 @@ impl PopupSession<'_> {
             } else if !transparency_enabled() {
                 theme.make_opaque();
             } else if system_is_dark() {
-                // DARK live menu: no OS material backdrop (mac/window.rs adds the
-                // raster view DIRECTLY to the transparent panel). muri draws its
-                // OWN semi-transparent dark background here, which composites
-                // straight over the DESKTOP — dark over dark, lifting over light,
-                // tinted by whatever is behind it — exactly like a native dark
-                // `NSMenu`. The OS materials (`Material::Menu`, `NSGlassEffectView`)
-                // can't do this: they lighten the backdrop to a neutral grey floor,
-                // so the menu reads as a flat opaque slab (#79). Values solved from
-                // a live TM `NSMenu` across two backdrops (dark→28, gray→62 =>
-                // base≈rgb(31,31,31), alpha≈0.62 => 158/255).
+                // DARK live menu: no OS material backdrop (window.rs adds the
+                // raster view directly to the transparent panel). muri draws its
+                // own semi-transparent dark background, compositing straight over
+                // the desktop like a native dark `NSMenu` — OS materials can't do
+                // this; they lighten to a neutral grey floor (#79). Values solved
+                // from a live NSMenu across two backdrops.
                 theme.background = Color::Rgba(31, 31, 31, 158);
             } else {
                 // LIGHT live menu: the `NSGlassEffectView` (mac/window.rs) IS the
@@ -961,11 +921,10 @@ impl PopupSession<'_> {
         };
         let scale = geom.scale.max(1.0);
 
-        // Measure offscreen to size the panel before it exists (no resize flash).
-        // This same drawer becomes the panel's drawer (below) so its warm
-        // shaping/glyph caches carry into the first paint — the menu is not shaped
-        // a second time with a cold drawer (#23).
-        // Forced-OS theme -> target OS font; else host-native (#54).
+        // Measure offscreen to size the panel before it exists (no resize flash);
+        // this drawer becomes the panel's drawer below so warm caches carry into
+        // the first paint (#23). Forced-OS theme -> target OS font; else
+        // host-native (#54).
         let mut drawer = RasterDrawer::for_menu_options(scale, &self.options);
         let laid = render_menu(&mut drawer, &self.menu, &theme, &self.options, None);
 
@@ -1022,14 +981,11 @@ impl PopupSession<'_> {
         if let Some(popup) = self.popup.as_ref() {
             popup.panel.makeKeyAndOrderFront(None);
         }
-        // Assert the arrow for the WHOLE popup session at show-time (#70/#78).
-        // On a stationary open no tracking event ever fires — the panel appears
-        // under an already-inside, motionless pointer — so `mouseEntered:`/
-        // `cursorUpdate:` never run and the app-underneath's I-beam persists. A
-        // show-time `push` (balanced by a single `pop` in `close_popup`, which is
-        // the sole place the popup is taken) forces the arrow without needing an
-        // event. `open_popup` early-returns when a popup already exists, so this
-        // push pairs exactly one-to-one with the close pop.
+        // Assert the arrow for the WHOLE popup session at show-time (#70/#78): on a
+        // stationary open no tracking event fires, so `mouseEntered:`/
+        // `cursorUpdate:` never run and the app-underneath's I-beam persists. This
+        // `push` is balanced by the single `pop` in `close_popup`, one-to-one since
+        // `open_popup` early-returns when a popup already exists.
         objc2_app_kit::NSCursor::arrowCursor().push();
         // Arm the click-away + mutual-exclusion watchers now that a panel is up.
         self.watchers = Some(DismissWatchers::install(self.mtm));
@@ -1929,14 +1885,10 @@ fn run_event_loop(tray: Tray) -> Result<()> {
 
 /// Install the status item, wire the click dispatch + [`TrayHandle`] waker, and
 /// publish the retained [`AppState`] into the thread-local `MAIN_APP` slot —
-/// everything [`run_event_loop`] does *except* owning the run loop
-/// (`NSApplication::run`) and setting the activation policy.
-///
-/// Split out so the non-blocking [`Platform::spawn_tray`] path can install the
-/// tray on the main thread and hand the run loop back to the host (the
-/// `tray-icon` facade contract), while [`run_event_loop`] keeps driving the loop
-/// itself. The retained `AppState` lives in the `MAIN_APP` thread-local (the main
-/// thread lives for the process), so the status item persists after this returns.
+/// everything [`run_event_loop`] does *except* owning the run loop and setting
+/// the activation policy. Split out so the non-blocking
+/// [`Platform::spawn_tray`] path can install on the main thread and hand the
+/// run loop back to the host, while [`run_event_loop`] keeps driving it itself.
 fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker, owns_run_loop: bool) -> Result<()> {
     let mut anchor = MacosAnchor::new(mtm);
     anchor.install(tray.tooltip.as_deref())?;
@@ -1947,12 +1899,10 @@ fn install_tray_session(mut tray: Tray, mtm: MainThreadMarker, owns_run_loop: bo
         *waker = Some(Box::new(defer_drain));
     }
 
-    // Move the click handler into the session's dispatch sink (owned for the
-    // whole run loop, hence `'static`). Preserve `Tray::dispatch`'s behavior:
-    // run the per-surface handler, then project the activation onto the global
-    // `MenuEvent` channel — the muda-compat door has no `on_click` and consumes
-    // clicks via `MenuEvent::receiver()`, so without the `emit` every facade menu
-    // item is inert on macOS (#13). Mirrors the Windows pump (spec 03 §3).
+    // Preserve `Tray::dispatch`'s behavior: run the per-surface handler, then
+    // project onto the global `MenuEvent` channel — the muda-compat door has no
+    // `on_click` and consumes clicks via `MenuEvent::receiver()`, so without the
+    // `emit` every facade menu item is inert on macOS (#13).
     let surface = tray.surface_id;
     let dispatch: Box<dyn Fn(&MenuId) + 'static> = match tray.on_click.take() {
         Some(handler) => Box::new(move |id| {
@@ -2058,7 +2008,6 @@ fn run_popup_session(
 // System appearance
 // =============================================================================
 
-/// Query whether the system (menu-bar) appearance is currently dark.
 /// Rasterize an `Icon::Svg` (muri's restricted SVG subset, via the zeno-backed
 /// rasterizer) and re-encode it as PNG so AppKit's `NSImage` — which decodes PNG
 /// but not the SVG subset — can consume it. `None` for non-SVG / unparseable
@@ -2070,25 +2019,19 @@ fn svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Legacy fallback ratio for the live-`System` row pitch as a multiple of the
 /// live menu font point size, used **only** when the live `NSMenu` measurement
-/// in [`macos_system_row_height`] is unavailable (e.g. off the main thread or a
-/// degenerate/zero measured size). Native reference: a real `NSMenu` measures
-/// ~48–50px @2x (~24–25pt) per row at the ~13.5pt system menu font — roomier
-/// than the legacy [`crate::theme::MACOS_ROW_HEIGHT`] (22pt) forced-preset base.
-/// `24.5 / 13.5 ≈ 1.82`.
+/// in [`macos_system_row_height`] is unavailable. Native reference: a real
+/// `NSMenu` measures ~24–25pt per row at the ~13.5pt system menu font —
+/// `24.5 / 13.5 ≈ 1.82`, roomier than the legacy 22pt forced-preset base.
 const MACOS_SYSTEM_ROW_HEIGHT_FACTOR: f32 = 1.82;
 
 /// The live `System`-theme macOS row height in logical points.
 ///
-/// Prefers a **live measurement of a real `NSMenu`'s per-row pitch** (#67):
-/// [`measure_nsmenu_row_pitch`] lays out throwaway menus and reads AppKit's own
-/// computed `NSMenu.size`, so the popup's row pitch is the OS's real value for
-/// the current system font rather than a magic ratio. Falls back to the legacy
-/// [`MACOS_SYSTEM_ROW_HEIGHT_FACTOR`] ratio (and finally the
-/// [`crate::theme::MACOS_ROW_HEIGHT`] floor) only when no live measurement is
-/// available. Called after injecting the live system menu size so the live popup
-/// matches a native `NSMenu` rather than the tighter 22pt forced-preset base
-/// (#63). Lives here (not in `theme.rs`) because it is consumed only on the
-/// macOS live-`System` path (ADR-0002).
+/// Prefers a live measurement of a real `NSMenu`'s per-row pitch (#67) via
+/// [`measure_nsmenu_row_pitch`], so the popup matches the OS's real value
+/// rather than a magic ratio; falls back to [`MACOS_SYSTEM_ROW_HEIGHT_FACTOR`]
+/// (then the [`crate::theme::MACOS_ROW_HEIGHT`] floor) only when unavailable.
+/// Lives here rather than `theme.rs` since it's macOS live-`System`-only
+/// (ADR-0002).
 fn macos_system_row_height(point_size: f32) -> f32 {
     // A real measured pitch is authoritative, but guard against a degenerate
     // read shrinking rows below the legacy floor.
@@ -2104,13 +2047,12 @@ fn macos_system_row_height(point_size: f32) -> f32 {
     }
 }
 
-/// Measure the real per-row pitch AppKit lays a live `NSMenu` out at, in logical
-/// points, for the current system menu font (#67). Builds two throwaway menus
-/// differing by one plain item and returns the difference of their computed
-/// `NSMenu.size` heights, which cancels the menu's fixed top/bottom chrome and
-/// isolates a single row's contribution. `None` off the main thread or when
-/// AppKit reports a non-positive/absurd size (caller then uses the ratio
-/// fallback). Nothing is displayed — the menus are never ordered on screen.
+/// Measure the real per-row pitch AppKit lays a live `NSMenu` out at, for the
+/// current system menu font (#67). Builds two throwaway menus differing by one
+/// item and diffs their computed `NSMenu.size` heights, cancelling the fixed
+/// chrome to isolate a single row. `None` off the main thread or on a
+/// non-positive size (caller then uses the ratio fallback); the menus are
+/// never displayed.
 fn measure_nsmenu_row_pitch() -> Option<f32> {
     let mtm = MainThreadMarker::new()?;
     let two = nsmenu_layout_height(mtm, 2)?;
@@ -2135,23 +2077,18 @@ fn nsmenu_layout_height(mtm: MainThreadMarker, items: usize) -> Option<f32> {
 }
 
 /// Tahoe (macOS 26+) live-`System` popup corner radius in logical points (#67).
-/// Apple's Liquid Glass redesign enlarged the menu corner from the Big
-/// Sur..Sequoia ~6pt to **12pt**, measured exactly on macOS 26.6.2 (build 25G83,
-/// arm64) by reading the private `_cornerRadius` KVC key off a live
-/// `NSPopupMenuWindow` during tracking (see #67). No stable *public* API exposes
-/// the live value, and reading the private key every popup is fragile, so — like
-/// every other toolkit that draws its own menu chrome (e.g. Firefox) — muri ships
-/// this as a version-gated constant seeded from that one measurement.
+/// Apple's Liquid Glass redesign enlarged the menu corner from ~6pt to **12pt**,
+/// measured on macOS 26.6.2 (build 25G83, arm64) via the private
+/// `_cornerRadius` KVC key on a live `NSPopupMenuWindow`. No public API exposes
+/// this, so — like other toolkits that draw their own menu chrome — muri ships
+/// it as a version-gated constant seeded from that measurement.
 const MACOS_CORNER_RADIUS_TAHOE: f32 = 12.0;
 
-/// The live-`System` popup corner radius in logical points for the host's macOS
-/// version (#67). Pre-Tahoe reuses the frozen preset value
-/// [`crate::theme::MACOS_CORNER_RADIUS`] (~6pt); Tahoe (major >= 26) uses the
-/// enlarged [`MACOS_CORNER_RADIUS_TAHOE`]; Catalina and earlier (major <= 10)
-/// drew square menus. No public API exposes the live radius, so it is
-/// version-gated rather than measured (see the constant docs). Applied only on
-/// the live System path, so the forced preset and its offscreen goldens are
-/// untouched.
+/// The live-`System` popup corner radius for the host's macOS version (#67).
+/// Pre-Tahoe reuses [`crate::theme::MACOS_CORNER_RADIUS`] (~6pt); Tahoe
+/// (major 26 or later) uses [`MACOS_CORNER_RADIUS_TAHOE`]; Catalina and
+/// earlier drew square menus. Applied only on the live System path — forced
+/// preset + goldens are untouched.
 fn read_system_corner_radius() -> f32 {
     let major = objc2_foundation::NSProcessInfo::processInfo()
         .operatingSystemVersion()
@@ -2165,15 +2102,11 @@ fn read_system_corner_radius() -> f32 {
 
 /// Native macOS menu chrome metrics (corner radius, leading text inset, row
 /// pitch), computed once and cached for the process. All three have accurate
-/// **no-popup** sources, so muri never displays anything to read them.
-///
-/// An earlier version (0.12.1) read them live off a real `NSMenu`'s displayed
-/// window, popping the menu and trying to hide it (`alphaValue = 0` + off-screen)
-/// before it painted. That was removed: on Tahoe the hide raced the first paint
-/// and flashed a visible "Row One/Row Two/Row Three" placeholder menu on every
-/// tray start (#76), and the async cancel was a use-after-free hazard (#75). The
-/// no-popup sources below are accurate on current macOS (corner 12pt Tahoe / 6pt
-/// pre-Tahoe, inset 14pt, row ~24pt), so nothing is lost by not displaying a menu.
+/// **no-popup** sources, so muri never displays anything to read them — an
+/// earlier version (0.12.1) popped a real `NSMenu` to read them live and hid
+/// it before paint, but on Tahoe the hide raced the first paint and flashed a
+/// visible placeholder menu on every tray start (#76), plus a use-after-free
+/// hazard in the async cancel (#75).
 #[derive(Clone, Copy)]
 struct NativeMenuMetrics {
     corner_radius: f32,
@@ -2201,20 +2134,13 @@ fn native_menu_metrics() -> NativeMenuMetrics {
 /// single [`SystemFontSource`] (issue #56) so the render layer registers a real
 /// bold face rather than silently downgrading bold rows to the regular file.
 ///
-/// On modern macOS the system menu font is a **variable font with a `wght`
-/// axis** (SFNS): there is no separate bold file, and the render layer already
-/// produces a real bold by instancing that axis (#63). Trying to pack a discrete
-/// bold there is pointless (and risks registering a mismatched static face), so
-/// when `regular_path` is itself a variable wght font we return `None`
-/// immediately — the caller keeps the single regular `Path` and bold comes from
-/// axis instancing (#65). The discrete-file pack path below remains only for a
-/// genuinely static regular with a separate bold file (older macOS).
-///
-/// `NSFontManager::convertFont:toHaveTrait:` returns the *original* font when no
-/// bold variant exists, so we only pack when the bold face resolves to a
-/// different file than `regular_path`. `None` (→ caller keeps the single regular
-/// `Path`) when the regular is variable, there is no distinct bold face, or
-/// either file can't be read.
+/// On modern macOS the system menu font is a variable font with a `wght` axis
+/// (SFNS) and the render layer already produces real bold by instancing that
+/// axis (#63), so a variable `regular_path` returns `None` immediately — no
+/// discrete bold to pack. The pack path below only fires for a genuinely
+/// static regular with a separate bold file (older macOS), and only when that
+/// bold resolves to a different file than `regular_path`
+/// (`convertFont:toHaveTrait:` returns the original font when no bold exists).
 ///
 /// DEVICE-VERIFY(0.10.8): confirm bold menu rows render with the real SF bold
 /// face on a physical device.
@@ -2266,24 +2192,22 @@ fn pack_dual_face(regular: Vec<u8>, bold: Vec<u8>) -> crate::platform::SystemFon
     crate::platform::SystemFontSource::Data(buf)
 }
 
-/// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],
-/// resolving the real SF file via CoreText's URL attribute so fontdb loads the
-/// actual system face (falling back to the family name if the file has no URL).
-/// `None` off the main thread or when neither a file nor a family resolves.
-/// Callers must already be on the main thread (AppKit).
 /// The system menu font, read once and memoized for the process. The underlying
-/// read is a disk read of the SF font file (+ a `swash` parse to detect the
-/// `wght` axis, and possibly a second read of a discrete bold), which is stable
-/// for the process — yet `theme()` ran it on EVERY hover redraw. Caching it here
-/// removes that filesystem I/O + font parse from the hover hot path. Returns a
-/// borrow so the common `theme()` caller (which only needs the point size) never
-/// clones the packed font bytes.
+/// read is a disk read of the SF font file (+ a parse to detect the `wght`
+/// axis, possibly plus a discrete-bold read), which is stable for the process —
+/// yet `theme()` ran it on EVERY hover redraw. Caching it removes that I/O +
+/// parse from the hover hot path; returns a borrow so the common caller (which
+/// only needs the point size) never clones the packed font bytes.
 fn cached_system_menu_font() -> &'static Option<crate::platform::SystemFont> {
     static CACHE: std::sync::OnceLock<Option<crate::platform::SystemFont>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(read_system_menu_font)
 }
 
+/// Read the system menu font (`+[NSFont menuFontOfSize:0]`) as a [`SystemFont`],
+/// resolving the real SF file via CoreText's URL attribute so fontdb loads the
+/// actual system face. `None` off the main thread or when neither a file nor a
+/// family resolves. Callers must already be on the main thread (AppKit).
 fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
     use crate::platform::{SystemFont, SystemFontSource};
     let mtm = MainThreadMarker::new()?;
@@ -2335,6 +2259,7 @@ fn nscolor_srgba(color: &NSColor) -> Option<(u8, u8, u8, u8)> {
     ))
 }
 
+/// Query whether the system (menu-bar) appearance is currently dark.
 fn system_is_dark() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;

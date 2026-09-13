@@ -1,49 +1,29 @@
 //! Wayland `wlr-layer-shell` styled-popup presenter (research doc §3, §12; ADR-0003).
 //!
-//! This is the third [`LinuxMenuPresenter`](super::LinuxMenuPresenter) impl: the
-//! self-drawn, pixel-identical styled popup on the compositors that expose
-//! `zwlr_layer_shell_v1` — every wlroots compositor (sway, Hyprland, river,
-//! Wayfire, labwc, cosmic-comp) **and** KWin/Plasma. GNOME/Mutter refuses
-//! layer-shell as an architectural stance (research doc §6, mutter#973), so it
-//! stays on the native dbusmenu presenter — see [`super::detect_linux_presenter`].
+//! The third [`LinuxMenuPresenter`](super::LinuxMenuPresenter) impl: the
+//! self-drawn, pixel-identical styled popup on compositors exposing
+//! `zwlr_layer_shell_v1` (every wlroots compositor and KWin/Plasma).
+//! GNOME/Mutter refuses layer-shell (research doc §6), so it stays on the
+//! native dbusmenu presenter.
 //!
-//! ## The technique (research doc §3 "the pointer-accurate recipe")
+//! muri opens a single **full-output overlay** layer surface and draws the
+//! whole menu (popup + every open flyout) into one framebuffer, transparent
+//! except under the panels. Because the surface covers the output,
+//! `wl_pointer` motion coordinates **are** output coordinates (the only
+//! pointer-position channel Wayland gives a client — research doc §5), so
+//! hover/flyout/dismiss reuse the same [`crate::flyout`]/[`crate::keynav`]
+//! state machines the X11 backend uses. Unlike the opaque X11 path this keeps
+//! **true alpha** (the compositor composites the ARGB surface).
 //!
-//! muri opens a single **full-output overlay** layer surface — anchored to all four
-//! edges, `exclusive_zone(-1)`, `KeyboardInteractivity::OnDemand` — and draws the
-//! whole menu (popup + every open flyout) into *one* framebuffer the size of the
-//! output, transparent everywhere except under the panels. Because the surface
-//! covers the output, `wl_pointer` motion coordinates **are** output coordinates
-//! (the only pointer-position channel Wayland gives a client — research doc §5), so
-//! hover, the N-level flyout stack, and outside-click dismissal all fall out of the
-//! same shared [`crate::flyout`]/[`crate::keynav`] state machines the X11 backend
-//! uses. Only the *transport* (blit into a `wl_shm` `Argb8888` buffer via
-//! attach/damage/commit) and *positioning* (overlay + muri's own
-//! [`place_popup`](crate::anchor::place_popup) math) are Wayland-specific; unlike
-//! the opaque X11 path this keeps **true alpha**, so rounded corners / shadow
-//! survive (the compositor composites the ARGB surface).
+//! muri drives `wl_keyboard` directly with raw evdev keycodes (layout-
+//! independent for nav keys), avoiding `smithay-client-toolkit`'s `xkbcommon`
+//! feature and its `libxkbcommon` build probe. Type-ahead uses a best-effort
+//! US-QWERTY evdev map (`DEVICE-VERIFY(0.11.1)`: non-US layouts).
 //!
-//! Compared with the child-`xdg_popup` variant sketched in the research doc, the
-//! single-overlay compositing approach is equivalent in fidelity (muri already does
-//! its own on-screen flip/slide in `place_popup`/`place_flyout`, so the positioner's
-//! constraint-adjustment isn't needed) and is simpler + more robust to drive: one
-//! surface, one input stream in output coordinates, natural outside-click dismiss.
-//!
-//! ## Keyboard without libxkbcommon
-//!
-//! muri drives `wl_keyboard` directly and maps **raw evdev keycodes** for menu
-//! navigation (arrows / enter / escape / home / end are layout-independent), so it
-//! does not pull `smithay-client-toolkit`'s `xkbcommon` feature and the
-//! `libxkbcommon` system-library build probe it carries. Printable type-ahead uses
-//! a best-effort US-QWERTY evdev map (`DEVICE-VERIFY(0.11.1)`: non-US layouts).
-//!
-//! ## Verification status
-//!
-//! The protocol flow (bind globals, overlay layer surface, `wl_shm` blit, seat
-//! input, teardown) is complete and type-checked against `smithay-client-toolkit`
-//! 0.19 on the Linux target, but the live surface/loop needs a real compositor:
-//! such spots are marked `DEVICE-VERIFY(0.11.1)`. HiDPI is deferred like the X11
-//! backend (`SCALE == 1.0`).
+//! The protocol flow is complete and type-checked against
+//! `smithay-client-toolkit` 0.19, but the live surface/loop needs a real
+//! compositor: such spots are marked `DEVICE-VERIFY(0.11.1)`. HiDPI is
+//! deferred like the X11 backend (`SCALE == 1.0`).
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -96,20 +76,16 @@ const BTN_RIGHT: u32 = 0x111;
 
 /// Whether the current Wayland compositor advertises `zwlr_layer_shell_v1` — the
 /// authoritative test for whether the styled layer-shell presenter is usable
-/// (research doc §10, detection step 2). [`super::detect_linux_presenter`] uses a
-/// cheap env heuristic to *pre-select* the presenter; this is the live confirmation
-/// a caller can run before actually opening a surface.
+/// (research doc §10, step 2), run before actually opening a surface.
 ///
-/// Connects to `$WAYLAND_DISPLAY`, roundtrips the registry, and returns whether the
-/// `zwlr_layer_shell_v1` global appears. `false` on any connection error (headless /
-/// no compositor) — never panics.
+/// Connects to `$WAYLAND_DISPLAY`, roundtrips the registry, and returns whether
+/// the global appears. `false` on any connection error — never panics.
 pub(super) fn layer_shell_available() -> bool {
     let Ok(conn) = Connection::connect_to_env() else {
         return false;
     };
-    // `PopupState` is only used here as the queue's phantom state type (it provides
-    // the required `Dispatch<wl_registry, GlobalListContents>` via `delegate_registry`);
-    // no instance is created and the queue is never dispatched.
+    // `PopupState` is only used as the queue's phantom state type; no instance
+    // is created and the queue is never dispatched.
     let Ok((globals, _queue)) = registry_queue_init::<PopupState>(&conn) else {
         return false;
     };
@@ -119,9 +95,7 @@ pub(super) fn layer_shell_available() -> bool {
 }
 
 /// The global pointer position — on Wayland this is only knowable *inside* a
-/// muri-owned surface the pointer is over (research doc §5), so outside a live popup
-/// session there is nothing to report. The tray-anchored path instead uses the
-/// out-of-band SNI `Activate`/`ContextMenu` coordinate (Plasma/Waybar).
+/// muri-owned surface (research doc §5), so there is nothing to report here.
 pub(super) fn cursor_position() -> Option<LogicalPoint> {
     None
 }
@@ -173,10 +147,8 @@ fn run_popup(
 
     // A single full-output overlay: anchor all four edges (size 0,0 => the
     // compositor reports the output size in the first configure), do-not-move
-    // exclusive zone, and on-demand keyboard so menu nav can take focus without
-    // permanently grabbing the keyboard. The default (whole-surface) input region
-    // means clicks land on us anywhere on the output — that is how outside-click
-    // dismissal works.
+    // exclusive zone, and on-demand keyboard focus. The default (whole-surface)
+    // input region is how outside-click dismissal works.
     let surface = compositor.create_surface(&qh);
     let layer =
         layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("muri-menu"), None);
@@ -700,14 +672,10 @@ fn composite_panel(canvas: &mut [u8], out_w: u32, out_h: u32, r: &Rendered) {
 }
 
 /// Blit muri's premultiplied-RGBA framebuffer into a `wl_shm` `Argb8888`
-/// (BGRA-in-memory, premultiplied) destination: a per-pixel R↔B swap, alpha copied
-/// through unchanged (already premultiplied). Pure byte-shuffling — no Wayland
-/// handle — so it is host-unit-testable; used by [`composite_panel`] for the common
-/// unclipped-row case.
-///
-/// `src` is muri's framebuffer (`RasterDrawer::framebuffer().pixels()`, RGBA
-/// premultiplied); `dst` is the mapped `wl_shm` `Argb8888` canvas slice. Both must be
-/// `4 * width * height` bytes.
+/// (BGRA-in-memory, premultiplied) destination: a per-pixel R↔B swap, alpha
+/// copied through unchanged. Pure byte-shuffling — no Wayland handle — so it
+/// is host-unit-testable; used by [`composite_panel`] for the unclipped case.
+/// `src`/`dst` must both be `4 * width * height` bytes.
 fn blit_argb8888(src: &[u8], dst: &mut [u8]) -> Result<()> {
     if src.len() != dst.len() {
         return Err(Error::Platform(format!(

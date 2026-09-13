@@ -2,31 +2,18 @@
 //!
 //! A `tiny-skia` pixmap is an opaque rectangle to an assistive technology — there
 //! are no `NSView`/`HWND`/widget objects to enumerate. So muri publishes a
-//! **parallel accessibility tree** that mirrors the menu's logical structure, and
-//! keeps it in sync with what is drawn and focused. The design calls this the
-//! hardest part of the project; the declarative [`Menu`] tree *is* that
-//! accessibility tree in disguise, and this module performs the mapping purely and
-//! testably.
+//! **parallel accessibility tree** that mirrors the menu's logical structure and
+//! keeps it in sync with what is drawn and focused.
 //!
-//! The tree here is backend-neutral. On macOS/Windows the live backend feeds it to
-//! the platform AT through **AccessKit** (`accesskit_macos` → NSAccessibility,
-//! `accesskit_windows` → UIA); the `a11y::accesskit` adapter module (enabled by
-//! the `a11y` feature) converts an [`AxTree`] straight into an AccessKit
-//! `TreeUpdate`. The mapping mirrors the design:
-//!
-//! - the popup → an [`AxRole::Menu`] container (`AXMenu` / UIA `Menu`);
-//! - an interactive row → an [`AxRole::MenuItem`], or [`AxRole::MenuItemCheckbox`]
-//!   when it carries a checked state, with its accessible **name** from the
-//!   concatenated segment text, **enabled** from `Row.enabled`, and set-position
-//!   info among its focusable siblings;
-//! - a section header → a non-focusable [`AxRole::GroupLabel`];
-//! - a submenu → a menu item with `has_popup` and an `expanded` state plus a child
-//!   [`AxRole::Menu`]'s worth of items.
+//! The tree here is backend-neutral: the popup maps to an [`AxRole::Menu`], an
+//! interactive row to [`AxRole::MenuItem`]/[`AxRole::MenuItemCheckbox`], a section
+//! header to [`AxRole::GroupLabel`], and a submenu to a menu item with `has_popup`
+//! plus a child [`AxRole::Menu`]. On macOS/Windows the live backend feeds it to the
+//! platform AT through **AccessKit** via the `a11y::accesskit` adapter module.
 //!
 //! Keyboard navigation ([`crate::keynav`]) owns the focus; [`focused_id`] maps a
-//! [`MenuFocus`] onto the tree node the backend should announce, and
-//! [`announcement`] renders the human-readable string a screen reader speaks for a
-//! node.
+//! [`MenuFocus`] onto the tree node to announce, and [`announcement`] renders the
+//! human-readable string a screen reader speaks for a node.
 
 use crate::keynav::MenuFocus;
 use crate::menu::{Item, Menu};

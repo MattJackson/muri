@@ -3,11 +3,9 @@
 //! `muri` is a cross-platform, fully-styleable **tray-icon + popup-menu** system
 //! for Rust: a custom-drawn replacement for the `muda` + `tray-icon` pairing.
 //! Unlike native menus (which delegate pixels to AppKit / Win32 USER / GTK and
-//! therefore can't be restyled), muri draws **one consistent custom appearance on
-//! every OS**. That single owned drawing surface is what makes true
-//! left/right/center alignment, arbitrary colors and fonts, embedded logos, and
-//! **flush right-aligned values with no reserved chevron column** actually
-//! possible.
+//! can't be restyled), muri draws **one consistent custom appearance on every
+//! OS**, enabling true alignment, arbitrary colors/fonts, embedded logos, and
+//! **flush right-aligned values with no reserved chevron column**.
 //!
 //! muri owns the whole stack: the **tray icon**, the **styled popup**, and the
 //! **anchoring** (where the popup appears relative to the icon). A consuming app
@@ -48,39 +46,24 @@
 //! | An icon | [`Icon::from_png`] / [`Icon::from_rgba`] / [`Icon::from_svg`] | — |
 //! | Choose the look | [`MenuOptions`] (carrying a [`ThemeSource`]) | [`Tray::theme`] / [`TrayHandle::set_theme`] (derived conveniences that set the `MenuOptions` theme) |
 //!
-//! Per-run [`StyleRun`] styling (attached via [`Segment::run`]/[`Segment::runs`],
-//! with a per-run color and optional [`StyleRun::weight`]) is the **one** styling
-//! system;
-//! [`Row::bold`]/[`Row::value_color`] are just the ergonomic front door onto it
-//! for the two most common cases, and render identically to the equivalent
-//! hand-built runs. [`MenuOptions`] is the single source of truth for "which
-//! look" — [`Tray::theme`] and [`TrayHandle::set_theme`] ultimately set its
-//! [`theme`](MenuOptions::theme) field.
+//! Per-run [`StyleRun`] styling (via [`Segment::run`]/[`Segment::runs`]) is the
+//! **one** styling system; [`Row::bold`]/[`Row::value_color`] are ergonomic
+//! front doors onto it and render identically to hand-built runs.
+//! [`MenuOptions`] is the single source of truth for "which look".
 //!
 //! ## Status
 //!
-//! **0.9.0 testing release — all three backends implemented.** On **macOS**
-//! the crate draws a real styled popup: `Tray::run` installs the
-//! `NSStatusItem`, opens the custom-drawn menu anchored to it in a
-//! non-activating `NSPanel`, opens **flyout submenu** panels beside submenu
-//! rows, and supports **keyboard navigation** ([`keynav`]) over the same
-//! hover-stack the mouse drives. muri also publishes a parallel
-//! **accessibility tree** ([`a11y`]) — [`Tray::accessibility_tree`] — mapping
-//! the menu onto menu/menuitem roles, with an AccessKit `TreeUpdate` bridge
-//! behind the `a11y` feature — and (also behind `a11y`) a per-window AccessKit
-//! adapter, so the tree is exposed to NSAccessibility / VoiceOver. The shared
-//! scene drawer, the `Flex`/`Align` flush-right layout, the flyout
-//! placement/hover-stack logic, the keyboard-nav state machine, and the
-//! a11y-tree construction are all pure and unit-tested. The **Windows**
-//! backend installs the notification-area icon, anchors a `WS_EX_NOACTIVATE`
-//! layered popup via `UpdateLayeredWindow`, and exposes UIA through
-//! `accesskit_windows`. The **Linux** backend installs an SNI/AppIndicator
-//! native menu and supports pointer-anchored popups via an X11
-//! override-redirect `open_at`. [`ContextMenu::open_at`] / [`Popup::anchored_to`]
-//! and, once a tray loop is running, [`TrayHandle::open`], work on all three
+//! **0.9.0 testing release — all three backends implemented.** **macOS** draws
+//! a real styled popup (`NSStatusItem` + non-activating `NSPanel`), with
+//! flyout submenus, keyboard navigation ([`keynav`]), and an accessibility
+//! tree ([`a11y`]) exposed to VoiceOver via AccessKit (`a11y` feature).
+//! **Windows** anchors a `WS_EX_NOACTIVATE` layered popup and exposes UIA via
+//! `accesskit_windows`. **Linux** installs an SNI/AppIndicator native menu and
+//! supports pointer-anchored popups via X11 override-redirect. [`ContextMenu::open_at`]
+//! / [`Popup::anchored_to`] / [`TrayHandle::open`] work on all three
 //! platforms; on-device verification (real hardware, real screen readers) is
-//! exactly what the 0.9.0 testing release is for. See the README for the honest
-//! platform matrix.
+//! what this testing release is for. See the README for the honest platform
+//! matrix.
 //!
 //! ## Crate layout
 //!
@@ -100,16 +83,12 @@
 //!
 //! ## Rendering stack
 //!
-//! Text is shaped and rasterized with `fontdb` (font discovery) + `harfrust`
-//! (shaping) + `swash` (glyph rendering). Everything else — glyphs, fills,
-//! strokes, images — is composited by muri's own in-house CPU
-//! [`Framebuffer`](render::Framebuffer) blitter. CPU raster means a tiny
-//! binary, no GPU warm-up, and
-//! instant popups with full pixel control. Windowing is native per-OS: macOS
-//! uses a non-activating `NSPanel` presented via `CALayer`; Windows uses a
-//! `WS_EX_NOACTIVATE` layered window presented via `UpdateLayeredWindow`;
-//! Linux uses an SNI tray plus an X11 override-redirect window for
-//! [`ContextMenu::open_at`].
+//! Text is shaped/rasterized with `fontdb` + `harfrust` + `swash`; everything
+//! else is composited by muri's own CPU [`Framebuffer`](render::Framebuffer)
+//! blitter — a tiny binary with no GPU warm-up. Windowing is native per-OS:
+//! macOS uses a non-activating `NSPanel`/`CALayer`; Windows a
+//! `WS_EX_NOACTIVATE` layered window; Linux an SNI tray plus an X11
+//! override-redirect window for [`ContextMenu::open_at`].
 //!
 //! ## Platform support (honest matrix)
 //!
@@ -129,25 +108,19 @@
 //! each flips to ✅ as it's confirmed on the road to 1.0. The Linux
 //! tray-anchored styled popup stays ❌ permanently.
 //!
-//! **Linux caveat:** the SNI / AppIndicator tray *host* owns and draws the icon
-//! in its own process, so the app is never told the icon's on-screen rectangle
-//! and never receives the click coordinate; Wayland additionally forbids a client
-//! from positioning its own toplevel. A tray-*anchored* styled popup is therefore
-//! architecturally impossible on Linux/Wayland. muri does not pretend otherwise:
-//! [`Tray::run`] still works there (it installs an SNI/AppIndicator **native**
-//! menu), but the tray *anchor rect* is unavailable — the backend reports
-//! [`Error::Unsupported`]`(`[`Unsupported::TrayAnchor`]`)` — so a styled
-//! tray-anchored popup is not offered; render the same [`Menu`] through that
-//! native menu, or show it as a pointer-anchored [`ContextMenu`]. See
+//! **Linux caveat:** the SNI/AppIndicator tray *host* owns the icon in its own
+//! process, so the app never gets the icon's rect or click coordinate; Wayland
+//! also forbids a client from positioning its own toplevel. A tray-anchored
+//! styled popup is therefore architecturally impossible there. [`Tray::run`]
+//! still installs a native SNI/AppIndicator menu, but reports
+//! [`Error::Unsupported`]`(`[`Unsupported::TrayAnchor`]`)` for the anchor rect
+//! — use that native menu or a pointer-anchored [`ContextMenu`] instead. See
 //! [`Unsupported`].
 
-// The OS backends (NSStatusItem via objc2, plus the native popup surface —
-// NSPanel/CALayer on macOS, layered HWND/UpdateLayeredWindow on Windows,
-// X11 override-redirect on Linux) genuinely require `unsafe`; the portable
-// scene drawer and data model do not. `unsafe` is therefore denied crate-wide
-// and re-allowed only inside the per-OS `src/platform/{mac,windows}.rs` modules
-// (via a module-level `#![allow(unsafe_code)]`), so no `target_os` gate is
-// needed at the crate root — the platform seam already localizes the `unsafe`.
+// The OS backends require `unsafe` (NSStatusItem/objc2, NSPanel/CALayer,
+// layered HWND, X11 override-redirect); the portable scene drawer and data
+// model do not. `unsafe` is denied crate-wide and re-allowed only inside the
+// per-OS platform modules, which already localize it without a target_os gate.
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -198,16 +171,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A zero-cost, `!Send + !Sync` proof that the calling code is running on the
 /// thread that obtained it — required by [`Tray::run`] and [`Tray::spawn`]
-/// because installing an `NSStatusItem` is only ever safe from AppKit's main
-/// thread on macOS (issue #46). Windows and Linux have no such restriction,
-/// but both entry points take the same proof so there is one uniform,
-/// compile-time-flagged contract across all three backends.
+/// because installing an `NSStatusItem` is only safe from AppKit's main thread
+/// on macOS (issue #46); Windows/Linux take the same proof for one uniform
+/// contract across backends.
 ///
-/// `PhantomData<*const ()>` is what makes this `!Send + !Sync` for free (a raw
-/// pointer is neither): a `MainThreadMarker` obtained on one thread cannot be
-/// moved to another thread and used there, so it cannot be smuggled across a
-/// channel or into a spawned closure. The only way to have one on a given
-/// thread is to call [`MainThreadMarker::new`] *on* that thread.
+/// `PhantomData<*const ()>` makes this `!Send + !Sync` for free, so a marker
+/// obtained on one thread can't be smuggled to another via a channel or
+/// closure.
 ///
 /// ```compile_fail
 /// fn is_send<T: Send>() {}
@@ -219,19 +189,13 @@ pub struct MainThreadMarker(PhantomData<*const ()>);
 impl MainThreadMarker {
     /// Obtain a proof that the caller is on the main thread.
     ///
-    /// muri has no portable, safe way to *verify* "is this the main thread"
-    /// without OS-specific FFI — and this crate root denies `unsafe_code`
-    /// (see the crate-level `#![deny(unsafe_code)]`), so a real runtime check
-    /// would have to live behind the per-OS [`platform`] seam, not here. This
-    /// constructor is therefore intentionally **not** a runtime check: it
-    /// always returns `Some`. Its value is entirely at compile time — see the
-    /// type-level doc on [`MainThreadMarker`] — so it is the caller's
-    /// responsibility to actually call this from the real main thread
-    /// (typically the first thing `fn main()` does), exactly as documented.
-    /// The per-OS backend (e.g. macOS's `objc2::MainThreadMarker`, used
-    /// internally by the macOS `platform` module) still performs its own real
-    /// runtime check before touching AppKit, so a caller that gets this wrong is
-    /// caught there, not silently accepted.
+    /// muri has no portable, safe way to verify this without OS-specific FFI
+    /// (and the crate root denies `unsafe_code`), so this is intentionally
+    /// **not** a runtime check — it always returns `Some`; the guarantee is
+    /// purely compile-time (see [`MainThreadMarker`]'s type doc), so the caller
+    /// must actually call this from the real main thread. The per-OS backend
+    /// (e.g. macOS's `objc2::MainThreadMarker`) still performs its own runtime
+    /// check before touching AppKit, catching a caller that gets this wrong.
     #[allow(clippy::unnecessary_wraps)]
     pub fn new() -> Option<Self> {
         Some(MainThreadMarker(PhantomData))
@@ -285,15 +249,12 @@ impl SurfaceId {
 ///
 /// ## Shutdown
 ///
-/// Dropping a [`Tray`] itself does **not** post `TrayCommand::Shutdown` — a
-/// `Tray` is normally consumed by [`Tray::run`]/[`Tray::spawn`] long before it
-/// would go out of scope. What *does* auto-shut-down the tray is dropping the
-/// **last** outstanding [`TrayHandle`] obtained from a given [`Tray::handle`]
-/// call (a handle and every clone of it): `TrayHandle`'s own `Drop`
-/// (issue #47) posts `Shutdown` exactly once, when its internal clone count
-/// reaches zero, so simply letting a handle family go out of scope removes
-/// the tray — matching `tray-icon`'s drop-removes contract without an
-/// explicit [`TrayHandle::shutdown`] call.
+/// Dropping a [`Tray`] itself does **not** post `TrayCommand::Shutdown` — it's
+/// normally consumed by [`Tray::run`]/[`Tray::spawn`] first. What auto-shuts-down
+/// the tray is dropping the **last** outstanding [`TrayHandle`] from a given
+/// [`Tray::handle`] call: its `Drop` (issue #47) posts `Shutdown` exactly once,
+/// matching `tray-icon`'s drop-removes contract with no explicit
+/// [`TrayHandle::shutdown`] call needed.
 pub struct Tray {
     icon: Icon,
     menu: Menu,
@@ -345,16 +306,10 @@ pub(crate) enum TrayCommand {
     /// Dismiss the popup if shown.
     Close,
     /// Stop the tray: remove the OS status item and end the backend's run loop
-    /// (and, for a spawned tray, its background thread). Posted by the compat
-    /// facade's `Drop`, by an explicit [`TrayHandle::shutdown`] call, and
-    /// **automatically by [`TrayHandle`]'s own `Drop`** when the last
-    /// outstanding handle from a given [`Tray::handle`] call (including every
-    /// clone of it) goes out of scope (issue #47) — so dropping every handle
-    /// in a family removes the tray with no explicit call needed, matching
-    /// `tray-icon`'s drop-removes contract. Note that `Tray` itself has no
-    /// `Drop` impl; only `TrayHandle` auto-posts this. Best-effort and
-    /// asynchronous, like every other command; the process-exit path also
-    /// reclaims the OS registration on all three backends.
+    /// (and background thread, for a spawned tray). Posted by compat facade
+    /// `Drop`, explicit [`TrayHandle::shutdown`], and automatically by
+    /// [`TrayHandle`]'s own `Drop` when the last handle in a family goes out of
+    /// scope (issue #47), matching `tray-icon`'s drop-removes contract.
     Shutdown,
     /// Swap the live theme source. Applied on the backend's UI thread: the next
     /// popup open uses it, and any currently-open popup is repainted with it —
@@ -374,28 +329,22 @@ pub(crate) enum TrayCommand {
 
 /// A cheap, `Clone + Send` remote control for a running [`Tray`].
 ///
-/// [`Tray::run`] consumes the tray, so the consumer cannot mutate it afterward
-/// directly. `TrayHandle` closes that gap: obtain one with [`Tray::handle`]
-/// *before* `run`, move it to any thread, and post commands that the backend
-/// applies on its UI thread. This is load-bearing for live menus — usagio
-/// rewrites its menu roughly every 0.75s.
-///
-/// Commands posted before the run loop is live simply buffer and apply once it
-/// starts.
+/// [`Tray::run`] consumes the tray, so `TrayHandle` closes the gap: obtain one
+/// with [`Tray::handle`] *before* `run`, move it to any thread, and post
+/// commands the backend applies on its UI thread. Commands posted before the
+/// run loop is live simply buffer and apply once it starts.
 #[derive(Clone)]
 pub struct TrayHandle {
     queue: std::sync::Arc<std::sync::Mutex<Vec<TrayCommand>>>,
     waker: std::sync::Arc<std::sync::Mutex<Option<WakeFn>>>,
-    /// Shared across every clone of *this handle family* — a fresh one per
-    /// [`Tray::handle`] call, `.clone()` shares it. Its [`Drop`] posts
-    /// `TrayCommand::Shutdown` **exactly once**, when the last clone releases the
-    /// final `Arc` reference (issue #47). Deliberately its own `Arc`, independent
-    /// of `queue`/`waker` (which the running backend also holds), so the backend's
-    /// reference never factors in.
+    /// Shared across every clone of *this handle family* — fresh per
+    /// [`Tray::handle`] call, shared via `.clone()`. Its [`Drop`] posts
+    /// `TrayCommand::Shutdown` exactly once, when the last clone releases the
+    /// final `Arc` (issue #47) — deliberately its own `Arc`, independent of
+    /// `queue`/`waker`, so the backend's own reference never factors in.
     ///
-    /// Held purely for its `Drop` (an RAII shutdown guard); never read directly,
-    /// hence the `allow(dead_code)` — cloning it (via `derive(Clone)`) is what
-    /// shares the family across handle clones.
+    /// Held purely for its `Drop` guard; never read directly, hence
+    /// `allow(dead_code)` — cloning it is what shares the family.
     #[allow(dead_code)]
     family: std::sync::Arc<HandleFamily>,
 }
@@ -559,12 +508,10 @@ impl Tray {
     /// thread once [`Tray::run`] is live (posts made earlier buffer). Obtain it
     /// before `run` consumes the tray.
     ///
-    /// Each call starts a fresh, independently-tracked handle *family*: drop
-    /// every handle and clone in the family returned by one `handle()` call
-    /// and the tray auto-shuts-down (see [`TrayHandle`]'s `Drop`, issue #47).
-    /// Calling `handle()` more than once creates separate families that don't
-    /// share that shutdown-on-last-drop tracking with each other — prefer
-    /// calling it once and fanning out with `.clone()`.
+    /// Each call starts a fresh, independently-tracked handle *family*: dropping
+    /// every handle/clone in one `handle()` call's family auto-shuts-down the
+    /// tray (issue #47). Calling `handle()` again creates a separate family —
+    /// prefer calling it once and fanning out with `.clone()`.
     pub fn handle(&self) -> TrayHandle {
         TrayHandle {
             queue: std::sync::Arc::clone(&self.commands),
@@ -580,17 +527,13 @@ impl Tray {
     /// (issue #48) — the native, main-thread counterpart of
     /// [`TrayHandle::anchor_rect`].
     ///
-    /// **Honest limitation:** [`Tray::run`]/[`Tray::spawn`] *consume* the
-    /// `Tray` to install the real, live status item, so by the time an icon
-    /// exists to have an anchor rect, there is no `&self` left to call this
-    /// on. This method queries a **fresh** [`platform::current()`] instance
-    /// instead, which has never had `install_tray` called on it — so on
-    /// macOS/Windows (which require an installed status item to compute the
-    /// rect) it will reliably return `Err` until the engine grows a way to
-    /// query the *live* platform state a running `Tray`/backend owns. It is
-    /// provided now for API completeness/symmetry with
-    /// [`TrayHandle::anchor_rect`] and because Linux's answer
-    /// ([`Unsupported::TrayAnchor`]) does not depend on installation state.
+    /// **Honest limitation:** [`Tray::run`]/[`Tray::spawn`] consume the `Tray`,
+    /// so there's no `&self` left once a live icon exists. This queries a
+    /// **fresh** [`platform::current()`] instance that never had `install_tray`
+    /// called, so on macOS/Windows it reliably returns `Err` until the engine
+    /// can query a running backend's live state. Provided for API symmetry with
+    /// [`TrayHandle::anchor_rect`]; Linux's answer ([`Unsupported::TrayAnchor`])
+    /// doesn't depend on installation state.
     pub fn anchor_rect(&self) -> Result<LogicalRect> {
         platform::current().tray_anchor_rect()
     }
@@ -705,39 +648,30 @@ impl Tray {
     }
 
     /// Install the tray icon and run the platform event loop, dispatching row
-    /// activations to the registered handler and to the global [`MenuEvent`]
-    /// channel. This consumes the [`Tray`] and blocks for the lifetime of the
-    /// tray; obtain a [`TrayHandle`] with [`Tray::handle`] *before* calling this
-    /// to drive it (swap the menu/icon, show/hide the popup) from any thread.
+    /// activations to the registered handler and the global [`MenuEvent`]
+    /// channel. Consumes the [`Tray`] and blocks for its lifetime; obtain a
+    /// [`TrayHandle`] with [`Tray::handle`] *before* calling this to drive it
+    /// from any thread.
     ///
-    /// Per-OS backend, selected once in [`platform::current`]: macOS installs an
-    /// `NSStatusItem` and runs the native `NSApplication` loop; Windows installs
-    /// the `Shell_NotifyIcon` icon and runs the Win32 message pump; Linux
-    /// installs an SNI/AppIndicator native menu and runs its worker loop.
-    ///
-    /// Takes a [`MainThreadMarker`] (issue #46): installing the `NSStatusItem`
-    /// is only ever safe from AppKit's main thread on macOS, and requiring the
-    /// proof here makes that a compile-time-visible contract for every
-    /// backend, not just a documentation note.
+    /// Per-OS backend, selected once in [`platform::current`]: macOS runs the
+    /// native `NSApplication` loop, Windows the Win32 message pump, Linux its
+    /// SNI/AppIndicator worker loop. Takes a [`MainThreadMarker`] (issue #46)
+    /// since installing the `NSStatusItem` is only safe on AppKit's main thread.
     pub fn run(self, _m: MainThreadMarker) -> Result<()> {
         // One seam: the per-OS backend selected once in `platform::current()`.
         platform::current().run_tray(self)
     }
 
     /// Install the tray icon and begin driving it **without blocking**, returning
-    /// a [`TrayHandle`] to mutate it (swap the menu/icon, show/hide the popup)
-    /// from any thread. The non-blocking counterpart to [`Tray::run`], for hosts
-    /// that own their own event loop — notably the `tray-icon` compatibility
-    /// facade.
+    /// a [`TrayHandle`] to mutate it from any thread. The non-blocking counterpart
+    /// to [`Tray::run`], for hosts that own their own event loop (e.g. the
+    /// `tray-icon` compat facade).
     ///
-    /// On Windows and Linux the tray's native UI pump runs on a dedicated
-    /// background thread. On macOS this is **best-effort**: AppKit's status item
-    /// must live on the main thread, so `spawn` must be called from the main
-    /// thread and relies on the host's existing `NSApplication` run loop to
-    /// service the icon (see [`Platform::spawn_tray`]).
-    ///
-    /// Takes a [`MainThreadMarker`] (issue #46) for the same reason as
-    /// [`Tray::run`].
+    /// On Windows/Linux the UI pump runs on a dedicated background thread. On
+    /// macOS this is **best-effort**: `spawn` must be called from the main thread
+    /// and relies on the host's existing `NSApplication` loop (see
+    /// [`Platform::spawn_tray`]). Takes a [`MainThreadMarker`] (issue #46) for the
+    /// same reason as [`Tray::run`].
     pub fn spawn(self, _m: MainThreadMarker) -> Result<TrayHandle> {
         let handle = self.handle();
         platform::current().spawn_tray(self)?;
@@ -960,9 +894,8 @@ mod tests {
     #[test]
     fn tray_handle_setters_post_the_matching_command() {
         // Guards the mechanism every facade setter relies on: a TrayHandle setter
-        // must post the *right* TrayCommand with the right payload. A swap (e.g.
-        // set_title posting SetTooltip) would fail here — the facade unit tests
-        // can't catch that headlessly because no OS backend drains the queue.
+        // must post the *right* TrayCommand with the right payload — facade unit
+        // tests can't catch a swap headlessly since no OS backend drains the queue.
         let tray = Tray::new(Icon::Checkmark);
         let handle = tray.handle();
         handle.set_title(Some("45%"));
@@ -1019,11 +952,9 @@ mod tests {
         while MenuEvent::receiver().try_recv().is_ok() {}
 
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        // Whether, *at the moment the closure runs*, the activation is already
-        // on the global channel. Under the correct order (closure first, then
-        // `event::emit`) it must NOT be — the channel is still empty while the
-        // closure executes. A reversed `emit`-then-closure implementation would
-        // leave the event waiting here, flipping this flag.
+        // Whether the activation is already on the global channel at the moment
+        // the closure runs. Under correct order (closure first) it must be false;
+        // a reversed emit-then-closure implementation would flip this flag.
         let seen_on_channel_in_closure = Arc::new(AtomicBool::new(false));
         let log2 = Arc::clone(&log);
         let flag2 = Arc::clone(&seen_on_channel_in_closure);
@@ -1108,12 +1039,10 @@ mod tests {
 
     #[test]
     fn tray_handle_drop_posts_shutdown_once_on_last_clone_only() {
-        // issue #47: an intermediate clone dropping must NOT shut the tray
-        // down; only the last outstanding clone of a handle family does, and
-        // exactly once. `inspector` is a *separate* handle family (its own
-        // `handle()` call) sharing the same underlying command queue, used
-        // purely to observe what got posted without itself counting toward
-        // `family`'s clone count.
+        // issue #47: only the last outstanding clone of a handle family shuts
+        // the tray down, exactly once. `inspector` is a separate handle family
+        // (its own `handle()` call) used purely to observe posts without
+        // counting toward `family`'s clone count.
         let tray = Tray::new(Icon::Checkmark);
         let family = tray.handle();
         let clone = family.clone();
@@ -1136,11 +1065,9 @@ mod tests {
 
     #[test]
     fn concurrent_last_clone_drops_post_shutdown_exactly_once() {
-        // Race regression: the last two clones of a family dropped concurrently on
-        // two threads must still post exactly ONE Shutdown. The old
-        // `Arc::strong_count == 1` check in `TrayHandle::drop` could let both drops
-        // read count > 1 and neither post, leaking the tray; the `Arc<HandleFamily>`
-        // drop-guard makes it exactly-once regardless of interleaving (issue #47).
+        // Race regression: the last two clones dropped concurrently on two
+        // threads must still post exactly ONE Shutdown. The `Arc<HandleFamily>`
+        // drop-guard makes this exactly-once regardless of interleaving (issue #47).
         let tray = Tray::new(Icon::Checkmark);
         let inspector = tray.handle(); // separate family; only observes the queue
         let h1 = tray.handle();
