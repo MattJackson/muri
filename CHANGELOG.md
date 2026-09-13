@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-09-13
+
+### Fixed
+
+- **macOS menu cursor is now the arrow, not the I-beam (#70/#78).** Root cause,
+  confirmed by the `MURI_DEBUG_CURSOR` trace: macOS only honors the cursor rects /
+  `NSCursor` calls of the **frontmost** app, so muri (a background accessory app)
+  could never make its arrow stick — the menu showed the app-underneath's I-beam,
+  worst on a stationary open where no tracking event fires. muri now **activates**
+  while the menu is open (`NSApplication::activate()` in `open_popup`) so its cursor
+  is authoritative, and **deactivates** on dismiss (`close_popup`) so focus returns
+  to your app. muri is an Accessory app (no Dock/Cmd-Tab), so this is a brief,
+  low-disruption focus change while the menu is up. The show-time cursor push and
+  the per-handler `set()`s remain as reinforcement.
+
 ## [0.13.6] - 2026-09-13
 
 ### Changed

@@ -973,9 +973,16 @@ impl PopupSession<'_> {
             snapshot,
         });
 
-        // Paint the first frame, then reveal + take key. A NonactivatingPanel
-        // becoming key does not deactivate the user's foreground app.
+        // Paint the first frame, then reveal + take key.
         self.redraw(WindowKind::Popup);
+        // Activate muri while the menu is open (#70/#78): macOS only honors the
+        // cursor rects / `NSCursor` calls of the FRONTMOST app, so a background
+        // accessory app's arrow never sticks and the menu shows the app-underneath's
+        // I-beam. Activating makes muri's cursor authoritative (arrow shows, incl. a
+        // stationary open where no tracking event fires). muri is an Accessory app
+        // (no Dock/Cmd-Tab), and the popup dismisses on resign, so focus returns to
+        // the user's app on close.
+        NSApplication::sharedApplication(self.mtm).activate();
         if let Some(popup) = self.popup.as_ref() {
             popup.panel.makeKeyAndOrderFront(None);
         }
@@ -1118,6 +1125,9 @@ impl PopupSession<'_> {
             // restoring the ambient cursor. Only runs when a popup was actually
             // open, so it can never underflow the cursor stack.
             objc2_app_kit::NSCursor::arrowCursor().pop();
+            // Give up the active status `open_popup` took for cursor ownership so
+            // the user's previous app regains focus on dismiss (#70/#78).
+            NSApplication::sharedApplication(self.mtm).deactivate();
         }
         self.focused.clear();
         self.dismiss_armed = false;
