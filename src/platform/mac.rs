@@ -282,6 +282,15 @@ define_class!(
         #[unsafe(method(muriDismiss:))]
         fn muri_dismiss(&self, _n: &NSNotification) {
             push_event(UiEvent::Dismiss);
+            // A dismissal notification (Space change, a native menu opening,
+            // resign-active) arrives with NO accompanying `NSEvent`, so the
+            // popup's modal `nextEventMatchingMask` pump would not drain this
+            // `Dismiss` until the next real event — the 50/50 popup that lingers
+            // on a Space switch until the menu bar is revealed (#69). Wake the
+            // pump now so the dismiss applies immediately.
+            if let Some(mtm) = MainThreadMarker::new() {
+                post_wake_event(mtm);
+            }
         }
     }
 );
@@ -1862,17 +1871,12 @@ impl Platform for MacPlatform {
     }
 }
 
-/// Stop muri's *owned* `NSApplication::run` loop (the [`Tray::run`] path) so it
-/// returns on `Shutdown`. `stop()` only takes effect after the next event is
-/// dequeued, so an application-defined no-op event is posted to wake
-/// `app.run()`'s internal `nextEventMatchingMask` immediately. Only ever called
-/// when muri owns the loop — never for a spawned tray on the host's loop (#47).
-fn stop_run_loop(mtm: MainThreadMarker) {
+/// Post an application-defined no-op event to the front of the main thread's
+/// event queue so a blocked `nextEventMatchingMask` — `app.run()`'s internal
+/// loop or the popup's modal pump — wakes immediately and re-checks its stop
+/// flag / drains its `EVENTS` inbox. Main-thread only (`mtm`).
+fn post_wake_event(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
-    app.stop(None);
-    // An application-defined no-op event, posted to the front of the main thread's
-    // queue so `app.run()`'s `nextEventMatchingMask` wakes and re-checks the stop
-    // flag (we are on the main thread — `mtm`).
     let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
         NSEventType::ApplicationDefined,
         NSPoint::new(0.0, 0.0),
@@ -1887,6 +1891,16 @@ fn stop_run_loop(mtm: MainThreadMarker) {
     if let Some(event) = event {
         app.postEvent_atStart(&event, true);
     }
+}
+
+/// Stop muri's *owned* `NSApplication::run` loop (the [`Tray::run`] path) so it
+/// returns on `Shutdown`. `stop()` only takes effect after the next event is
+/// dequeued, so a no-op event is posted to wake `app.run()`'s internal
+/// `nextEventMatchingMask` immediately. Only ever called when muri owns the loop
+/// — never for a spawned tray on the host's loop (#47).
+fn stop_run_loop(mtm: MainThreadMarker) {
+    NSApplication::sharedApplication(mtm).stop(None);
+    post_wake_event(mtm);
 }
 
 /// Install the tray icon and run the native `NSApplication` loop, opening the

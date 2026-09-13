@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-09-13
+
+### Fixed
+
+- **macOS popup sometimes lingered on a Space switch (#69).** A dismissal
+  notification (Space change, a native menu opening, resign-active) is delivered
+  with no accompanying `NSEvent`, so the popup's modal `nextEventMatchingMask`
+  pump did not drain the enqueued `Dismiss` until the *next* real event — leaving
+  the popup on-screen until unrelated input (e.g. revealing the menu bar) woke
+  the pump. `muriDismiss:` now posts an application-defined wake event (the same
+  primitive `stop_run_loop` uses), so the dismiss applies immediately. Extracted
+  the wake into a shared `post_wake_event` helper. Targeted to the notification
+  path, so no cost on the hover/input path.
+
 ## [0.14.5] - 2026-09-13
 
 ### Added
