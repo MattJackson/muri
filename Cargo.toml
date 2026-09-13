@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.13.5"
+version = "0.13.6"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),
@@ -85,16 +85,67 @@ accesskit = { version = "0.17", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
+# Only the AppKit classes muri actually touches — `default-features = false` +
+# an explicit class list drops five unused sibling crates the default feature set
+# drags in (objc2-cloud-kit/core-data/core-image/core-video/metal) and cuts this
+# large crate's per-class codegen. Add a feature here when a new NS* type is used.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-quartz-core",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSApplication",
+    "NSRunningApplication",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSColor",
+    "NSColorSpace",
+    "NSAppearance",
+    "NSCursor",
+    "NSEvent",
+    "NSImage",
+    "NSCell",
+    "NSControl",
+    "NSButton",
+    "NSMenu",
+    "NSMenuItem",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSTrackingArea",
+    "NSFont",
+    "NSFontManager",
+    "NSWorkspace",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSAccessibility",
+    "NSAccessibilityProtocols",
+] }
 # Objective-C block bridge (part of the objc2 stack, already resolved via
 # objc2-app-kit's default `block2` feature). The only click-away primitives
 # AppKit exposes — `NSEvent`'s global/local event monitors — take a block
 # handler, so native-menu-parity dismissal (#11) constructs them here.
 block2 = "0.6"
 # CALayer present path: build a CGImage from the raster RGBA framebuffer and set
-# it as the panel content view's layer contents (replaces softbuffer).
-objc2-quartz-core = "0.3"
-objc2-core-graphics = "0.3"
+# it as the panel content view's layer contents. `default-features = false` +
+# the exact types muri uses drops the deps' default tails (objc2-metal via
+# core-graphics, objc2-core-video via quartz-core) — a CPU rasterizer needs
+# neither GPU nor display-link frameworks. Add a type here when a new one is used.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CATransaction",
+    "objc2-core-foundation",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGImage",
+    "CGColorSpace",
+    "CGDataProvider",
+] }
 objc2-core-foundation = "0.3"
 # macOS AccessKit platform adapter (optional, `a11y` feature): dynamically
 # subclasses the panel's content NSView so VoiceOver can walk the already-built

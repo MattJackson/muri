@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-09-13
+
+### Changed
+
+- **Trimmed the macOS dependency tree — 5 unused objc2 sibling crates removed.**
+  `objc2-app-kit`, `objc2-quartz-core`, and `objc2-core-graphics` now use
+  `default-features = false` with only the exact AppKit/QuartzCore/CoreGraphics
+  types muri references. This drops `objc2-cloud-kit`, `objc2-core-data`,
+  `objc2-core-image`, `objc2-core-video`, and `objc2-metal` (a CPU rasterizer
+  needs no GPU/CloudKit/CoreData/CoreImage/CoreVideo bindings), taking the default
+  dependency tree from 62 to 47 crates and cutting `objc2-app-kit`'s per-class
+  codegen (faster macOS compiles). No API or behavior change — full gate green
+  (default + `--all-features`, cross-compile, MSRV 1.87). A new NS*/CG* type just
+  needs its feature added to the list in `Cargo.toml`.
+
 ## [0.13.5] - 2026-09-13
 
 ### Fixed
