@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-09-13
+
+### Changed
+
+- macOS dark live-menu fill shifts from dead-neutral `rgba(35,35,35,0.73)` to a
+  cool charcoal `rgba(28,32,44,0.72)` (#83): a native dark `NSMenu` carries a
+  subtle blue-cool cast, and the neutral fill read muddy/warm against it. The new
+  tint was A/B-approved on-device as the closest match to native. Live macOS dark
+  path only — light fill, Increase-Contrast, and offscreen/forced/preset themes
+  are unchanged, so goldens stand.
+
 ## [0.14.3] - 2026-09-13
 
 ### Internal (code audit — round 5, convergence)

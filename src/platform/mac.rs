@@ -850,8 +850,9 @@ impl PopupSession<'_> {
                 // DARK live menu: no OS material — muri draws its own
                 // semi-transparent dark fill straight over the desktop like a
                 // native dark `NSMenu` (OS materials lighten to a neutral grey
-                // floor). Solved from a live NSMenu on a neutral backdrop (#79/#82).
-                theme.background = Color::Rgba(35, 35, 35, 186);
+                // floor). Cool charcoal, not dead-neutral: native carries a
+                // subtle blue-cool cast, A/B-approved on-device (#79/#82/#83).
+                theme.background = Color::Rgba(28, 32, 44, 184);
             } else {
                 // LIGHT live menu: same as dark — no OS material (the public glass
                 // reads ~202 vs native ~249), muri paints its own near-white
