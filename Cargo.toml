@@ -1,6 +1,6 @@
 [package]
 name = "muri"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 # MSRV is 1.87. The macOS/Windows/core trees build on 1.85, but the Linux SNI
 # tray pulls the modern `zbus` 5 D-Bus stack (`zbus`/`zvariant`/`zbus_names`),

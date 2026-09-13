@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-13
+
+### Performance
+
+- **First menu open no longer stalls ~5s.** `fontdb::load_system_fonts()` (a
+  multi-second walk of every system font directory) ran lazily on the UI thread on
+  the first open. It's now a process-global load kicked off on a **background
+  thread the moment the tray is installed**, so by the time the user clicks, the
+  scan is done — the first open is instant instead of a multi-second freeze. If the
+  menu opens before the scan finishes it simply blocks on the same load as before
+  (no regression).
+- **Per-frame paint allocations cut** (pixel-identical, goldens unchanged):
+  `style_pieces` now yields borrowed `&str` sub-slices of the label instead of
+  allocating a `String` per styled piece (and cloning the whole label in the common
+  no-`StyleRun` case) — it ran ~3× per segment per repaint; `row_font` returns a
+  borrow instead of cloning a `Font` per segment; the draw/measure paths clone the
+  font only when a run actually overrides the weight.
+
+### Fixed
+
+- **macOS stationary-open I-beam (#78/#70).** The `MURI_DEBUG_CURSOR` trace from
+  0.13.1 proved the root cause: on a *stationary* open (the panel appears under an
+  already-inside, motionless pointer) **no** cursor handler fires — `mouseEntered:`
+  needs a boundary crossing, `cursorUpdate:` isn't delivered to a non-key panel of a
+  non-frontmost app, and `resetCursorRects` needs key — so muri's `NSCursor` calls
+  never ran and the app-underneath's I-beam persisted. The arrow is now asserted for
+  the whole popup session via a show-time `NSCursor::push()` (in `open_popup`,
+  balanced by a single `pop()` in `close_popup`), which needs no event. Device-verify
+  pending via `MURI_DEBUG_CURSOR`.
+
 ## [0.13.1] - 2026-09-12
 
 ### Performance

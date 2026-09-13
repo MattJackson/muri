@@ -275,6 +275,8 @@ impl Drop for LinuxPlatform {
 
 impl Platform for LinuxPlatform {
     fn install_tray(&mut self, icon: &Icon, tooltip: Option<&str>) -> Result<()> {
+        // Scan installed fonts in the background so the first menu open is instant.
+        crate::render::prewarm_system_fonts();
         // Register a bare SNI item (icon + tooltip, empty menu). The full menu
         // and click handler only exist on the owning `Tray`, so the rich menu is
         // delivered through `run_tray`; this method is for consumers that manage

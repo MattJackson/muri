@@ -15,6 +15,8 @@ use crate::geometry::{LogicalPoint, LogicalRect, LogicalSize};
 use crate::layout::{resolve_segments, SegmentMetrics};
 use crate::menu::{Align, Axis, Content, Icon, Item, MenuId, Row, Segment, Stack};
 use crate::render::{SceneDrawer, TextRun};
+use std::borrow::Cow;
+
 use crate::style::{Font, FontFamily, Rgba, Weight};
 use crate::theme::{MenuOptions, Theme, TrailingGutterPolicy};
 use crate::Menu;
@@ -283,8 +285,11 @@ fn row_trailing_width(row: &Row) -> f32 {
 }
 
 /// The font a segment renders in: its own override, else the row's base font.
-fn row_font(seg: &Segment, base: &Font) -> Font {
-    seg.font.clone().unwrap_or_else(|| base.clone())
+/// Returns a borrow — this is called ~3× per segment per repaint (width pass,
+/// draw metrics, draw loop), so cloning the `Font` (a heap `String` for a `Named`
+/// family) each time was pure per-frame churn.
+fn row_font<'a>(seg: &'a Segment, base: &'a Font) -> &'a Font {
+    seg.font.as_ref().unwrap_or(base)
 }
 
 /// Measure the intrinsic width a row's segments want (sum of segment widths plus
@@ -310,7 +315,7 @@ fn row_intrinsic<D: SceneDrawer>(
     for (i, seg) in row.segments.iter().enumerate() {
         let font = row_font(seg, base);
         let seg_base = seg_base_color(seg, theme, base_color, false);
-        w += measure_segment(d, cache, seg, &font, theme, seg_base, false);
+        w += measure_segment(d, cache, seg, font, theme, seg_base, false);
         if i + 1 < row.segments.len() {
             w += gap;
         }
@@ -529,20 +534,26 @@ fn paint_stack<D: SceneDrawer>(
 /// semantic color is **suppressed** so styled runs invert with the rest of the
 /// row instead of rendering, say, saturated red on accent blue. Per-run *weight*
 /// overrides still apply in both states.
-fn style_pieces(
-    seg: &Segment,
+fn style_pieces<'a>(
+    seg: &'a Segment,
     base_color: Rgba,
     base_weight: Weight,
     theme: &Theme,
     highlighted: bool,
-) -> Vec<(String, Rgba, Weight)> {
+) -> Vec<(&'a str, Rgba, Weight)> {
     if seg.runs.is_empty() {
-        return vec![(seg.text.clone(), base_color, base_weight)];
+        return vec![(seg.text.as_str(), base_color, base_weight)];
     }
-    // Map each char to (color, weight) by walking UTF-16 offsets.
-    let mut pieces: Vec<(String, Rgba, Weight)> = Vec::new();
+    // Walk chars, coalescing a maximal run of same-(color, weight) chars into ONE
+    // borrowed sub-slice of `seg.text` (byte-range) rather than allocating a
+    // `String` per piece — piece boundaries are byte offsets into the original.
+    let mut pieces: Vec<(&str, Rgba, Weight)> = Vec::new();
     let mut u16_idx = 0usize;
-    for ch in seg.text.chars() {
+    let mut piece_start = 0usize;
+    let mut cur_color = base_color;
+    let mut cur_weight = base_weight;
+    let mut open = false;
+    for (byte_idx, ch) in seg.text.char_indices() {
         let mut color = base_color;
         let mut weight = base_weight;
         // Walk ALL runs (no early `break`): overlapping runs composite with the
@@ -562,13 +573,21 @@ fn style_pieces(
                 }
             }
         }
-        match pieces.last_mut() {
-            // Open per-char merge, not a closed enum: extend the current piece when
-            // its (color, weight) match, else start a new piece.
-            Some((s, c, w)) if *c == color && *w == weight => s.push(ch),
-            _ => pieces.push((ch.to_string(), color, weight)),
+        if open && color == cur_color && weight == cur_weight {
+            // Same style — the current piece just extends to include this char.
+        } else {
+            if open {
+                pieces.push((&seg.text[piece_start..byte_idx], cur_color, cur_weight));
+            }
+            piece_start = byte_idx;
+            cur_color = color;
+            cur_weight = weight;
+            open = true;
         }
         u16_idx += ch.len_utf16();
+    }
+    if open {
+        pieces.push((&seg.text[piece_start..], cur_color, cur_weight));
     }
     pieces
 }
@@ -607,10 +626,16 @@ fn measure_segment<D: SceneDrawer>(
     highlighted: bool,
 ) -> f32 {
     style_pieces(seg, base_color, font.weight, theme, highlighted)
-        .iter()
+        .into_iter()
         .map(|(text, _color, weight)| {
-            let pf = font.clone().with_weight(*weight);
-            measure_cached(drawer, cache, text, &pf)
+            // Only clone the font when a `StyleRun` actually changes the weight
+            // (the common no-run piece keeps the base font, zero clone).
+            if weight == font.weight {
+                measure_cached(drawer, cache, text, font)
+            } else {
+                let pf = font.clone().with_weight(weight);
+                measure_cached(drawer, cache, text, &pf)
+            }
         })
         .sum()
 }
@@ -947,7 +972,7 @@ fn draw_row_content<D: SceneDrawer>(
                 let font = row_font(seg, base_font);
                 let seg_base = seg_base_color(seg, theme, base_color, highlighted);
                 SegmentMetrics::new(
-                    measure_segment(drawer, cache, seg, &font, theme, seg_base, highlighted),
+                    measure_segment(drawer, cache, seg, font, theme, seg_base, highlighted),
                     seg.flex,
                     seg.align,
                 )
@@ -956,16 +981,22 @@ fn draw_row_content<D: SceneDrawer>(
         let boxes = resolve_segments(&metrics, band_w);
         for (seg, bx) in row.segments.iter().zip(boxes.iter()) {
             let font = row_font(seg, base_font);
-            let lh = drawer.line_height(&font);
+            let lh = drawer.line_height(font);
             let text_top = ry + (rh - lh) / 2.0;
             let seg_base = seg_base_color(seg, theme, base_color, highlighted);
             let pieces = style_pieces(seg, seg_base, font.weight, theme, highlighted);
             let mut px = band_x + bx.text_x;
             for (text, color, weight) in pieces {
-                let pf = font.clone().with_weight(weight);
-                let w = measure_cached(drawer, cache, &text, &pf);
+                // Borrow the base font unless a run overrode the weight (then clone
+                // once for this piece) — avoids a per-piece `Font` clone per frame.
+                let pf: Cow<Font> = if weight == font.weight {
+                    Cow::Borrowed(font)
+                } else {
+                    Cow::Owned(font.clone().with_weight(weight))
+                };
+                let w = measure_cached(drawer, cache, text, &pf);
                 drawer.draw_text(&TextRun {
-                    text: &text,
+                    text,
                     origin: LogicalPoint::new(px, text_top),
                     font: &pf,
                     color,
@@ -1225,8 +1256,11 @@ mod tests {
         let light = style_pieces(&seg, base, Weight::Regular, &Theme::light(), false);
 
         // The styled piece ("b") resolves Label against each theme.
-        let dark_b = dark.iter().find(|(s, ..)| s == "b").expect("styled piece");
-        let light_b = light.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        let dark_b = dark.iter().find(|(s, ..)| *s == "b").expect("styled piece");
+        let light_b = light
+            .iter()
+            .find(|(s, ..)| *s == "b")
+            .expect("styled piece");
         assert_eq!(dark_b.1, Theme::dark().resolve(Color::Label));
         assert_eq!(light_b.1, Theme::light().resolve(Color::Label));
         // And they actually differ (white vs black), proving the theme is live.
@@ -1250,12 +1284,12 @@ mod tests {
                 "highlighted row keeps every piece at the base color"
             );
         }
-        let hot_b = hot.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        let hot_b = hot.iter().find(|(s, ..)| *s == "b").expect("styled piece");
         assert_eq!(hot_b.2, Weight::Bold, "weight override survives highlight");
 
         // Un-highlighted, the semantic color resolves as before.
         let cold = style_pieces(&seg, white, Weight::Regular, &Theme::light(), false);
-        let cold_b = cold.iter().find(|(s, ..)| s == "b").expect("styled piece");
+        let cold_b = cold.iter().find(|(s, ..)| *s == "b").expect("styled piece");
         assert_eq!(cold_b.1, Theme::light().resolve(Color::SystemRed));
     }
 
@@ -2022,8 +2056,8 @@ mod tests {
         ]);
         let theme = Theme::light();
         let pieces = style_pieces(&seg, Rgba::BLACK, Weight::Regular, &theme, false);
-        let a = pieces.iter().find(|(s, ..)| s == "a").expect("piece a");
-        let b = pieces.iter().find(|(s, ..)| s == "b").expect("piece b");
+        let a = pieces.iter().find(|(s, ..)| *s == "a").expect("piece a");
+        let b = pieces.iter().find(|(s, ..)| *s == "b").expect("piece b");
         assert_eq!(
             a.1,
             theme.resolve(Color::SystemRed),
@@ -2503,16 +2537,8 @@ mod tests {
         assert_eq!(
             pieces,
             vec![
-                (
-                    "a".to_string(),
-                    theme.resolve(Color::SystemGreen),
-                    Weight::Regular
-                ),
-                (
-                    "bc".to_string(),
-                    theme.resolve(Color::SystemYellow),
-                    Weight::Regular
-                ),
+                ("a", theme.resolve(Color::SystemGreen), Weight::Regular),
+                ("bc", theme.resolve(Color::SystemYellow), Weight::Regular),
             ],
             "last-wins across a 3-deep overlap, with same-color chars merged"
         );

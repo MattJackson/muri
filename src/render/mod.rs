@@ -1567,18 +1567,48 @@ fn shared_font_store(key: FontStoreKey, build: impl FnOnce() -> FontStore) -> Rc
     })
 }
 
-fn cached_system_fonts_db() -> Database {
-    thread_local! {
-        static SYSTEM_FONTS_DB: std::cell::OnceCell<Database> = const { std::cell::OnceCell::new() };
-    }
-    SYSTEM_FONTS_DB.with(|cell| {
-        cell.get_or_init(|| {
-            let mut db = Database::new();
-            db.load_system_fonts();
-            db
-        })
-        .clone()
+/// The process-wide scanned system-font database, loaded exactly once.
+///
+/// `load_system_fonts` walks every system font directory and parses each face —
+/// hundreds of ms to several **seconds** on a laptop — and it ran lazily on the
+/// UI thread, so the FIRST menu open stalled for that whole time (#78-adjacent
+/// "~5s first open"). It is process-global (previously thread-local) so it loads
+/// once, and [`prewarm_system_fonts`] can populate it on a BACKGROUND thread at
+/// startup so the first open never pays the scan.
+fn system_fonts_db() -> &'static Database {
+    static SYSTEM_FONTS_DB: OnceLock<Database> = OnceLock::new();
+    SYSTEM_FONTS_DB.get_or_init(|| {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        db
     })
+}
+
+fn cached_system_fonts_db() -> Database {
+    // Clone the shared template: `fontdb` `Arc`s the actual font bytes, so a clone
+    // copies only face metadata (no disk I/O), and callers may mutate their copy
+    // (registering the pinned UI/system face) without touching the shared scan.
+    system_fonts_db().clone()
+}
+
+/// Start scanning the installed system fonts on a background thread so the first
+/// menu open doesn't block on it (the scan is a multi-second walk of every font
+/// directory). Idempotent and cheap to call repeatedly — the underlying
+/// [`OnceLock`] loads exactly once. Call it as early as possible (e.g. when the
+/// tray is installed); if a menu opens before the scan finishes it simply blocks
+/// on the same `OnceLock` (no worse than the old lazy load), and in the common
+/// case where the user clicks a moment after the tray appears the scan is already
+/// done, turning a ~5s first-open stall into an instant one.
+pub(crate) fn prewarm_system_fonts() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Spawn the background scan at most once, however many install paths call this.
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let _ = system_fonts_db();
+    });
 }
 
 fn register_system_font(db: &mut Database, source: SystemFontSource) -> Option<String> {

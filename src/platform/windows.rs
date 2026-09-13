@@ -2273,6 +2273,8 @@ impl WindowsPlatform {
 
 impl Platform for WindowsPlatform {
     fn install_tray(&mut self, icon: &Icon, tooltip: Option<&str>) -> Result<()> {
+        // Scan installed fonts in the background so the first menu open is instant.
+        crate::render::prewarm_system_fonts();
         self.anchor.install(icon, tooltip)
     }
 

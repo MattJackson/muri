@@ -643,6 +643,9 @@ impl MacosAnchor {
 
 impl MacosAnchor {
     fn install(&mut self, tooltip: Option<&str>) -> Result<()> {
+        // Kick off the system-font scan in the background the moment the tray
+        // appears, so the first menu open doesn't stall on it (~5s otherwise).
+        crate::render::prewarm_system_fonts();
         let status_bar = NSStatusBar::systemStatusBar();
         let item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let target = TrayTarget::new(self.mtm);
@@ -1016,6 +1019,15 @@ impl PopupSession<'_> {
         if let Some(popup) = self.popup.as_ref() {
             popup.panel.makeKeyAndOrderFront(None);
         }
+        // Assert the arrow for the WHOLE popup session at show-time (#70/#78).
+        // On a stationary open no tracking event ever fires — the panel appears
+        // under an already-inside, motionless pointer — so `mouseEntered:`/
+        // `cursorUpdate:` never run and the app-underneath's I-beam persists. A
+        // show-time `push` (balanced by a single `pop` in `close_popup`, which is
+        // the sole place the popup is taken) forces the arrow without needing an
+        // event. `open_popup` early-returns when a popup already exists, so this
+        // push pairs exactly one-to-one with the close pop.
+        objc2_app_kit::NSCursor::arrowCursor().push();
         // Arm the click-away + mutual-exclusion watchers now that a panel is up.
         self.watchers = Some(DismissWatchers::install(self.mtm));
         self.sync_a11y();
@@ -1145,6 +1157,10 @@ impl PopupSession<'_> {
         self.truncate_flyouts(0);
         if let Some(popup) = self.popup.take() {
             popup.order_out();
+            // Balance the show-time arrow `push` from `open_popup` (#70/#78),
+            // restoring the ambient cursor. Only runs when a popup was actually
+            // open, so it can never underflow the cursor stack.
+            objc2_app_kit::NSCursor::arrowCursor().pop();
         }
         self.focused.clear();
         self.dismiss_armed = false;
