@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-13
+
+### Fixed
+
+- **macOS dark menu now matches native `NSMenu` (#79, PR #80).** A live dark menu
+  no longer hosts the raster over an OS material (`NSVisualEffectView`/
+  `NSGlassEffectView`): those are content-adaptive and lighten even a black
+  backdrop to a neutral grey floor, so the menu read as a flat opaque slab (~lum
+  38, dead-neutral) while native is darker and desktop-tinted (~lum 28). Instead
+  the `MuriView` is hosted directly on the transparent panel and muri paints its
+  own semi-transparent dark fill — `rgba(31,31,31,0.62)`, solved from a live
+  `NSMenu` across dark and gray backdrops — compositing straight over the desktop
+  (dark over dark, lifting over light, tinted by the content behind it). Light
+  menus keep the closer-matching `NSGlassEffectView`; offscreen/forced/preset
+  themes are unchanged (goldens stand).
+
 ## [0.13.2] - 2026-09-13
 
 ### Performance
