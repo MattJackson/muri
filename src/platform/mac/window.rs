@@ -2,12 +2,11 @@
 //!
 //! Each popup/flyout is a borderless, non-activating [`NSPanel`] (spec 20 §2),
 //! floating + `becomesKeyOnlyIfNeeded` so it can take keyboard focus **without
-//! deactivating the user's foreground app**. Its content view depends on
-//! appearance (#79): a light menu hosts [`MuriView`] inside an
-//! `NSGlassEffectView`; a dark menu (or pre-Tahoe host) hosts it directly on
-//! the transparent panel with muri's own semi-transparent fill, since the OS
-//! materials can't reach a native dark menu's look. Either way the raster
-//! pixmap is blitted into the [`MuriView`] (see [`super::present`]).
+//! deactivating the user's foreground app**. Its content view is the layer-backed
+//! [`MuriView`] hosted directly on the transparent panel, for BOTH appearances
+//! (#79/#82): muri paints its own semi-transparent fill rather than using an OS
+//! material, which reads greyer than a native `NSMenu` in light and dark alike.
+//! The raster pixmap is blitted into the [`MuriView`] (see [`super::present`]).
 //!
 //! The responder subclasses never touch [`super::AppState`] directly: every
 //! callback enqueues a [`super::UiEvent`] and asks for a main-thread drain, so
@@ -20,8 +19,8 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSCursor, NSGlassEffectView, NSPanel, NSPopUpMenuWindowLevel,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowDelegate, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSCursor, NSPanel, NSPopUpMenuWindowLevel, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
@@ -227,17 +226,6 @@ pub(super) struct NativePanel {
     pub delegate: Retained<MuriWindowDelegate>,
 }
 
-/// Whether the running OS draws menus with the Liquid Glass material — detected
-/// by asking the Objective-C runtime whether `NSGlassEffectView` exists, rather
-/// than gating on a hardcoded macOS version (#68). `true` on Tahoe (macOS 26+)
-/// where a native `NSMenu`'s background is an `NSGlassView`; `false` on every
-/// earlier system, where the classic `NSVisualEffectView(Material::Menu)`
-/// vibrancy is the correct menu material. Reading the material from the OS this
-/// way keeps muri matching whatever the host actually uses.
-fn glass_backdrop_available() -> bool {
-    objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
-}
-
 /// Create a non-activating vibrant panel at `content_rect` (screen coordinates,
 /// AppKit bottom-left origin) sized in points, its content view rounded to
 /// `corner_radius`. The panel is *not* shown; the caller orders it front.
@@ -278,34 +266,19 @@ pub(super) fn make_panel(
     let view = MuriView::new(mtm, bounds, kind);
     view.setWantsLayer(true);
 
-    // Backdrop by appearance (#72/#79): on Liquid Glass (Tahoe), `NSGlassEffectView`
-    // matches a LIGHT native menu closely, so light menus host in glass. A DARK
-    // menu can't be matched by any public OS material — they're content-adaptive
-    // and lighten to a neutral grey floor — so it (and any pre-Tahoe host) uses
-    // no OS material: the raster view sits directly on the transparent panel with
-    // muri's own semi-transparent fill. Glass detection is by class-presence, not
-    // a hardcoded OS version.
-    if glass_backdrop_available() && !super::system_is_dark() {
-        // Glass rounds itself natively (no layer mask needed); the hosted raster
-        // paints a fully transparent background on the live System path (#64).
-        let glass: Retained<NSGlassEffectView> =
-            NSGlassEffectView::initWithFrame(mtm.alloc(), bounds);
-        glass.setCornerRadius(corner_radius as f64);
-        glass.setContentView(Some(&view));
-        panel.setContentView(Some(&glass));
-    } else {
-        // DARK menu (and any pre-Tahoe host): the raster view is hosted DIRECTLY
-        // on the transparent panel and muri paints its own semi-transparent dark
-        // background (`mac.rs` theme()), compositing straight over the desktop
-        // like native (#79). The layer is rounded + non-opaque so the desktop
-        // shows through the fill's alpha.
-        if let Some(layer) = view.layer() {
-            layer.setCornerRadius(corner_radius as f64);
-            layer.setMasksToBounds(true);
-            layer.setOpaque(false);
-        }
-        panel.setContentView(Some(&view));
+    // No OS material for either appearance (#79/#82): the public materials
+    // (`NSGlassEffectView`, `NSVisualEffectView(Material::Menu)`) are
+    // content-adaptive and read markedly greyer than a native `NSMenu` in BOTH
+    // light and dark. So the raster view is hosted DIRECTLY on the transparent
+    // panel and muri paints its own semi-transparent fill (`mac.rs` theme()),
+    // compositing straight over the desktop like native. Rounded + non-opaque
+    // layer so the desktop shows through the fill's alpha.
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(corner_radius as f64);
+        layer.setMasksToBounds(true);
+        layer.setOpaque(false);
     }
+    panel.setContentView(Some(&view));
 
     // Deliver `mouseMoved:` to the view regardless of key/active state so hover
     // highlighting works on the non-activating panel.
@@ -334,8 +307,7 @@ pub(super) fn make_panel(
     panel.setDelegate(Some(proto));
     panel.setInitialFirstResponder(Some(&view));
 
-    // The backdrop (glass or vibrancy) is retained by the panel as its content
-    // view; the raster `view` is retained by whichever backdrop hosts it.
+    // The raster `view` is the panel's content view directly (no OS material).
     NativePanel {
         panel,
         view,

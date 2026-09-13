@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-09-13
+
+### Fixed
+
+- **macOS light menu now matches native `NSMenu` too, unifying both appearances
+  (#82).** Extends the #79/#80 dark fix to light mode: the light path no longer
+  hosts the raster over `NSGlassEffectView` (which measured ~202 vs native ~249 on
+  a neutral desktop). Both light and dark now host `MuriView` directly on the
+  transparent panel and paint muri's own semi-transparent fill — a single code
+  path. Device-solved fills on a neutral backdrop: light `rgba(249,249,249,0.66)`
+  (→ ~246 vs native 249), dark refined to `rgba(35,35,35,0.73)` (→ ~91 vs native
+  92). Removed the now-unused `NSGlassEffectView` backdrop and glass-detection.
+  Live `injects_system` path only; offscreen/forced/preset themes unchanged
+  (goldens stand). Increase-Contrast path unchanged (and device-verified, #74).
+
 ## [0.13.4] - 2026-09-13
 
 ### Diagnostics / tests (#81)

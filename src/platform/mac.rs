@@ -847,19 +847,17 @@ impl PopupSession<'_> {
             } else if !transparency_enabled() {
                 theme.make_opaque();
             } else if system_is_dark() {
-                // DARK live menu: no OS material backdrop (window.rs adds the
-                // raster view directly to the transparent panel). muri draws its
-                // own semi-transparent dark background, compositing straight over
-                // the desktop like a native dark `NSMenu` — OS materials can't do
-                // this; they lighten to a neutral grey floor (#79). Values solved
-                // from a live NSMenu across two backdrops.
-                theme.background = Color::Rgba(31, 31, 31, 158);
+                // DARK live menu: no OS material — muri draws its own
+                // semi-transparent dark fill straight over the desktop like a
+                // native dark `NSMenu` (OS materials lighten to a neutral grey
+                // floor). Solved from a live NSMenu on a neutral backdrop (#79/#82).
+                theme.background = Color::Rgba(35, 35, 35, 186);
             } else {
-                // LIGHT live menu: the `NSGlassEffectView` (mac/window.rs) IS the
-                // surface, so paint no bulk fill — it matches a native light
-                // `NSMenu` closely. Offscreen/forced/preset themes never reach this
-                // branch (no `injects_system`), so their fill — and goldens — stand.
-                theme.background = Color::Rgba(0, 0, 0, 0);
+                // LIGHT live menu: same as dark — no OS material (the public glass
+                // reads ~202 vs native ~249), muri paints its own near-white
+                // semi-transparent fill, solved to native (#82). Offscreen/forced/
+                // preset themes never reach this branch, so goldens stand.
+                theme.background = Color::Rgba(249, 249, 249, 168);
             }
         }
         theme
