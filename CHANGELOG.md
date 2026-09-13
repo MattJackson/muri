@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-13
+
+### Internal (code audit — round 5, convergence)
+
+- Corrected and tightened the `style_run_from_byte_range_clamps_to_char_boundary`
+  test: its comment misstated the char-boundary facts of "café" (byte 3 *is* a
+  boundary, and `from_byte_range` snaps **outward**, not inward). The test now
+  starts genuinely mid-codepoint (byte 4, inside `é`) and asserts exact values,
+  so it actually exercises the outward snap it documents.
+- This was the sole finding of a whole-tree opus craft certification pass; all
+  other lenses and project-fact invariants (no OS vibrancy, `activateIgnoring
+  OtherApps`, tracking = 0.0, muda `Position` both-forms, `drain_locked` poison
+  recovery, ADR-0002 cfg placement) matched their code. The audit has converged.
+
 ## [0.14.2] - 2026-09-13
 
 ### Fixed (code audit — round 4, doc drift)

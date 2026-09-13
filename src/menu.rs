@@ -977,14 +977,15 @@ mod tests {
 
     #[test]
     fn style_run_from_byte_range_clamps_to_char_boundary() {
-        // Range that lands mid-codepoint (byte 3 is inside 'é' which spans
-        // bytes 3..5 in "café") should snap inward rather than panicking.
+        // A start that lands mid-codepoint (byte 4 is between 'é's two UTF-8
+        // bytes; 'é' spans bytes 3..5 in "café") snaps OUTWARD to the enclosing
+        // boundary rather than panicking, so the whole 'é' is styled.
         let text = "café";
-        let run = StyleRun::from_byte_range(text, 3..text.len() + 10, Color::SystemRed);
-        // Start snaps back to the nearest boundary at or before byte 3 (byte 3
-        // itself is not a boundary, so it snaps to byte 3's preceding boundary).
-        assert!(run.start <= text.encode_utf16().count());
-        // End clamps to the string's own byte length.
+        let run = StyleRun::from_byte_range(text, 4..text.len() + 10, Color::SystemRed);
+        // Start snaps back to byte 3 (the start of 'é') = UTF-16 index 3.
+        assert_eq!(run.start, "caf".encode_utf16().count());
+        // End clamps to the string's byte length, so the run covers just 'é'.
+        assert_eq!(run.len, 1);
         assert_eq!(run.start + run.len, text.encode_utf16().count());
     }
 
