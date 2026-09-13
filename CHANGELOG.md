@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-13
+
+### Fixed (code audit — round 4, doc drift)
+
+- **muda `Position` doc understated the implementation.** The `Position` type
+  doc and the compat module note both claimed only the `None` (current-cursor)
+  form was honored and that an explicit point was "accepted for signature parity
+  but not yet applied" — but `cursor_or_origin` *does* apply a supplied point
+  (`LogicalPoint::new(p.x, p.y)`, wired in #30). Corrected so the docs no longer
+  tell callers explicit positions are ignored when they work.
+
+### Internal (doc drift)
+
+- macOS backend module doc no longer describes a "vibrancy backdrop" content
+  view or lists vibrancy as a `DEVICE-VERIFY` behavior (removed in #79/#82; the
+  `MuriView` hosts the `CALayer` blit directly and muri paints its own fill).
+- The `DismissObserver` note no longer says muri's panel "can't deactivate that
+  app" — muri force-activates on open (#78); that still can't cancel another
+  process's modal menu tracking, which is the actual limitation.
+
 ## [0.14.1] - 2026-09-13
 
 ### Internal (code audit — round 3, doc drift)

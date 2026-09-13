@@ -1,10 +1,11 @@
 //! macOS backend: `NSStatusItem` tray anchor plus a native, non-activating
 //! `NSPanel` popup driven directly by `NSApplication` (no winit / softbuffer).
 //! The status item's button is the click target and anchor rect; on click the
-//! popup opens as a borderless `NSPanel` (`window` submodule) whose content
-//! view hosts a vibrancy backdrop under a `CALayer` the shared raster
+//! popup opens as a borderless, transparent `NSPanel` (`window` submodule)
+//! whose `MuriView` content view hosts a `CALayer` the shared raster
 //! [`Framebuffer`](crate::render::Framebuffer) is blitted to (`present`
-//! submodule). Submenu rows open a second such panel (a flyout).
+//! submodule); muri paints its own fill, no OS material (#79/#82). Submenu rows
+//! open a second such panel (a flyout).
 //!
 //! ## Event model
 //!
@@ -16,9 +17,8 @@
 //!
 //! ## Device-verified behaviors
 //!
-//! Focus-driven dismissal, keyboard nav, VoiceOver traversal, and vibrancy
-//! require a real display + assistive tech; those spots are marked
-//! `DEVICE-VERIFY(0.9.0)`.
+//! Focus-driven dismissal, keyboard nav, and VoiceOver traversal require a real
+//! display + assistive tech; those spots are marked `DEVICE-VERIFY(0.9.0)`.
 
 #![allow(unsafe_code)]
 
@@ -271,8 +271,8 @@ define_class!(
     // Either enqueues a `Dismiss`, giving the FORWARD half of OEM mutual-exclusion
     // (a native menu opening dismisses muri's popup). The REVERSE — muri closing an
     // already-open foreign-app menu — is an inherent macOS limitation: there's no
-    // public API to cancel another process's menu tracking, and muri's popup is a
-    // non-activating `NSPanel` so it can't deactivate that app either.
+    // public API to cancel another process's menu tracking. muri force-activates
+    // on open (#78), but that still can't tear down another app's modal menu loop.
     #[unsafe(super(NSObject))]
     #[name = "MuriDismissObserver"]
     #[thread_kind = MainThreadOnly]

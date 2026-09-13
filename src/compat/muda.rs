@@ -38,9 +38,9 @@
 //!   `show_context_menu_for_*`, …) are exposed on **every** target rather than
 //!   `#[cfg(target_os)]`-gated as muda gates them, since muri routes all
 //!   `target_os` branching through its `Platform` seam (ADR-0002 / `strict_cfg`).
-//! - `Position` is a small facade type, not the real `dpi::Position`; only the
-//!   `None` (current-cursor) form is exercised (spec `02` §6), best-effort until
-//!   muri pins muda's `dpi` version.
+//! - `Position` is a small facade type, not the real `dpi::Position`; both the
+//!   `None` (current-cursor) and explicit-point forms are honored (spec `02` §6,
+//!   #30), pending muri pinning muda's `dpi` version.
 //! - `IconMenuItem` built from raw RGBA (or [`Icon::from_path`]) renders its
 //!   leading icon via the same RGBA→PNG bridge the tray icon uses (issue #9); a
 //!   `NativeIcon` maps to [`Icon::Symbol`](crate::menu::Icon::Symbol).
@@ -1006,12 +1006,10 @@ pub(crate) enum SurfaceMode {
     Custom,
 }
 
-/// A facade `Position`, standing in for muda's re-exported `dpi::Position`. Only
-/// the `None` (current-cursor) form is honored by the current best-effort
-/// context-menu surface; a supplied point is accepted for signature parity but
-/// not yet applied (the popup opens at the pointer). Wiring an explicit position
-/// through to a muri [`LogicalPoint`](crate::geometry::LogicalPoint) is a
-/// follow-up.
+/// A facade `Position`, standing in for muda's re-exported `dpi::Position`. Both
+/// forms are honored (#30): `None` opens at the live cursor, and an explicit
+/// point is applied — threaded through to a muri
+/// [`LogicalPoint`](crate::geometry::LogicalPoint) by `cursor_or_origin`.
 #[derive(Clone, Copy, Debug)]
 pub struct Position {
     /// Logical x coordinate.
