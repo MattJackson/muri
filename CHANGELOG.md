@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-09-13
+
+### Diagnostics / tests (#81)
+
+- Added a regression test proving SF variable **bold inks heavier than regular
+  even with optical sizing** (`wght` + `opsz` instanced together, as the live
+  macOS theme does) — ruling out an axis-combination bug as the cause of the
+  live-only "bold not visibly rendered" report.
+- `MURI_DEBUG_TEXT`'s face dump now also reports the backing face's byte length
+  (`data_len`), so a live capture can reveal whether the live `System` face
+  resolves to a *different physical SF file* than a bare `SFNS.ttf` (which would
+  explain why its outline instancing behaves differently despite identical axis
+  metadata). The offscreen render path is proven correct across every axis
+  combination; the divergence is live-only (same wall as #65).
+
 ## [0.13.3] - 2026-09-13
 
 ### Fixed

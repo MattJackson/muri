@@ -944,14 +944,20 @@ impl FontStore {
                 let font = FontRef::from_index(&b.data, b.index as usize)?;
                 let wght = font.variations().find_by_tag(WGHT_AXIS_TAG);
                 let n_instances = font.instances().count();
+                // Byte length of the backing face file (#81): if the live `System`
+                // face resolves to a different physical SF file than a bare
+                // `SFNS.ttf`, its outline instancing can behave differently even
+                // though the axis metadata reads identically — this makes that
+                // visible in a capture.
+                let data_len = b.data.len();
                 Some(match wght {
                     Some(a) => format!(
-                        "wght[min={} def={} max={}] named_instances={n_instances}",
+                        "wght[min={} def={} max={}] named_instances={n_instances} data_len={data_len}",
                         a.min_value(),
                         a.default_value(),
                         a.max_value(),
                     ),
-                    None => format!("wght[none] named_instances={n_instances}"),
+                    None => format!("wght[none] named_instances={n_instances} data_len={data_len}"),
                 })
             })
             .unwrap_or_else(|| "wght[unparsed]".into());
@@ -2456,6 +2462,52 @@ mod tests {
             bold_ink > reg_ink,
             "#63: SF variable bold must ink heavier than regular on the live System path \
              (bold {bold_ink} vs regular {reg_ink})"
+        );
+    }
+
+    /// #81 root-cause probe: the LIVE macOS theme sets `optical_size = Some(13)`
+    /// (#77), so the live path instances `wght` AND `opsz` together — while the
+    /// bold-render test above only instances `wght`. This checks whether combining
+    /// the two axes drops the bold on the real SF file. Prints inks; asserts bold
+    /// still inks heavier WITH opsz. Skipped where `SFNS.ttf` is absent.
+    #[test]
+    fn sf_variable_bold_inks_heavier_even_with_optical_size() {
+        const SFNS: &str = "/System/Library/Fonts/SFNS.ttf";
+        if !std::path::Path::new(SFNS).exists() {
+            return;
+        }
+        let mut db = Database::new();
+        let ids = db.load_font_source(DbSource::File(std::path::PathBuf::from(SFNS)));
+        let Some(&fid) = ids.first() else { return };
+        let Some(family) = db
+            .face(fid)
+            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+        else {
+            return;
+        };
+        let d = RasterDrawer::from_parts(2.0, db, Some(family));
+        let face = d.fonts.resolve_face(&FontFamily::System, 700).unwrap();
+        let px = 30.0;
+        // Ink summed through the exact draw path, but shaping WITH opsz=Some(13)
+        // like the live macOS theme.
+        let ink = |ot: u16| -> u64 {
+            let line = d.fonts.shape("Bold", Some(face), ot, px, 0.0, Some(13.0));
+            let mut sum = 0u64;
+            for g in &line.glyphs {
+                if let Some(img) = d.fonts.glyph_image(g.face, g.glyph, px, g.emb, g.opsz) {
+                    if matches!(img.content, Content::Mask | Content::SubpixelMask) {
+                        sum += img.data.iter().map(|&b| b as u64).sum::<u64>();
+                    }
+                }
+            }
+            sum
+        };
+        let reg = ink(400);
+        let bold = ink(700);
+        assert!(
+            bold > reg,
+            "#81: SF variable bold must ink heavier than regular EVEN with optical \
+             sizing (wght+opsz combined); bold {bold} vs regular {reg}"
         );
     }
 
