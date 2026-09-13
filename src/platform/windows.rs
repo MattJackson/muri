@@ -1899,10 +1899,7 @@ impl PopupSession<'_> {
     /// drain loops keep spinning until the cross-thread inbox is empty too.
     #[cfg(feature = "a11y")]
     fn drain_a11y_actions(&mut self) -> bool {
-        let actions = A11Y_ACTIONS
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
+        let actions = super::drain_locked(&A11Y_ACTIONS);
         let any = !actions.is_empty();
         for (kind, request) in actions {
             self.on_a11y_action(kind, request);
@@ -2042,14 +2039,7 @@ impl AppState {
     fn drain(&mut self) {
         loop {
             let events = take_session_events(self.session.session_id);
-            let commands: Vec<TrayCommand> = self
-                .tray
-                .commands
-                .lock()
-                // Recover the queue even if a poster panicked and poisoned the
-                // lock: dropping pending commands would silently wedge the tray.
-                .map(|mut q| std::mem::take(&mut *q))
-                .unwrap_or_else(|e| std::mem::take(&mut *e.into_inner()));
+            let commands = super::drain_locked(&self.tray.commands);
             let had_work = !events.is_empty() || !commands.is_empty();
             for command in commands {
                 self.apply_command(command);

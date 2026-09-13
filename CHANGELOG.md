@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-13
+
+### Fixed (code audit — round 2, regression sweep of 0.13.9)
+
+- **`face_opsz` re-parsed the font on every cold shape miss.** Resolving the
+  `opsz` master (#77) did `FontRef::from_index` + a variation scan per distinct
+  text run on first-open, uncached — unlike its memoized sibling `face_embolden`,
+  and it runs *before* the shaper-instance lookup (its result is part of that
+  key), so nothing absorbed it. Now memoized per `(face, points)` in a capped
+  `opsz_cache`, closing the last per-run font parse on the first-open path.
+- **Two more command/action queues could be silently dropped on a poisoned
+  lock** (Windows a11y-action drain, Linux tray-command drain) — the same class
+  fixed for the macOS/Windows command drains in 0.13.9. All four sites now share
+  a single `drain_locked` helper that recovers the queue via
+  `PoisonError::into_inner()` instead of discarding it.
+
+### Internal
+
+- Doc fixes: `layout.rs` no longer references the removed `cosmic-text` backend
+  (widths come from muri's own text layer via `SceneDrawer::measure_text`);
+  `menu_reserves_gutter`'s doc now also states the `Icon::Checkmark`-leading
+  branch it already implements.
+- New tests: `opsz_cache` overflow-clears; the measure key distinguishes optical
+  size (locks in the 0.13.9 fix); `drain_locked` recovers a poisoned queue.
+
 ## [0.13.9] - 2026-09-13
 
 ### Fixed (code audit)

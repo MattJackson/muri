@@ -311,6 +311,18 @@ pub(crate) const PRIMARY_MOD_IS_SUPER: bool = true;
 #[cfg(all(not(target_os = "macos"), feature = "muda-compat"))]
 pub(crate) const PRIMARY_MOD_IS_SUPER: bool = false;
 
+/// Drain a cross-thread `Mutex<Vec<T>>` inbox, taking its contents even if a
+/// poster panicked and poisoned the lock. Silently dropping the queue (the old
+/// `unwrap_or_default`) would wedge the surface — tray commands or a11y actions
+/// posted after the panic would never be applied — so poison recovers the inner
+/// `Vec` via [`std::sync::PoisonError::into_inner`] instead.
+pub(crate) fn drain_locked<T>(queue: &std::sync::Mutex<Vec<T>>) -> Vec<T> {
+    queue
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_else(|e| std::mem::take(&mut *e.into_inner()))
+}
+
 /// The one-shot install-report channel a backend fires the moment it has
 /// attempted the OS tray install, *before* entering its blocking message pump,
 /// so the spawning thread learns the real install result synchronously instead
@@ -356,6 +368,37 @@ pub(crate) fn spawn_tray_thread(
         Err(_) => Err(crate::error::Error::TrayInstall(
             "muri tray thread exited before reporting the tray install".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::drain_locked;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn drain_locked_takes_and_empties_the_queue() {
+        let q = Mutex::new(vec![1, 2, 3]);
+        assert_eq!(drain_locked(&q), vec![1, 2, 3]);
+        assert!(
+            drain_locked(&q).is_empty(),
+            "second drain sees an empty queue"
+        );
+    }
+
+    #[test]
+    fn drain_locked_recovers_a_poisoned_queue_instead_of_dropping_it() {
+        let q = Arc::new(Mutex::new(vec![7, 8, 9]));
+        // Poison the lock: panic while a guard is held on another thread.
+        let q2 = Arc::clone(&q);
+        let _ = std::thread::spawn(move || {
+            let _guard = q2.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(q.is_poisoned(), "precondition: the lock is poisoned");
+        // The queued items must survive the poison, not be silently dropped.
+        assert_eq!(drain_locked(&q), vec![7, 8, 9]);
     }
 }
 

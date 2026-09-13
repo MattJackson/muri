@@ -236,12 +236,13 @@ fn row_leading_width(row: &Row, gap: f32) -> f32 {
 }
 
 /// Whether the menu reserves a shared leading gutter: true when any row is
-/// **checkable** — `checked.is_some()`, per the `Row::checked` contract that
-/// "`Some(true/false)` shows a check column" — so checked *and*
-/// currently-unchecked-but-checkable rows align their text past the gutter
-/// (native `NSMenu` look). Testing only `Some(true)` would leave an
-/// all-unchecked-but-checkable menu with no reserved column, so every row's
-/// text would jump right the instant one is toggled on (#16 reconciliation).
+/// **checkable** — `checked.is_some()` (per the `Row::checked` contract that
+/// "`Some(true/false)` shows a check column") *or* carries a leading
+/// `Icon::Checkmark` — so checked, currently-unchecked-but-checkable, and
+/// checkmark-led rows align their text past the gutter (native `NSMenu` look).
+/// Testing only `Some(true)` would leave an all-unchecked-but-checkable menu
+/// with no reserved column, so every row's text would jump right the instant one
+/// is toggled on (#16 reconciliation).
 fn menu_reserves_gutter(menu: &Menu) -> bool {
     menu.items.iter().any(|it| {
         item_row(it)
@@ -1380,6 +1381,29 @@ mod tests {
         assert_eq!(w_large, d.measure_text(text, &large));
         assert!(w_large > w_small, "a larger font must measure wider");
         assert_eq!(cache.len(), 2);
+    }
+
+    /// Two fonts identical except for `optical_size` must not collide in the
+    /// measure cache: `measure_text` shapes at `opsz` (#77), so their widths can
+    /// differ and the verified key must treat them as distinct — otherwise a
+    /// hit for one returns the other's width (round-2 audit regression). Tested
+    /// at the key level because the headless DejaVu face has no `opsz` axis, so a
+    /// real drawer can't exhibit the width difference.
+    #[test]
+    fn measure_key_distinguishes_optical_size() {
+        let a = Font::system(13.0, Weight::Regular).with_optical_size(17.0);
+        let b = Font::system(13.0, Weight::Regular).with_optical_size(28.0);
+        let key_a = MeasureKey::new("Menu", &a);
+        assert!(key_a.matches("Menu", &a));
+        assert!(
+            !key_a.matches("Menu", &b),
+            "a different optical size must not verify as a match"
+        );
+        assert_ne!(
+            measure_key_hash("Menu", &a),
+            measure_key_hash("Menu", &b),
+            "optical size must be part of the hash so the two don't share a bucket"
+        );
     }
 
     /// A drawer that records the geometry of every draw op, with deterministic

@@ -524,10 +524,7 @@ fn run_sni_loop_impl<const M: bool>(
     loop {
         // Apply everything posted so far (posts made before the loop came up are
         // buffered here already).
-        let pending: Vec<TrayCommand> = commands
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
+        let pending: Vec<TrayCommand> = super::drain_locked(&commands);
         // Apply every non-Shutdown command in the batch FIRST, then tear down if a
         // Shutdown was present — so a `[Shutdown, SetIcon]` interleaving still
         // applies SetIcon before teardown instead of discarding it (#F1).

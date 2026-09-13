@@ -5,7 +5,8 @@
 //! This is the heart of muri's "flush-right value with no chevron column"
 //! promise, and it is deliberately free of any text-measurement, GPU, or OS
 //! dependency: the caller supplies each segment's already-measured intrinsic
-//! width (from `cosmic-text` in the real backend, or a fixed value in tests),
+//! width (from muri's own text layer via `SceneDrawer::measure_text` in the real
+//! backend, or a fixed value in tests),
 //! and this module returns where every box and every glyph run starts.
 
 use crate::menu::{Align, Flex};

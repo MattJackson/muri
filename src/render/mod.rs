@@ -660,6 +660,11 @@ const SHAPER_INSTANCE_CACHE_CAP: usize = 256;
 /// overflow like the other keyed caches rather than growing without limit.
 const V_METRICS_CACHE_CAP: usize = 256;
 
+/// Cap for [`FontStore::opsz_cache`]. Keyed on `(FaceId, points-bits)` whose
+/// size dimension is unbounded, so it clears on overflow like the other keyed
+/// caches.
+const OPSZ_CACHE_CAP: usize = 256;
+
 /// muri's owned text layer: the font database, pinned UI family, per-face byte
 /// cache, shaping/glyph rasterization caches, and fallback order. All lookup
 /// state is behind [`RefCell`] so `&self` methods can shape without `&mut self`.
@@ -722,6 +727,14 @@ struct FontStore {
     /// last per-run font parse. Bounded by [`V_METRICS_CACHE_CAP`] (its `px-bits`
     /// key dimension is unbounded), cleared on overflow like the other caches.
     v_metrics_cache: RefCell<FxHashMap<(FaceId, u32), (f32, f32)>>,
+    /// Memoized optical-size resolution per `(FaceId, points-bits)` (#77).
+    /// `face_opsz` otherwise re-parsed the font (`FontRef::from_index` + variation
+    /// scan) on every `shape` cache miss for an `opsz`-carrying request — and it
+    /// runs *before* the `shaper_instances` lookup (its result is part of that
+    /// key), so the instance cache can't absorb it. Memoized here like
+    /// `embolden_cache`, bounded by [`OPSZ_CACHE_CAP`] (unbounded `points`
+    /// dimension), caching the `None` (no-axis) result too.
+    opsz_cache: RefCell<FxHashMap<(FaceId, u32), Option<f32>>>,
     /// Reused scratch for `shape`'s face segmentation, so the per-run
     /// `(FaceId, String)` buffer (and its `String` allocations) is recycled
     /// across shaping runs instead of freshly allocated each call (#3).
@@ -764,6 +777,7 @@ impl FontStore {
             face_cache: RefCell::new(FxHashMap::default()),
             shaped: RefCell::new(FxHashMap::default()),
             v_metrics_cache: RefCell::new(FxHashMap::default()),
+            opsz_cache: RefCell::new(FxHashMap::default()),
             seg_scratch: RefCell::new(Vec::new()),
             #[cfg(test)]
             shape_misses: std::cell::Cell::new(0),
@@ -917,11 +931,22 @@ impl FontStore {
     /// mirrors CoreText: a 13pt menu on SFNS (axis min 17) resolves to the *Text*
     /// master at 17, not the default *Display* master at 28.
     fn face_opsz(&self, id: FaceId, points: f32) -> Option<f32> {
-        let bytes = self.face_bytes(id)?;
-        let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
-        font.variations()
-            .find_by_tag(OPSZ_AXIS_TAG)
-            .map(|axis| points.clamp(axis.min_value(), axis.max_value()))
+        let key = (id, points.to_bits());
+        if let Some(&cached) = self.opsz_cache.borrow().get(&key) {
+            return cached;
+        }
+        let resolved = self.face_bytes(id).and_then(|bytes| {
+            let font = FontRef::from_index(&bytes.data, bytes.index as usize)?;
+            font.variations()
+                .find_by_tag(OPSZ_AXIS_TAG)
+                .map(|axis| points.clamp(axis.min_value(), axis.max_value()))
+        });
+        let mut cache = self.opsz_cache.borrow_mut();
+        if cache.len() >= OPSZ_CACHE_CAP && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, resolved);
+        resolved
     }
 
     /// Diagnostic (#65): a one-line description of the resolved face — its `fontdb`
@@ -2187,6 +2212,24 @@ mod tests {
         assert!(
             len <= EMBOLDEN_CACHE_CAP,
             "embolden cache must clear on overflow, got {len} > {EMBOLDEN_CACHE_CAP}"
+        );
+        assert!(len >= 1, "it keeps caching after the clear");
+    }
+
+    #[test]
+    fn opsz_cache_clears_when_it_exceeds_its_cap() {
+        let d = RasterDrawer::new_headless(1.0);
+        let id = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        // Distinct point sizes are distinct `(face, points-bits)` keys (the
+        // headless face has no opsz axis, so each resolves to a cached `None`);
+        // drive one past the cap so the clear-on-overflow guard fires.
+        for i in 0..=(OPSZ_CACHE_CAP as u32) {
+            let _ = d.fonts.face_opsz(id, 8.0 + i as f32 * 0.5);
+        }
+        let len = d.fonts.opsz_cache.borrow().len();
+        assert!(
+            len <= OPSZ_CACHE_CAP,
+            "opsz cache must clear on overflow, got {len} > {OPSZ_CACHE_CAP}"
         );
         assert!(len >= 1, "it keeps caching after the clear");
     }
