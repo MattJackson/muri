@@ -300,11 +300,28 @@ fn luma_scaled(r: u8, g: u8, b: u8) -> u32 {
 /// blend already matches native there. Applied only to glyph masks — solid fills,
 /// separators, and icons keep the plain linear blend.
 #[inline]
+/// Convenience wrapper that computes the foreground luma inline. The hot glyph
+/// blit uses [`smooth_glyph_coverage_fg_lum`] with the luma hoisted out of its
+/// per-pixel loop; this form is kept for tests that check a single pixel.
+#[cfg(test)]
 pub(crate) fn smooth_glyph_coverage(cov: u8, fg: Rgba, dst: &[u8], off: usize) -> u8 {
+    smooth_glyph_coverage_fg_lum(cov, fg_luma(fg), dst, off)
+}
+
+/// The foreground luma (see [`smooth_glyph_coverage`]) for a run color, computed
+/// once so the per-pixel glyph blit can hoist it out of its inner loop (`fg` is
+/// constant for the whole run). Perf: avoids recomputing the constant weighted
+/// luma on every anti-aliased glyph pixel.
+pub(crate) fn fg_luma(fg: Rgba) -> u32 {
+    luma_scaled(fg.r, fg.g, fg.b)
+}
+
+/// [`smooth_glyph_coverage`] with the foreground luma precomputed by the caller
+/// (via [`fg_luma`]). Only `bg_lum` varies per pixel.
+pub(crate) fn smooth_glyph_coverage_fg_lum(cov: u8, fg_lum: u32, dst: &[u8], off: usize) -> u8 {
     if cov == 0 || cov == 255 {
         return cov;
     }
-    let fg_lum = luma_scaled(fg.r, fg.g, fg.b);
     let bg_lum = luma_scaled(dst[off], dst[off + 1], dst[off + 2]);
     if fg_lum > bg_lum {
         LIGHT_ON_DARK_COVERAGE[cov as usize]

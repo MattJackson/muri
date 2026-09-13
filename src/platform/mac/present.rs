@@ -21,6 +21,18 @@ use objc2_quartz_core::CATransaction;
 
 use crate::render::Framebuffer;
 
+/// The device-RGB color space, created once per thread and cheaply retained on
+/// each present. The color space is constant, so recreating it on every frame
+/// (the present runs on every hover row-change) was pure waste; a `CFRetained`
+/// clone is a refcount bump, not a rebuild. The present path is main-thread only,
+/// so a `thread_local` sidesteps `Send`/`Sync` on the CF wrapper.
+fn device_rgb_color_space() -> Option<CFRetained<CGColorSpace>> {
+    thread_local! {
+        static DEVICE_RGB: Option<CFRetained<CGColorSpace>> = CGColorSpace::new_device_rgb();
+    }
+    DEVICE_RGB.with(|cs| cs.clone())
+}
+
 /// Build a `CGImage` from a premultiplied-RGBA framebuffer. The returned image
 /// retains a copy of the pixel bytes (via the `CFData` its data provider
 /// holds), so it stays valid after the framebuffer is dropped; keep it alive for
@@ -35,7 +47,7 @@ pub(super) fn framebuffer_to_cgimage(fb: &Framebuffer) -> Option<CFRetained<CGIm
     // `CFDataCreate` copies the bytes, so the framebuffer may be freed afterwards.
     let cfdata = unsafe { CFData::new(None, data.as_ptr(), data.len() as isize) }?;
     let provider = CGDataProvider::with_cf_data(Some(&cfdata))?;
-    let color_space = CGColorSpace::new_device_rgb()?;
+    let color_space = device_rgb_color_space()?;
     // Alpha last (RGBA), premultiplied — matches the framebuffer's pixel format.
     let bitmap_info = CGBitmapInfo(CGImageAlphaInfo::PremultipliedLast.0);
     unsafe {

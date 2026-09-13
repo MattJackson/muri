@@ -825,7 +825,7 @@ impl PopupSession<'_> {
                 theme.label = label;
                 theme.secondary_label = secondary;
             }
-            if let Some(font) = read_system_menu_font() {
+            if let Some(font) = cached_system_menu_font() {
                 font.apply_size_to(&mut theme);
             }
             // Live native menu chrome, read once from a real `NSMenu` and cached
@@ -1812,7 +1812,7 @@ impl Platform for MacPlatform {
 
     fn system_menu_font(&self) -> Option<crate::platform::SystemFont> {
         self.require_mtm().ok()?;
-        read_system_menu_font()
+        cached_system_menu_font().clone()
     }
 
     fn system_palette(&self) -> crate::platform::SystemPalette {
@@ -2252,6 +2252,19 @@ fn pack_dual_face(regular: Vec<u8>, bold: Vec<u8>) -> crate::platform::SystemFon
 /// actual system face (falling back to the family name if the file has no URL).
 /// `None` off the main thread or when neither a file nor a family resolves.
 /// Callers must already be on the main thread (AppKit).
+/// The system menu font, read once and memoized for the process. The underlying
+/// read is a disk read of the SF font file (+ a `swash` parse to detect the
+/// `wght` axis, and possibly a second read of a discrete bold), which is stable
+/// for the process — yet `theme()` ran it on EVERY hover redraw. Caching it here
+/// removes that filesystem I/O + font parse from the hover hot path. Returns a
+/// borrow so the common `theme()` caller (which only needs the point size) never
+/// clones the packed font bytes.
+fn cached_system_menu_font() -> &'static Option<crate::platform::SystemFont> {
+    static CACHE: std::sync::OnceLock<Option<crate::platform::SystemFont>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(read_system_menu_font)
+}
+
 fn read_system_menu_font() -> Option<crate::platform::SystemFont> {
     use crate::platform::{SystemFont, SystemFontSource};
     let mtm = MainThreadMarker::new()?;

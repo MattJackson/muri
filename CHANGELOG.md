@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-12
+
+### Performance
+
+Per-frame render/repaint latency and allocation cut across the whole hot path
+(no public API change, pixel-identical output — all goldens unchanged). Driven by
+a four-lens audit of the render hot path, paint/layout, cache design, and the
+macOS present/redraw path.
+
+- **Glyph cache no longer thrashes.** On overflow the glyph-bitmap cache did a
+  wholesale `clear()`, dumping all entries — under a multi-size/weight working set
+  (Retina px × bold headers × optical masters, summed over the process-wide shared
+  store) it crossed the 512 cap and then re-rasterized much of the menu *every
+  frame*. Now evicts a single entry and the cap is raised (512→4096); the shaped-run
+  cache gets the same evict-one treatment (cap 1024→2048). This is the biggest win
+  against "slow under load."
+- **No more per-hover disk read.** `theme()` (re-resolved on every hover row-change)
+  called `read_system_menu_font()`, which did a filesystem read of the SF font file
+  + a `swash` parse on every call — even though the hover path only needs the point
+  size. The read is now memoized once per process.
+- **`v_metrics` no longer re-parses the font every run.** Ascent/descent are cached
+  per `(face, px)` instead of re-opening and re-reading the font's metric tables on
+  every text run, every frame.
+- **Faster cache hashing.** The internal font/glyph caches (glyphs, shaped, coverage,
+  face/fallback/embolden, …) switched from SipHash to a zero-dependency inline
+  FxHasher — these are never fed untrusted input, and SipHash's fixed cost dominated
+  on the per-glyph/per-char/per-run lookups.
+- **Tighter glyph blit.** The per-pixel framebuffer bounds check is replaced by a
+  once-per-glyph clip-rect, the destination offset advances incrementally instead of
+  a multiply per pixel, and the constant foreground luma for polarity-aware smoothing
+  is hoisted out of the inner loop.
+- **Cheaper present + diagnostic.** The device-RGB `CGColorSpace` is created once per
+  thread instead of on every present; the `MURI_DEBUG_TEXT` env flag is resolved once
+  instead of taking a process env lock + allocating per text run per frame.
+
+### Diagnostics
+
+- **`MURI_DEBUG_CURSOR` (#70).** Traces which cursor callbacks fire (`mouseEntered`,
+  `cursorUpdate`) and whether the panel is key, to diagnose the persistent-I-beam
+  report on-device — a non-activating panel whose app isn't frontmost can lose cursor
+  ownership to the active app regardless of muri's `NSCursor` calls. Inert unless set.
+
 ## [0.13.0] - 2026-09-12
 
 ### Added

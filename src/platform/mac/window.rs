@@ -31,6 +31,16 @@ use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize
 use super::input::translate_ns_key;
 use super::{UiEvent, WindowKind};
 
+/// Whether the `MURI_DEBUG_CURSOR` diagnostic is enabled (resolved once). Gates
+/// the cursor-handler trace used to diagnose the persistent-I-beam report (#70)
+/// on a real device: it reports which cursor callbacks fire and whether the
+/// panel is key, since a non-activating panel whose app isn't frontmost can lose
+/// cursor ownership to the active app regardless of our `NSCursor` calls.
+fn debug_cursor_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MURI_DEBUG_CURSOR").is_some())
+}
+
 define_class!(
     // The layer-backed content view muri paints into and that receives mouse
     // and keyboard events for its panel. Its ivar records whether it belongs to
@@ -105,6 +115,10 @@ define_class!(
             // `CursorUpdate` option independent of key state and movement, so
             // forcing the arrow here closes that gap. Keep the other handlers.
             NSCursor::arrowCursor().set();
+            if debug_cursor_enabled() {
+                let key = self.window().map(|w| w.isKeyWindow()).unwrap_or(false);
+                eprintln!("MURI_CURSOR handler=cursorUpdate window_key={key} kind={:?}", self.ivars());
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -126,6 +140,10 @@ define_class!(
             // between moves, so the menu flashed a text caret (#70). `push` makes
             // the arrow authoritative until the matching `pop` in `mouseExited:`.
             NSCursor::arrowCursor().push();
+            if debug_cursor_enabled() {
+                let key = self.window().map(|w| w.isKeyWindow()).unwrap_or(false);
+                eprintln!("MURI_CURSOR handler=mouseEntered window_key={key} kind={:?}", self.ivars());
+            }
         }
 
         #[unsafe(method(mouseExited:))]

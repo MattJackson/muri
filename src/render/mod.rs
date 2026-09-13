@@ -60,8 +60,9 @@ pub use svg::rasterize_svg;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use fontdb::{
     Database, Family as DbFamily, Query, Source as DbSource, Style as DbStyle, Weight as DbWeight,
@@ -80,6 +81,70 @@ pub(crate) use raster::encode_rgba_png;
 
 /// A decoded PNG icon: straight-alpha RGBA bytes plus its `(width, height)`.
 type DecodedIcon = Rc<(Vec<u8>, u32, u32)>;
+
+/// A fast, non-cryptographic hasher (the well-known FxHash / rustc-hash
+/// algorithm) for muri's INTERNAL font/glyph caches. Those caches are keyed on
+/// tiny fixed-size values (`GlyphKey`, `(FaceId, char)`, a `u64` shape hash) and
+/// looked up per-glyph / per-char / per-run, per frame — a regime where std's
+/// HashDoS-resistant SipHash is pure overhead (fixed setup + finalize cost that
+/// dominates for small keys). FxHash is a couple of multiplies. The caches never
+/// see untrusted network input, so dropping HashDoS resistance is safe here.
+/// Zero dependencies, MSRV-safe.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    #[inline]
+    fn add(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(Self::SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rem.len()].copy_from_slice(rem);
+            self.add(u64::from_le_bytes(buf));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// [`HashMap`] specialized to the fast internal [`FxHasher`].
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// Cache key for a shaped run: the text, the resolved primary face, the OpenType
 /// weight, and the device pixel size (as raw `f32` bits for exact equality).
@@ -606,11 +671,17 @@ struct FaceBytes {
 /// `&self` [`SceneDrawer::measure_text`]/[`SceneDrawer::line_height`] methods can
 /// shape without a `&mut self`.
 /// Cap on [`FontStore::glyphs`]'s entry count (see [`FontStore::glyph_image`]).
-const GLYPH_CACHE_CAP: usize = 512;
+/// Sized to comfortably exceed a rich menu's working set across the dimensions
+/// the [`GlyphKey`] splits on (glyph × device-size × weight × optical master),
+/// summed over all concurrently open menus/submenus that share this process-wide
+/// store — so the bound is effectively never hit in normal use and overflow
+/// evicts a single entry rather than thrashing (a `GlyphImage` is a small mask).
+const GLYPH_CACHE_CAP: usize = 4096;
 
 /// Cap on [`FontStore::shaped`]'s entry count. A menu has a few dozen distinct
-/// runs; the cap only bounds a long-lived drawer whose text changes every tick.
-const SHAPED_CACHE_CAP: usize = 1024;
+/// runs; the cap only bounds a long-lived drawer whose text changes every tick,
+/// and overflow evicts one entry rather than dumping every memoized run.
+const SHAPED_CACHE_CAP: usize = 2048;
 
 /// Cap on [`FontStore::coverage`]'s entry count (`(FaceId, char)` → covered).
 /// Like the other resolution caches this is process-wide + thread-local, so a
@@ -652,43 +723,43 @@ struct FontStore {
     /// bold request to a different family's face than the regular one, which is
     /// the "different face for bold" glitch (spec §7.1).
     ui_family: Option<String>,
-    face_data: RefCell<HashMap<FaceId, Rc<FaceBytes>>>,
-    glyphs: RefCell<HashMap<GlyphKey, Option<Rc<GlyphImage>>>>,
+    face_data: RefCell<FxHashMap<FaceId, Rc<FaceBytes>>>,
+    glyphs: RefCell<FxHashMap<GlyphKey, Option<Rc<GlyphImage>>>>,
     /// Compiled harfrust shaping tables (GSUB/GPOS/cmap caches), one per face,
     /// built once and reused across every `shape` call. `ShaperData::new` is the
     /// expensive step (it compiles the font's OpenType/AAT tables); rebuilding it
     /// per run per frame made a single menu repaint take ~0.5s on real fonts, so
     /// hover-highlight felt laggy. Cached here, only the cheap per-call `Shaper`
     /// is rebuilt. Bounded by the handful of distinct faces a menu uses.
-    shaper_data: RefCell<HashMap<FaceId, Rc<ShaperData>>>,
+    shaper_data: RefCell<FxHashMap<FaceId, Rc<ShaperData>>>,
     /// Memoized variable-font shaper instances per `(face, emboldening, opsz-bits)`
     /// (#13/#77). `ShaperInstance::from_variations` reparses the font's variation
     /// tables and so is rebuilt on *every* `shape` cache miss for a variable run
     /// even though it depends only on the face, its [`Embolden`], and the optical
     /// master; memoized here (mirroring how `shaper_data` is memoized per face),
     /// bounded by [`SHAPER_INSTANCE_CACHE_CAP`] and cleared wholesale on overflow.
-    shaper_instances: RefCell<HashMap<(FaceId, Embolden, u32), Rc<ShaperInstance>>>,
+    shaper_instances: RefCell<FxHashMap<(FaceId, Embolden, u32), Rc<ShaperInstance>>>,
     /// Memoized codepoint coverage per `(face, char)`. `face_has_glyph` otherwise
     /// re-parses the font and its cmap table on every call — and it is called per
     /// char, per candidate face, per render. Caching it (with the fallback cache
     /// below) is what keeps a hover-highlight repaint from re-scanning fonts.
-    coverage: RefCell<HashMap<(FaceId, char), bool>>,
+    coverage: RefCell<FxHashMap<(FaceId, char), bool>>,
     /// Memoized font-fallback decision per `(char, ot_weight)`. `fallback_face_for`
     /// otherwise scans the *entire system font DB* (loading + cmap-parsing each
     /// face) for every codepoint the primary face lacks, on every render — the
     /// dominant cost of a laggy menu with symbol/emoji/logo glyphs. The result is
     /// stable for a given char+weight, so it is cached across frames.
-    fallback_cache: RefCell<HashMap<(char, u16), Option<FaceId>>>,
+    fallback_cache: RefCell<FxHashMap<(char, u16), Option<FaceId>>>,
     /// Memoized emboldening decision per `(face, ot_weight)` (#63). Computing it
     /// parses the face to check for a `wght` variation axis, so — like the other
     /// resolution caches — the result is memoized (it's stable for the drawer's
     /// lifetime) rather than recomputed per glyph per repaint.
-    embolden_cache: RefCell<HashMap<(FaceId, u16), Embolden>>,
+    embolden_cache: RefCell<FxHashMap<(FaceId, u16), Embolden>>,
     /// Memoized primary-face resolution per `(family, ot_weight)`. `resolve_face`
     /// otherwise runs a `fontdb::Database::query` scan on every measure_text /
     /// draw_text call (once per segment per row, every repaint); the result is
     /// stable for the drawer's lifetime, so it is cached like the others.
-    face_cache: RefCell<HashMap<(FontFamily, u16), Option<FaceId>>>,
+    face_cache: RefCell<FxHashMap<(FontFamily, u16), Option<FaceId>>>,
     /// Memoized shaped runs, keyed by a **hash** of `(text, primary face,
     /// ot_weight, px-bits, tracking-bits)` so the hot lookup path (measure +
     /// draw both call `shape`, and a hover repaint re-shapes unchanged text)
@@ -699,7 +770,13 @@ struct FontStore {
     /// new entry (#4). Bounded by [`SHAPED_CACHE_CAP`] (cleared wholesale on
     /// overflow) so a live menu whose text changes each tick can't grow it
     /// without limit.
-    shaped: RefCell<HashMap<u64, (ShapeKey, Rc<ShapedLine>)>>,
+    shaped: RefCell<FxHashMap<u64, (ShapeKey, Rc<ShapedLine>)>>,
+    /// Memoized vertical metrics `(ascent, descent)` per `(FaceId, px-bits)`.
+    /// `v_metrics` otherwise re-parsed the font (`FontRef::from_index` + read the
+    /// `hhea`/`OS/2` tables + scale) on EVERY `draw_text` run, every frame, even on
+    /// a warm repaint where `shape`/`glyphs` are already cached — this closes that
+    /// last per-run font parse.
+    v_metrics_cache: RefCell<FxHashMap<(FaceId, u32), (f32, f32)>>,
     /// Reused scratch for `shape`'s face segmentation, so the per-run
     /// `(FaceId, String)` buffer (and its `String` allocations) is recycled
     /// across shaping runs instead of freshly allocated each call (#3).
@@ -737,15 +814,16 @@ impl FontStore {
         FontStore {
             db,
             ui_family,
-            face_data: RefCell::new(HashMap::new()),
-            glyphs: RefCell::new(HashMap::new()),
-            shaper_data: RefCell::new(HashMap::new()),
-            shaper_instances: RefCell::new(HashMap::new()),
-            coverage: RefCell::new(HashMap::new()),
-            fallback_cache: RefCell::new(HashMap::new()),
-            embolden_cache: RefCell::new(HashMap::new()),
-            face_cache: RefCell::new(HashMap::new()),
-            shaped: RefCell::new(HashMap::new()),
+            face_data: RefCell::new(FxHashMap::default()),
+            glyphs: RefCell::new(FxHashMap::default()),
+            shaper_data: RefCell::new(FxHashMap::default()),
+            shaper_instances: RefCell::new(FxHashMap::default()),
+            coverage: RefCell::new(FxHashMap::default()),
+            fallback_cache: RefCell::new(FxHashMap::default()),
+            embolden_cache: RefCell::new(FxHashMap::default()),
+            face_cache: RefCell::new(FxHashMap::default()),
+            shaped: RefCell::new(FxHashMap::default()),
+            v_metrics_cache: RefCell::new(FxHashMap::default()),
             seg_scratch: RefCell::new(Vec::new()),
             #[cfg(test)]
             shape_misses: std::cell::Cell::new(0),
@@ -1238,8 +1316,12 @@ impl FontStore {
         #[cfg(test)]
         self.owned_key_builds.set(self.owned_key_builds.get() + 1);
         let mut cache = self.shaped.borrow_mut();
-        if cache.len() >= SHAPED_CACHE_CAP {
-            cache.clear();
+        if cache.len() >= SHAPED_CACHE_CAP && !cache.contains_key(&hash) {
+            // Evict one memoized run rather than dumping all of them (which would
+            // force a full re-shape of every still-visible row next frame).
+            if let Some(&victim) = cache.keys().next() {
+                cache.remove(&victim);
+            }
         }
         cache.insert(hash, (key, Rc::clone(&line)));
         line
@@ -1249,21 +1331,29 @@ impl FontStore {
     /// used to center a single line within its line box. Falls back to a
     /// reasonable ratio if the face has no usable metrics.
     fn v_metrics(&self, primary: Option<FaceId>, px: f32) -> (f32, f32) {
-        if let Some(id) = primary {
-            if let Some(bytes) = self.face_bytes(id) {
-                if let Some(face) = FontRef::from_index(&bytes.data, bytes.index as usize) {
-                    let m = face.metrics(&[]);
-                    if m.units_per_em > 0 {
-                        // swash reports ascent/descent as positive distances from
-                        // the baseline; the caller expects a negative descent
-                        // (as `rustybuzz`'s `descender()` returned).
-                        let sm = m.scale(px);
-                        return (sm.ascent, -sm.descent);
-                    }
-                }
-            }
+        let Some(id) = primary else {
+            return (px * 0.8, -px * 0.2);
+        };
+        let key = (id, px.to_bits());
+        if let Some(&cached) = self.v_metrics_cache.borrow().get(&key) {
+            return cached;
         }
-        (px * 0.8, -px * 0.2)
+        let metrics = self
+            .face_bytes(id)
+            .and_then(|bytes| {
+                let face = FontRef::from_index(&bytes.data, bytes.index as usize)?;
+                let m = face.metrics(&[]);
+                (m.units_per_em > 0).then(|| {
+                    // swash reports ascent/descent as positive distances from the
+                    // baseline; the caller expects a negative descent (as
+                    // `rustybuzz`'s `descender()` returned).
+                    let sm = m.scale(px);
+                    (sm.ascent, -sm.descent)
+                })
+            })
+            .unwrap_or((px * 0.8, -px * 0.2));
+        self.v_metrics_cache.borrow_mut().insert(key, metrics);
+        metrics
     }
 
     /// A rasterized glyph, cached across frames (replaces `SwashCache`).
@@ -1298,7 +1388,14 @@ impl FontStore {
         let rendered = self.render_glyph(face_id, glyph, px, emb, opsz);
         let mut cache = self.glyphs.borrow_mut();
         if cache.len() >= GLYPH_CACHE_CAP && !cache.contains_key(&key) {
-            cache.clear();
+            // Evict ONE entry, never the whole cache: a wholesale clear at the cap
+            // caused per-frame re-rasterization thrash under a multi-size/weight
+            // working set (glyph raster is the store's most expensive per-entry
+            // work), cold-flushing every still-visible glyph. One eviction keeps
+            // the cache bounded without the thrash cliff.
+            if let Some(&victim) = cache.keys().next() {
+                cache.remove(&victim);
+            }
         }
         cache.insert(key, rendered.clone());
         rendered
@@ -1362,6 +1459,15 @@ impl FontStore {
     }
 }
 
+/// Whether the `MURI_DEBUG_TEXT` diagnostic is enabled, resolved ONCE per process.
+/// `draw_text` runs once per text run per repaint, so calling `std::env::var_os`
+/// there took a process-global env lock and allocated an `OsString` on every run,
+/// every frame, purely to gate a normally-off diagnostic — this caches the flag.
+fn debug_text_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MURI_DEBUG_TEXT").is_some())
+}
+
 /// Hash the components of a [`ShapeKey`] from borrowed parts, so `shape`'s cache
 /// lookup never allocates an owned `String` (#4). The `shaped` map keys on this
 /// hash and verifies the stored owned key on a hit, so a collision only costs a
@@ -1374,8 +1480,12 @@ fn shape_key_hash(
     tracking_bits: u32,
     opsz_bits: u32,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hash;
+    // Fast internal hash (not HashDoS-sensitive): the `shaped` map keys on this
+    // u64 and verifies the retained owned key on a hit, so collisions only cost a
+    // re-shape. SipHash's fixed cost dominated here since this runs per run, twice
+    // per frame (measure + draw).
+    let mut h = FxHasher::default();
     text.hash(&mut h);
     primary.hash(&mut h);
     ot_weight.hash(&mut h);
@@ -1838,7 +1948,7 @@ impl SceneDrawer for RasterDrawer {
         // renders bold/tracking differently than the offscreen renderer, which no
         // static trace explains — so print the exact per-run inputs on the real
         // live path. Inert unless `MURI_DEBUG_TEXT` is set; removed once diagnosed.
-        if std::env::var_os("MURI_DEBUG_TEXT").is_some() {
+        if debug_text_enabled() {
             let emb = primary.map(|f| self.fonts.face_embolden(f, ot_weight));
             let face_dbg = primary
                 .map(|f| self.fonts.face_debug(f))
@@ -1871,7 +1981,7 @@ impl SceneDrawer for RasterDrawer {
         // between the (correct) `Variable(700)` decision and the on-screen pixels,
         // so this confirms whether the bold treatment survives to `glyph_image`.
         // Inert unless `MURI_DEBUG_TEXT` is set.
-        if std::env::var_os("MURI_DEBUG_TEXT").is_some() {
+        if debug_text_enabled() {
             if let Some(g0) = shaped.glyphs.first() {
                 eprintln!(
                     "MURI_RASTER text={:?} glyphs={} first_face={:?} first_emb={:?} \
@@ -2027,54 +2137,52 @@ fn blit_glyph(
 ) {
     let iw = image.width as i32;
     let ih = image.height as i32;
+    // Clip the glyph against the framebuffer ONCE (per glyph) rather than testing
+    // every pixel: the visible source rows/cols are the intersection of the glyph
+    // rect with the framebuffer, so the inner loops carry no per-pixel bounds
+    // branch and the destination offset advances incrementally.
+    let col0 = (-gx).max(0);
+    let col1 = iw.min(pw - gx);
+    let row0 = (-gy).max(0);
+    let row1 = ih.min(ph - gy);
+    if col0 >= col1 || row0 >= row1 {
+        return;
+    }
     match image.content {
         Content::Mask | Content::SubpixelMask => {
-            for row in 0..ih {
-                for col in 0..iw {
-                    let cov = image.data[(row * iw + col) as usize];
-                    if cov == 0 {
-                        continue;
+            // `color` is constant for the whole run, so its luma is computed once
+            // here instead of on every anti-aliased pixel (#perf).
+            let fg_lum = raster::fg_luma(color);
+            for row in row0..row1 {
+                let src_row = (row * iw) as usize;
+                let mut off = (((gy + row) * pw + (gx + col0)) * 4) as usize;
+                for col in col0..col1 {
+                    let cov = image.data[src_row + col as usize];
+                    if cov != 0 {
+                        // Polarity-aware font smoothing (#71): thin the AA coverage
+                        // of light-on-dark glyph pixels so strokes don't overshoot
+                        // vs macOS's luminance-dependent smoothing. Dark-on-light is
+                        // left on the plain linear blend.
+                        let cov = raster::smooth_glyph_coverage_fg_lum(cov, fg_lum, pixels, off);
+                        let a = (cov as u16 * color.a as u16 / 255) as u8;
+                        raster::blend_pixel(pixels, off, color, a);
                     }
-                    let px = gx + col;
-                    let py = gy + row;
-                    if px < 0 || py < 0 || px >= pw || py >= ph {
-                        continue;
-                    }
-                    let off = ((py * pw + px) * 4) as usize;
-                    // Polarity-aware font smoothing (#71): thin the AA coverage of
-                    // light-on-dark glyph pixels so strokes don't overshoot vs
-                    // macOS's luminance-dependent smoothing. Dark-on-light is left
-                    // on the plain linear blend.
-                    let cov = raster::smooth_glyph_coverage(cov, color, pixels, off);
-                    let a = (cov as u16 * color.a as u16 / 255) as u8;
-                    raster::blend_pixel(pixels, off, color, a);
+                    off += 4;
                 }
             }
         }
         Content::Color => {
-            for row in 0..ih {
-                for col in 0..iw {
-                    let idx = ((row * iw + col) * 4) as usize;
-                    let (r, g, b, a) = (
-                        image.data[idx],
-                        image.data[idx + 1],
-                        image.data[idx + 2],
-                        image.data[idx + 3],
-                    );
-                    if a == 0 {
-                        continue;
+            for row in row0..row1 {
+                let src_row = (row * iw) as usize;
+                let mut off = (((gy + row) * pw + (gx + col0)) * 4) as usize;
+                for col in col0..col1 {
+                    let idx = (src_row + col as usize) * 4;
+                    let a = image.data[idx + 3];
+                    if a != 0 {
+                        let (r, g, b) = (image.data[idx], image.data[idx + 1], image.data[idx + 2]);
+                        raster::blend_pixel(pixels, off, Rgba::new(r, g, b, 255), a);
                     }
-                    let px = gx + col;
-                    let py = gy + row;
-                    if px < 0 || py < 0 || px >= pw || py >= ph {
-                        continue;
-                    }
-                    raster::blend_pixel(
-                        pixels,
-                        ((py * pw + px) * 4) as usize,
-                        Rgba::new(r, g, b, 255),
-                        a,
-                    );
+                    off += 4;
                 }
             }
         }
