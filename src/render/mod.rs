@@ -655,6 +655,11 @@ const FACE_CACHE_CAP: usize = 256;
 /// cache miss; bounded and cleared on overflow.
 const SHAPER_INSTANCE_CACHE_CAP: usize = 256;
 
+/// Cap for [`FontStore::v_metrics_cache`]. Keyed on `(FaceId, px-bits)`; unlike
+/// the face-only caches its size dimension is unbounded, so it clears on
+/// overflow like the other keyed caches rather than growing without limit.
+const V_METRICS_CACHE_CAP: usize = 256;
+
 /// muri's owned text layer: the font database, pinned UI family, per-face byte
 /// cache, shaping/glyph rasterization caches, and fallback order. All lookup
 /// state is behind [`RefCell`] so `&self` methods can shape without `&mut self`.
@@ -714,7 +719,8 @@ struct FontStore {
     /// `v_metrics` otherwise re-parsed the font (`FontRef::from_index` + read the
     /// `hhea`/`OS/2` tables + scale) on EVERY `draw_text` run, every frame, even on
     /// a warm repaint where `shape`/`glyphs` are already cached — this closes that
-    /// last per-run font parse.
+    /// last per-run font parse. Bounded by [`V_METRICS_CACHE_CAP`] (its `px-bits`
+    /// key dimension is unbounded), cleared on overflow like the other caches.
     v_metrics_cache: RefCell<FxHashMap<(FaceId, u32), (f32, f32)>>,
     /// Reused scratch for `shape`'s face segmentation, so the per-run
     /// `(FaceId, String)` buffer (and its `String` allocations) is recycled
@@ -1287,7 +1293,11 @@ impl FontStore {
                 })
             })
             .unwrap_or((px * 0.8, -px * 0.2));
-        self.v_metrics_cache.borrow_mut().insert(key, metrics);
+        let mut cache = self.v_metrics_cache.borrow_mut();
+        if cache.len() >= V_METRICS_CACHE_CAP && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, metrics);
         metrics
     }
 
@@ -2177,6 +2187,23 @@ mod tests {
         assert!(
             len <= EMBOLDEN_CACHE_CAP,
             "embolden cache must clear on overflow, got {len} > {EMBOLDEN_CACHE_CAP}"
+        );
+        assert!(len >= 1, "it keeps caching after the clear");
+    }
+
+    #[test]
+    fn v_metrics_cache_clears_when_it_exceeds_its_cap() {
+        let d = RasterDrawer::new_headless(1.0);
+        let id = d.fonts.resolve_face(&FontFamily::System, 400).unwrap();
+        // Distinct sizes are distinct `(face, px-bits)` keys; drive one past the
+        // cap so the clear-on-overflow guard fires.
+        for i in 0..=(V_METRICS_CACHE_CAP as u32) {
+            let _ = d.fonts.v_metrics(Some(id), 8.0 + i as f32 * 0.5);
+        }
+        let len = d.fonts.v_metrics_cache.borrow().len();
+        assert!(
+            len <= V_METRICS_CACHE_CAP,
+            "v_metrics cache must clear on overflow, got {len} > {V_METRICS_CACHE_CAP}"
         );
         assert!(len >= 1, "it keeps caching after the clear");
     }

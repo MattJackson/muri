@@ -155,8 +155,15 @@ impl FromStr for Accelerator {
                 "shift" => mods |= Modifiers::SHIFT,
                 "ctrl" | "control" => mods |= Modifiers::CONTROL,
                 "alt" | "option" => mods |= Modifiers::ALT,
-                "super" | "cmd" | "command" | "meta" | "win" | "cmdorctrl" | "commandorcontrol" => {
-                    mods |= Modifiers::SUPER
+                "super" | "cmd" | "command" | "meta" | "win" => mods |= Modifiers::SUPER,
+                // muda maps `CmdOrCtrl` to Cmd (`Super`) on macOS and Control
+                // elsewhere; mirror that through the platform seam.
+                "cmdorctrl" | "commandorcontrol" => {
+                    mods |= if crate::platform::PRIMARY_MOD_IS_SUPER {
+                        Modifiers::SUPER
+                    } else {
+                        Modifiers::CONTROL
+                    }
                 }
                 _ => key = Some(Code::from_str(part)?),
             }
@@ -184,8 +191,23 @@ mod tests {
     #[test]
     fn parse_cmd_or_ctrl_s() {
         let acc: Accelerator = "CmdOrCtrl+S".parse().unwrap();
-        assert!(acc.mods.contains(Modifiers::SUPER));
+        // muda resolves `CmdOrCtrl` to Cmd (`Super`) on macOS, Control elsewhere.
+        let expected = if crate::platform::PRIMARY_MOD_IS_SUPER {
+            Modifiers::SUPER
+        } else {
+            Modifiers::CONTROL
+        };
+        assert!(acc.mods.contains(expected));
         assert_eq!(acc.key, Code::KeyS);
+    }
+
+    #[test]
+    fn parse_three_modifiers_combine() {
+        let acc: Accelerator = "Ctrl+Shift+Alt+KeyK".parse().unwrap();
+        assert!(acc.mods.contains(Modifiers::CONTROL));
+        assert!(acc.mods.contains(Modifiers::SHIFT));
+        assert!(acc.mods.contains(Modifiers::ALT));
+        assert_eq!(acc.key, Code::KeyK);
     }
 
     #[test]

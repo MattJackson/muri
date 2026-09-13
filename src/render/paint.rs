@@ -38,6 +38,10 @@ struct MeasureKey {
     // Tracking is part of the key: a tracked and untracked measurement of the same
     // text have different widths and must not collide (#42).
     spacing_bits: u32,
+    // Optical size is part of the key: `measure_text` shapes at `font.optical_size`
+    // (#77), which instances a variable face at a different `opsz` master with
+    // different advances, so two otherwise-identical fonts measure differently.
+    opsz_bits: u32,
 }
 
 /// The `(tag, name)` family discriminant of a [`Font`], borrowed (no allocation):
@@ -61,6 +65,7 @@ impl MeasureKey {
             size_bits: font.size.to_bits(),
             weight: font.weight.ot_weight(),
             spacing_bits: font.letter_spacing.to_bits(),
+            opsz_bits: font.optical_size.map(f32::to_bits).unwrap_or(0),
         }
     }
 
@@ -75,6 +80,7 @@ impl MeasureKey {
             && self.size_bits == font.size.to_bits()
             && self.weight == font.weight.ot_weight()
             && self.spacing_bits == font.letter_spacing.to_bits()
+            && self.opsz_bits == font.optical_size.map(f32::to_bits).unwrap_or(0)
     }
 }
 
@@ -90,6 +96,10 @@ fn measure_key_hash(text: &str, font: &Font) -> u64 {
     font.size.to_bits().hash(&mut h);
     font.weight.ot_weight().hash(&mut h);
     font.letter_spacing.to_bits().hash(&mut h);
+    font.optical_size
+        .map(f32::to_bits)
+        .unwrap_or(0)
+        .hash(&mut h);
     h.finish()
 }
 

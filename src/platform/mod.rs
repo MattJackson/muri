@@ -299,6 +299,18 @@ pub fn current() -> PlatformImpl {
     PlatformImpl::new()
 }
 
+/// Whether the platform's primary command modifier is `Super`/`Cmd` (macOS) or
+/// `Control` (Windows/Linux). muda's `CmdOrCtrl`/`CommandOrControl` accelerator
+/// strings resolve through this so the compat shim matches muda's own
+/// platform-dependent mapping — the `cfg` lives here, at the one seam ADR-0002
+/// allows, so `src/compat/` needs no `target_os` branch of its own. Only the
+/// `muda-compat` accelerator parser reads it, so it is gated to that feature.
+#[cfg(all(target_os = "macos", feature = "muda-compat"))]
+pub(crate) const PRIMARY_MOD_IS_SUPER: bool = true;
+/// See the macOS arm above.
+#[cfg(all(not(target_os = "macos"), feature = "muda-compat"))]
+pub(crate) const PRIMARY_MOD_IS_SUPER: bool = false;
+
 /// The one-shot install-report channel a backend fires the moment it has
 /// attempted the OS tray install, *before* entering its blocking message pump,
 /// so the spawning thread learns the real install result synchronously instead

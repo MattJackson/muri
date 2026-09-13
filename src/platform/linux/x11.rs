@@ -22,8 +22,8 @@
 
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, GrabMode, GrabStatus,
-    ImageFormat, ImageOrder, PropMode, Screen, Visualtype, WindowClass,
+    AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, GrabMode, ImageFormat,
+    ImageOrder, PropMode, Screen, Visualtype, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -250,9 +250,10 @@ impl<'conn, 'cb> Session<'conn, 'cb> {
             GrabMode::ASYNC,
             GrabMode::ASYNC,
         ) {
-            if let Ok(reply) = cookie.reply() {
-                let _ = reply.status == GrabStatus::SUCCESS;
-            }
+            // Keyboard grab is best-effort: a WM may already hold it, and the
+            // popup still works via the pointer grab above. Consume the reply so
+            // the request isn't left unhandled; nothing to act on if it failed.
+            let _ = cookie.reply();
         }
         self.conn
             .flush()

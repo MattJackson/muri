@@ -1717,8 +1717,10 @@ impl AppState {
                 .tray
                 .commands
                 .lock()
+                // Recover the queue even if a poster panicked and poisoned the
+                // lock: dropping pending commands would silently wedge the tray.
                 .map(|mut q| std::mem::take(&mut *q))
-                .unwrap_or_default();
+                .unwrap_or_else(|e| std::mem::take(&mut *e.into_inner()));
             if events.is_empty() && commands.is_empty() {
                 break;
             }

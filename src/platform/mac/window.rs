@@ -1,8 +1,10 @@
 //! Native panel construction and the AppKit responder subclasses.
 //!
 //! Each popup/flyout is a borderless, non-activating [`NSPanel`] (spec 20 §2),
-//! floating + `becomesKeyOnlyIfNeeded` so it can take keyboard focus **without
-//! deactivating the user's foreground app**. Its content view is the layer-backed
+//! floating + `becomesKeyOnlyIfNeeded` so the panel itself takes keyboard focus
+//! without stealing it. (`open_popup` still activates muri's own app so it can
+//! own the pointer cursor while the menu is open, #78.) Its content view is the
+//! layer-backed
 //! [`MuriView`] hosted directly on the transparent panel, for BOTH appearances
 //! (#79/#82): muri paints its own semi-transparent fill rather than using an OS
 //! material, which reads greyer than a native `NSMenu` in light and dark alike.

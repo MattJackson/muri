@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.9] - 2026-09-13
+
+### Fixed (code audit)
+
+- **Measure cache ignored optical size.** `measure_text` shapes at
+  `font.optical_size` (#77), which instances a variable face at a different
+  `opsz` master with different advances, but the measure cache keyed only
+  `(text, family, size, weight, tracking)` — two items differing solely in
+  `.with_optical_size(...)` collided and one got the other's width. `opsz` is now
+  part of both the hash and the verified key.
+- **`CmdOrCtrl`/`CommandOrControl` accelerators always mapped to `Super`.** They
+  now follow muda's platform mapping — `Super` (Cmd) on macOS, `Control` on
+  Windows/Linux — via a single primary-modifier constant at the platform seam
+  (ADR-0002 compliant; no `cfg(target_os)` in `src/compat/`).
+- **Tray command queue could be silently dropped on a poisoned lock.** If a
+  poster thread panicked while holding `Tray::commands`, the drain's
+  `unwrap_or_default()` discarded all pending commands and wedged the tray; it now
+  recovers the queue via `PoisonError::into_inner()` (macOS + Windows).
+
+### Internal
+
+- `v_metrics_cache` is now bounded by `V_METRICS_CACHE_CAP` with clear-on-overflow
+  (its `px-bits` key dimension is unbounded), matching the other keyed caches.
+- Removed a dead `let _ = reply.status == GrabStatus::SUCCESS;` no-op in the X11
+  keyboard grab; the grab is best-effort and the reply is now simply consumed.
+- Doc fixes: reconciled `TrayIconEvent::emit`'s "called by" comment with its
+  not-yet-wired state, and the `window` module's foreground-activation note after
+  the #78 activation change.
+
 ## [0.13.8] - 2026-09-13
 
 ### Fixed / Diagnostics (#78)

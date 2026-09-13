@@ -249,8 +249,9 @@ impl TrayIconEvent {
         }
     }
 
-    /// Project a tray-icon event onto the global channel + handler. Called by the
-    /// platform backend on macOS/Windows (never on Linux).
+    /// Project a tray-icon event onto the global channel + handler. Intended for
+    /// the macOS/Windows tray backends (never Linux) once they surface icon-level
+    /// pointer events.
     // Not yet called by any backend — the tray backends don't surface icon-level
     // pointer events into this channel yet (see the type-level doc). Kept + tested
     // so the channel plumbing is ready to wire; `allow(dead_code)` until then.
