@@ -982,9 +982,27 @@ impl PopupSession<'_> {
         // stationary open where no tracking event fires). muri is an Accessory app
         // (no Dock/Cmd-Tab), and the popup dismisses on resign, so focus returns to
         // the user's app on close.
-        NSApplication::sharedApplication(self.mtm).activate();
+        let app = NSApplication::sharedApplication(self.mtm);
+        // Forcing variant (#78): the zero-arg `activate()` "activate if appropriate"
+        // no-ops for a background Accessory app, leaving `isActive == false` so the
+        // cursor never transfers. `activateIgnoringOtherApps:` forces it.
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
         if let Some(popup) = self.popup.as_ref() {
             popup.panel.makeKeyAndOrderFront(None);
+        }
+        // Diagnostic (#78): report whether activation actually took, so a live
+        // capture says which escalation is needed if the arrow still doesn't show.
+        if std::env::var_os("MURI_DEBUG_CURSOR").is_some() {
+            let key = self
+                .popup
+                .as_ref()
+                .map(|p| p.panel.isKeyWindow())
+                .unwrap_or(false);
+            eprintln!(
+                "MURI_CURSOR open_popup app_active={} panel_key={key}",
+                app.isActive()
+            );
         }
         // Assert the arrow for the WHOLE popup session at show-time (#70/#78): on a
         // stationary open no tracking event fires, so `mouseEntered:`/

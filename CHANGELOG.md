@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-09-13
+
+### Fixed / Diagnostics (#78)
+
+- The zero-arg `NSApplication::activate()` used in 0.13.7 no-ops for a background
+  Accessory app, so `isActive` stayed `false` and the cursor never transferred
+  (still I-beam). Escalated to the forcing `activateIgnoringOtherApps(true)`.
+- `MURI_DEBUG_CURSOR` now logs `app_active` + `panel_key` right after
+  activation in `open_popup`, so a live capture shows whether activation actually
+  took (and thus whether a further escalation — dropping `NonactivatingPanel` or a
+  temporary `Regular` activation policy — is needed).
+
 ## [0.13.7] - 2026-09-13
 
 ### Fixed
