@@ -77,7 +77,7 @@ crossbeam-channel = "0.5"
 # pure, portable set of node/tree types; the muri `a11y` tree maps straight onto
 # it, and consumers feed the resulting `TreeUpdate` to `accesskit_macos` /
 # `accesskit_windows` (which bridge to NSAccessibility / UIA).
-accesskit = { version = "0.17", optional = true }
+accesskit = { version = "0.25", optional = true }
 
 # macOS backend: the live tray icon (NSStatusItem via objc2) and the
 # winit/softbuffer popup window the scene drawer paints into. Gated to macOS

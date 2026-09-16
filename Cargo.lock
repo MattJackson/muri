@@ -9,12 +9,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3d3b8f9bae46a948369bc4a03e815d4ed6d616bd00de4051133a5019dc31c5a"
 
 [[package]]
+name = "accesskit"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "438a7081a65b95c668db56591a4fef9bc5dad275f448bd6223fc6949d823db38"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
 name = "accesskit_consumer"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f47983a1084940ba9a39c077a8c63e55c619388be5476ac04c804cfbd1e63459"
 dependencies = [
- "accesskit",
+ "accesskit 0.17.1",
  "hashbrown 0.15.5",
  "immutable-chunkmap",
 ]
@@ -25,7 +34,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7329821f3bd1101e03a7d2e03bd339e3ac0dc64c70b4c9f9ae1949e3ba8dece1"
 dependencies = [
- "accesskit",
+ "accesskit 0.17.1",
  "accesskit_consumer",
  "hashbrown 0.15.5",
  "objc2 0.5.2",
@@ -39,7 +48,7 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24fcd5d23d70670992b823e735e859374d694a3d12bfd8dd32bd3bd8bedb5d81"
 dependencies = [
- "accesskit",
+ "accesskit 0.17.1",
  "accesskit_consumer",
  "hashbrown 0.15.5",
  "paste",
@@ -679,7 +688,7 @@ dependencies = [
 name = "muri"
 version = "0.10.4"
 dependencies = [
- "accesskit",
+ "accesskit 0.25.0",
  "accesskit_macos",
  "accesskit_windows",
  "block2 0.6.2",
