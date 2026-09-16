@@ -36,7 +36,7 @@ targets = ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linu
 # used internally, now direct so `tiny-skia`'s own crates drop out of the tree).
 # All permissive-licensed; carries no windowing/GUI dependency, so the offscreen
 # render + snapshot test runs anywhere.
-png = "0.17"
+png = "0.18"
 
 # Text stack — the deep engines used *directly* (ADR-0001), with muri owning the
 # thin shaping-glue + font-fallback layer in `src/render/mod.rs`:
