@@ -136,7 +136,7 @@ windows-sys = { version = "0.59", features = [
 # over UI Automation. 0.24 pairs with accesskit 0.17; it re-exports its own
 # `windows`-crate `HWND`, which never crosses the `Platform` seam. Mirrors how
 # `accesskit_macos` is wired on the macOS target.
-accesskit_windows = { version = "0.24", optional = true }
+accesskit_windows = { version = "0.35", optional = true }
 
 # Linux backend (M5): the native-menu fallback (spec 22 §2, Path 1). Both crates
 # are **pure Rust** — `ksni` speaks StatusNotifierItem / `com.canonical.dbusmenu`
