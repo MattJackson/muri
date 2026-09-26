@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-09-26
+
+### Fixed
+
+- **Random glyphs in regular-weight text rendered bold.** swash's
+  `ScaleContext` keeps its normalized variation coords across `builder()` calls,
+  and `ScalerBuilder::variations()` only overwrites the axes it is given. On a
+  variable face (the live macOS `SFNS.ttf`), a regular glyph — scaled with only
+  `opsz` set — that was first rasterized right after a bold glyph (`wght=700`)
+  inherited the stale bold `wght` coord and came out bold, and the glyph cache
+  then pinned that bold bitmap under the regular key. The result was individual
+  letters of regular rows drawn bold, varying by what had been drawn before.
+  `render_glyph` now resets the coords (`normalized_coords([])`) before applying
+  the glyph's own variations, so every glyph is instanced at exactly its own
+  axes. Regression test: `regular_glyph_does_not_inherit_prior_bold_variation_coords`.
+
 ## [0.14.6] - 2026-09-13
 
 ### Fixed

@@ -1389,7 +1389,17 @@ impl FontStore {
         // scaled at the SAME masters the shaper positioned the advances at (#63 for
         // wght, #77 for opsz). Both are no-ops for a face lacking the axis. A
         // single `variations([...])` call carries whichever apply.
-        let mut builder = ctx.builder(font).size(px).hint(false);
+        //
+        // Reset the coords first: swash's `ScaleContext` keeps them across
+        // `builder()` calls and `variations()` only overwrites the axes it names,
+        // so a regular glyph (no `wght`) scaled after a bold one inherited the
+        // stale bold `wght` and rendered bold — random bold letters in regular
+        // rows, pinned there by the glyph cache.
+        let mut builder = ctx
+            .builder(font)
+            .size(px)
+            .hint(false)
+            .normalized_coords(std::iter::empty::<swash::NormalizedCoord>());
         let mut vars: Vec<(&str, f32)> = Vec::with_capacity(2);
         if let Embolden::Variable(w) = emb {
             vars.push(("wght", w as f32));
@@ -2579,6 +2589,55 @@ mod tests {
             "#81: SF variable bold must ink heavier than regular EVEN with optical \
              sizing (wght+opsz combined); bold {bold} vs regular {reg}"
         );
+    }
+
+    /// Mixed-weight glyphs regression: swash's `ScaleContext` keeps its normalized
+    /// variation coords across `builder()` calls, and `variations()` only
+    /// overwrites the axes it is given. A regular glyph (only `opsz` set) scaled
+    /// right after a bold one (`wght=700`) therefore inherited the stale bold
+    /// `wght` coord and rasterized bold — then the glyph cache pinned that bold
+    /// bitmap under the regular key, so random letters of regular rows drew bold.
+    /// A regular glyph must rasterize identically whether or not a bold glyph was
+    /// scaled first. Skipped where `SFNS.ttf` is absent (the hermetic fixtures
+    /// carry no `gvar` deltas, so their instancing doesn't move ink).
+    #[test]
+    fn regular_glyph_does_not_inherit_prior_bold_variation_coords() {
+        const SFNS: &str = "/System/Library/Fonts/SFNS.ttf";
+        if !std::path::Path::new(SFNS).exists() {
+            return;
+        }
+        let drawer = || {
+            let mut db = Database::new();
+            let ids = db.load_font_source(DbSource::File(std::path::PathBuf::from(SFNS)));
+            let fid = *ids.first()?;
+            let family = db.face(fid)?.families.first()?.0.clone();
+            Some(RasterDrawer::from_parts(2.0, db, Some(family)))
+        };
+        let (Some(fresh), Some(dirty)) = (drawer(), drawer()) else {
+            return;
+        };
+        let px = 26.0;
+        let masks = |d: &RasterDrawer, text: &str, ot: u16, opsz: Option<f32>| -> Vec<Vec<u8>> {
+            let face = d.fonts.resolve_face(&FontFamily::System, ot).unwrap();
+            let line = d.fonts.shape(text, Some(face), ot, px, 0.0, opsz);
+            line.glyphs
+                .iter()
+                .filter_map(|g| d.fonts.glyph_image(g.face, g.glyph, px, g.emb, g.opsz))
+                .map(|img| img.data.clone())
+                .collect()
+        };
+        // Both the live optical-size path (`opsz` only) and the no-variation path.
+        for opsz in [Some(13.0), None] {
+            let clean = masks(&fresh, "dev", 400, opsz);
+            // Scale a bold glyph on the other drawer first, dirtying its context.
+            masks(&dirty, "x", 700, Some(13.0));
+            let after_bold = masks(&dirty, "dev", 400, opsz);
+            assert!(
+                clean == after_bold,
+                "regular glyphs rasterized after a bold glyph must not inherit its \
+                 wght coord (opsz={opsz:?})"
+            );
+        }
     }
 
     /// #65 (hermetic): a single registered **variable** face with a `wght` axis
