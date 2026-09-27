@@ -441,6 +441,33 @@ impl RasterDrawer {
         Self::from_parts(scale, db, ui_family)
     }
 
+    /// Create a raster drawer for a **forced** OS look whose text is shaped
+    /// **only** against repo-vendored fonts: the `bundled-fonts` substitute for
+    /// `family` (Inter / Selawik / Cantarell) plus the vendored DejaVu Sans faces
+    /// as the glyph fallback, with system font discovery disabled entirely.
+    ///
+    /// The forced-look counterpart of [`new_headless`](Self::new_headless), and
+    /// the determinism seam the cross-OS forced-look goldens need.
+    /// [`with_forced_theme`](Self::with_forced_theme) deliberately prefers the
+    /// *real* target font when the host has it installed (Helvetica Neue on a
+    /// macOS host, Segoe UI on Windows) and resolves missing glyphs from host
+    /// fonts, so its output legitimately differs per runner; this drawer
+    /// resolves identically everywhere.
+    ///
+    /// Intentionally **not** used by the live backends or the public
+    /// `render_menu_to_*` entry points — only by headless golden suites.
+    #[cfg(feature = "bundled-fonts")]
+    pub fn new_headless_forced(scale: f32, family: OsFamily) -> Self {
+        const DEJAVU_SANS: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans.ttf");
+        const DEJAVU_SANS_BOLD: &[u8] = include_bytes!("../../tests/fonts/DejaVuSans-Bold.ttf");
+
+        let mut db = Database::new();
+        let ui_family = bundled_fonts::register_substitute(&mut db, family);
+        db.load_font_data(DEJAVU_SANS.to_vec());
+        db.load_font_data(DEJAVU_SANS_BOLD.to_vec());
+        Self::from_parts(scale, db, ui_family)
+    }
+
     fn from_parts(scale: f32, db: Database, ui_family: Option<String>) -> Self {
         Self::from_shared(scale, Rc::new(FontStore::new(db, ui_family)))
     }

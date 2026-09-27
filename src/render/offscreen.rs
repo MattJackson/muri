@@ -16,8 +16,10 @@
 //! [`Windows`](crate::ThemeSource::Windows) /
 //! [`Gnome`](crate::ThemeSource::Gnome)) to render any OS's OEM menu look from
 //! any host; with `bundled-fonts` on, this also renders in a vendored OSS
-//! substitute when the real target font is absent, for byte-identical output
-//! across runners.
+//! substitute when the real target font is absent. A host that *has* the real
+//! target font (or other fonts supplying fallback glyphs) renders with them, so
+//! output is not byte-identical across runners — for cross-runner goldens, draw
+//! through [`RasterDrawer::new_headless_forced`] instead.
 //!
 //! The render is deterministic and headless: it does not query the live system
 //! appearance/accent, so an `Auto` theme mode resolves to the *light* look

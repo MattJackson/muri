@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RasterDrawer::new_headless_forced(scale, OsFamily)` (`bundled-fonts`): a
+  forced-OS-look drawer shaped only against the vendored substitute plus the
+  vendored DejaVu fallback, with system font discovery disabled — the
+  forced-look counterpart of `new_headless`.
+
+### Fixed
+
+- **Cross-OS headless goldens were red on Linux/Windows CI.** They rendered via
+  `render_menu_to_png`, whose forced-theme font resolution rightly prefers a
+  real target font installed on the host (Helvetica Neue on macOS, Segoe UI on
+  Windows) and resolves missing glyphs from host fonts — so one committed PNG
+  could never match every runner. The goldens now draw through
+  `new_headless_forced` and are re-baked; the offscreen module docs no longer
+  claim byte-identical cross-runner output for the public path.
+
 ## [0.14.7] - 2026-09-26
 
 ### Fixed
