@@ -50,11 +50,6 @@ rationale and the single source of truth are in [`00-overview.md` §4](00-overvi
 7. **`a11y` on by default** — `accesskit` is a default dependency.
 8. **N-level nested submenus** in 1.0 — the flyout is a stack, not one level.
 
-## Build handoff
-
-New to this repo and implementing 1.0? Start at [`HANDOFF.md`](HANDOFF.md) — the
-build-team kickoff, the decision log (the "why"), and the current state of the code.
-
 ## Incremental adoption (usable before 1.0)
 
 1.0 is the *full* target, but early embedders (usagio first) adopt muri **as soon
