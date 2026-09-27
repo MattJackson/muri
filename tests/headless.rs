@@ -124,17 +124,11 @@ fn forced_os_looks_differ() {
 #[cfg(feature = "bundled-fonts")]
 mod goldens {
     use super::*;
-    use muri::render::paint::render_menu;
-    use muri::render::RasterDrawer;
-    use support::assert_golden_png;
+    use support::{assert_golden_png, render_forced_hermetic_png};
 
     fn assert_forced_golden(source: ThemeSource, name: &str) {
-        let family = source.forced_family().expect("a forced OS source");
-        let opts = forced(source);
-        let theme = opts.theme.resolve(family, false);
-        let mut drawer = RasterDrawer::new_headless_forced(2.0, family);
-        let _ = render_menu(&mut drawer, &sample_menu(), &theme, &opts, None);
-        assert_golden_png(name, &drawer.encode_png());
+        let png = render_forced_hermetic_png(&sample_menu(), &forced(source), 2.0);
+        assert_golden_png(name, &png);
     }
 
     #[test]

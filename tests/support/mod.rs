@@ -187,3 +187,26 @@ fn write_actual(name: &str, fb: &Framebuffer) {
     let path = dir.join(format!("{name}-actual.png"));
     let _ = std::fs::write(&path, fb.encode_png());
 }
+
+/// Render `menu` under a forced OS look through the **hermetic**
+/// [`RasterDrawer::new_headless_forced`](muri::render::RasterDrawer::new_headless_forced)
+/// (vendored substitute + DejaVu fallback only, no host fonts) and return the
+/// PNG — the cross-runner-stable counterpart of `muri::render_menu_to_png`,
+/// whose forced looks legitimately pick up host-installed fonts. Used by the
+/// forced-look goldens so a committed PNG matches on macOS, Windows, and Linux.
+#[cfg(feature = "bundled-fonts")]
+#[allow(dead_code)]
+pub fn render_forced_hermetic_png(
+    menu: &muri::Menu,
+    options: &muri::MenuOptions,
+    scale: f32,
+) -> Vec<u8> {
+    let family = options
+        .theme
+        .forced_family()
+        .expect("render_forced_hermetic_png needs a forced OS theme source");
+    let theme = options.theme.resolve(family, false);
+    let mut drawer = muri::render::RasterDrawer::new_headless_forced(scale, family);
+    let _ = muri::render::paint::render_menu(&mut drawer, menu, &theme, options, None);
+    drawer.encode_png()
+}

@@ -1,7 +1,8 @@
-//! OEM-fidelity golden regressions for the 0.10.8 macOS fixes, driven entirely
-//! through the shipped display-free public API ([`muri::render_menu_to_png`] /
-//! [`muri::render_menu_to_rgba`], issue #59) so the device-inspected fixes
-//! become automated pixel regressions:
+//! OEM-fidelity golden regressions for the 0.10.8 macOS fixes. The ink/differ
+//! assertions drive the shipped display-free public API
+//! ([`muri::render_menu_to_rgba`], issue #59); the pixel goldens render the same
+//! menus through the hermetic forced-look drawer (see below), so the
+//! device-inspected fixes become automated pixel regressions:
 //!
 //! * **#56 — bold system face.** A row whose segment carries `Weight::Bold`
 //!   must actually paint a heavier face than the same text at `Weight::Regular`.
@@ -16,9 +17,11 @@
 //!   tracking would move these pixels and fail the golden.
 //!
 //! Pixel goldens are gated on the `bundled-fonts` feature (like the goldens in
-//! `tests/headless.rs`): only then do the forced-theme faces resolve to the
-//! vendored OFL substitutes (Inter / Selawik / Cantarell), making the PNGs
-//! byte-stable across macOS/Windows/Linux runners. The non-golden assertions
+//! `tests/headless.rs`) and drawn through `RasterDrawer::new_headless_forced`,
+//! which shapes against ONLY the vendored OFL substitutes (Inter / Selawik /
+//! Cantarell) plus a DejaVu fallback, making the PNGs byte-stable across
+//! macOS/Windows/Linux runners. (The public `render_menu_to_png` prefers a
+//! host-installed target font, so it is not cross-runner stable.) The non-golden assertions
 //! (ink heavier, bold changes pixels, per-OS looks distinct) run on every
 //! feature set — they need no reproducible font, only a real bold face.
 //!
@@ -190,19 +193,20 @@ fn forced_os_looks_differ_dark() {
     assert_ne!(mac, gnome, "macOS and GNOME dark forced looks must differ");
 }
 
-/// Pixel goldens, host-reproducible only under `bundled-fonts` (the vendored
-/// OFL substitutes). See the module docs.
+/// Pixel goldens, host-reproducible only under `bundled-fonts` and only through
+/// the hermetic `render_forced_hermetic_png` (vendored OFL substitutes + DejaVu
+/// fallback, no host fonts) — the public `render_menu_to_png` rightly picks up a
+/// host-installed target font, so its pixels differ per runner.
 #[cfg(feature = "bundled-fonts")]
 mod goldens {
     use super::*;
-    use muri::render_menu_to_png;
-    use support::assert_golden_png;
+    use support::{assert_golden_png, render_forced_hermetic_png};
 
     /// #56: committed golden for the regular render of [`weighted_menu`]; its
     /// bold sibling below must differ from it.
     #[test]
     fn oem_bold_regular_golden() {
-        let png = render_menu_to_png(
+        let png = render_forced_hermetic_png(
             &weighted_menu(Weight::Regular),
             &forced(ThemeSource::MacOs(ThemeMode::Light)),
             2.0,
@@ -214,7 +218,7 @@ mod goldens {
     /// the bold face would repaint the lighter face and fail this golden.
     #[test]
     fn oem_bold_bold_golden() {
-        let png = render_menu_to_png(
+        let png = render_forced_hermetic_png(
             &weighted_menu(Weight::Bold),
             &forced(ThemeSource::MacOs(ThemeMode::Light)),
             2.0,
@@ -227,7 +231,7 @@ mod goldens {
     /// moves these pixels.
     #[test]
     fn oem_macos_metrics_golden() {
-        let png = render_menu_to_png(
+        let png = render_forced_hermetic_png(
             &metrics_menu(),
             &forced(ThemeSource::MacOs(ThemeMode::Light)),
             2.0,
@@ -236,7 +240,7 @@ mod goldens {
     }
 
     fn assert_forced_golden(source: ThemeSource, name: &str) {
-        let png = render_menu_to_png(&metrics_menu(), &forced(source), 2.0);
+        let png = render_forced_hermetic_png(&metrics_menu(), &forced(source), 2.0);
         assert_golden_png(name, &png);
     }
 

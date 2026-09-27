@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Cross-OS headless goldens were red on Linux/Windows CI.** They rendered via
+- **Cross-OS forced-look goldens (`tests/headless.rs`, `tests/oem_fidelity.rs`)
+  were red on Linux/Windows CI.** They rendered via
   `render_menu_to_png`, whose forced-theme font resolution rightly prefers a
   real target font installed on the host (Helvetica Neue on macOS, Segoe UI on
   Windows) and resolves missing glyphs from host fonts — so one committed PNG
-  could never match every runner. The goldens now draw through
+  could never match every runner (the `oem_fidelity` failures were masked
+  behind the earlier-failing `headless` binary). The goldens now draw through
   `new_headless_forced` and are re-baked; the offscreen module docs no longer
   claim byte-identical cross-runner output for the public path.
 
