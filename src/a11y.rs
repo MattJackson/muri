@@ -369,7 +369,7 @@ pub fn announcement(node: &AxNode) -> String {
 #[cfg(feature = "a11y")]
 pub mod accesskit {
     use super::{AxNode, AxRole, AxTree};
-    use accesskit::{HasPopup, Node, NodeId, Role, Toggled, Tree, TreeUpdate};
+    use accesskit::{HasPopup, Node, NodeId, Role, Toggled, TreeId, TreeInfo, TreeUpdate};
 
     fn role_of(node: &AxNode) -> Role {
         match node.role {
@@ -422,7 +422,8 @@ pub mod accesskit {
         let root = NodeId(tree.root.id.0);
         TreeUpdate {
             nodes,
-            tree: Some(Tree::new(root)),
+            tree: Some(TreeInfo::new(root)),
+            tree_id: TreeId::ROOT,
             focus: focus.map(|f| NodeId(f.0)).unwrap_or(root),
         }
     }

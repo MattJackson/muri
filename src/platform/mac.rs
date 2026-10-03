@@ -1289,7 +1289,7 @@ impl PopupSession<'_> {
 
     #[cfg(feature = "a11y")]
     fn on_a11y_action(&mut self, kind: WindowKind, request: accesskit::ActionRequest) {
-        let target = crate::a11y::AxId(request.target.0);
+        let target = crate::a11y::AxId(request.target_node.0);
         let level = kind.menu_level();
         let Some(menu) = self.menu_at_level(level) else {
             return;
