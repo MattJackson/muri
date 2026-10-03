@@ -327,7 +327,7 @@ const MAX_ICON_PIXELS: u64 = 2048 * 2048;
 /// IHDR-derived [`png::OutputInfo`] *before* any pixel buffer is allocated,
 /// so oversized/malicious inputs are rejected cheaply.
 pub fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let mut decoder = png::Decoder::new(bytes);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
     let hdr = reader.info();
@@ -338,7 +338,7 @@ pub fn decode_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     if (hw as u64) * (hh as u64) > MAX_ICON_PIXELS {
         return None;
     }
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
     let count = (w as usize).checked_mul(h as usize)?;
