@@ -58,7 +58,7 @@ fontdb = { version = "0.24", default-features = false, features = [
     "fs",
     "memmap",
 ] }
-harfrust = "0.13"
+harfrust = "0.15"
 swash = "0.2"
 # Pure-Rust AA path-fill rasterizer (already in the tree via `swash`), used by
 # `src/render/svg.rs` to rasterize the restricted `Icon::Svg` subset — no
